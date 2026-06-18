@@ -518,27 +518,36 @@ struct WorktreeTerminalManagerTests {
     #expect(manager.hasUnseenNotifications(for: worktree.id) == false)
   }
 
-  /// Regression for #385: dismissing already-read notifications doesn't flip
-  /// `hasUnseenNotification` (it's already false), but the row projection must
-  /// still re-emit so the toolbar popover (which reads the mirrored
-  /// `notifications` array) clears. Previously gated on the flag flip, so the
-  /// popover kept showing dismissed notifications.
-  @Test func dismissAllReadNotificationsStillEmitsProjection() {
+  @Test func dismissAllNotificationsRefreshesRowWhenAllAlreadyRead() {
+    // Repro of the stuck-toolbar-bell bug: dismissing already-read notifications
+    // flips no unseen flag, so the gated indicator emit used to skip the row
+    // projection refresh and the bell stayed showing them. Dismiss must signal
+    // unconditionally so the sidebar row's `notifications` array (which the bell
+    // group-existence check reads) clears.
     let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
-    let worktree = makeWorktree()
-    let state = manager.state(for: worktree)
-    state.setNotificationsForTesting([
-      makeNotification(isRead: true),
-      makeNotification(isRead: true),
-    ])
-    #expect(state.hasUnseenNotification == false)
+    let state = manager.state(for: makeWorktree())
+    state.setNotificationsForTesting([makeNotification(isRead: true), makeNotification(isRead: true)])
+    var indicatorEmits = 0
+    state.onNotificationIndicatorChanged = { indicatorEmits += 1 }
 
-    var emitCount = 0
-    state.onNotificationIndicatorChanged = { emitCount += 1 }
     state.dismissAllNotifications()
 
     #expect(state.notifications.isEmpty)
-    #expect(emitCount == 1)
+    #expect(indicatorEmits == 1)
+  }
+
+  @Test func dismissReadNotificationRefreshesRow() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let state = manager.state(for: makeWorktree())
+    let read = makeNotification(isRead: true)
+    state.setNotificationsForTesting([read])
+    var indicatorEmits = 0
+    state.onNotificationIndicatorChanged = { indicatorEmits += 1 }
+
+    state.dismissNotification(read.id)
+
+    #expect(state.notifications.isEmpty)
+    #expect(indicatorEmits == 1)
   }
 
   // MARK: - Per-surface unseen flag
@@ -1262,7 +1271,7 @@ struct WorktreeTerminalManagerTests {
       return
     }
 
-    guard let tabs = manager.listTabs(worktreeID: worktree.id) else {
+    guard let tabs = manager.listTabs(worktreeID: worktree.id.rawValue) else {
       Issue.record("Expected non-nil tabs result")
       return
     }
@@ -1292,7 +1301,7 @@ struct WorktreeTerminalManagerTests {
       return
     }
 
-    guard let surfaces = manager.listSurfaces(worktreeID: worktree.id, tabID: tabID.rawValue.uuidString) else {
+    guard let surfaces = manager.listSurfaces(worktreeID: worktree.id.rawValue, tabID: tabID.rawValue.uuidString) else {
       Issue.record("Expected non-nil surfaces result")
       return
     }
@@ -1316,7 +1325,7 @@ struct WorktreeTerminalManagerTests {
     let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
     let worktree = makeWorktree()
     _ = manager.state(for: worktree)
-    #expect(manager.listSurfaces(worktreeID: worktree.id, tabID: "not-a-uuid") == nil)
+    #expect(manager.listSurfaces(worktreeID: worktree.id.rawValue, tabID: "not-a-uuid") == nil)
   }
 
   @Test func latestUnreadNotificationPicksNewestAcrossWorktrees() {
@@ -1679,7 +1688,7 @@ struct WorktreeTerminalManagerTests {
   private func makeWorktree(id: String = "/tmp/repo/wt-1") -> Worktree {
     let name = URL(fileURLWithPath: id).lastPathComponent
     return Worktree(
-      id: id,
+      id: WorktreeID(id),
       name: name,
       detail: "detail",
       workingDirectory: URL(fileURLWithPath: id),
