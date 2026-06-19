@@ -403,7 +403,7 @@ jobs:
         run: |
           set -euo pipefail
           DELTA_FILES=$(find build -name "*.delta" -type f | sort | tr '\n' ' ' || true)
-          python3 scripts/generate_release_checksums.py "$TAG" build/checksums.json build/supacode.dmg build/supacode.app.zip build/appcast.xml $DELTA_FILES
+          python3 scripts/generate_release_checksums.py "$TAG" build/checksums.json build/supacode.dmg build/supacode.app.zip $DELTA_FILES
       - name: Create release and upload assets
         run: |
           set -euo pipefail
@@ -446,7 +446,7 @@ jobs:
           done
 
           DELTA_FILES=$(find build -name "*.delta" -type f 2>/dev/null | tr '\n' ' ' || true)
-          python3 scripts/generate_release_checksums.py tip build/checksums.json build/supacode.dmg build/supacode.app.zip build/appcast.xml $DELTA_FILES
+          python3 scripts/generate_release_checksums.py tip build/checksums.json build/supacode.dmg build/supacode.app.zip $DELTA_FILES
           gh release upload tip build/supacode.dmg build/supacode.app.zip build/appcast.xml build/checksums.json $DELTA_FILES --clobber -R "${{ github.repository }}"
 
           # Store current build as history asset for future delta generation
