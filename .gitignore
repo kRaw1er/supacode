@@ -73,5 +73,6 @@ fastlane/test_output
 .env
 .DS_Store
 
-# AI workflow planning artifacts (compound-engineering /plan) — kept local, not committed
+# AI workflow artifacts (compound-engineering /plan, /brainstorm) — kept local, not committed
 docs/plans/
+docs/brainstorms/
