@@ -7,10 +7,18 @@ import SwiftUI
 /// `dismantleNSView`. `revision` is bumped by the reducer on every live re-diff;
 /// a change in `revision`/`mode` (not row identity) is what triggers a re-apply
 /// with scroll preserved.
+///
+/// Phase 4: the coordinator also drives syntax highlighting — on every viewport
+/// change it asks the background `SyntaxHighlighter` actor for the visible lines'
+/// spans and applies them progressively (plain first, colors when they arrive).
 struct DiffViewerRepresentable: NSViewRepresentable {
   let rows: [DiffRow]
   let mode: DiffViewMode
   let revision: Int
+  /// New-side path of the file (used to resolve the grammar + read source).
+  var filePath: String = ""
+  /// Worktree root the file lives under; `nil` disables highlighting.
+  var workingDirectory: URL?
   var onExpandGap: (Int) -> Void = { _ in }
   /// Handed the controller once so Phase 5 can reach the geometry API.
   var onController: (DiffTableController) -> Void = { _ in }
@@ -24,14 +32,16 @@ struct DiffViewerRepresentable: NSViewRepresentable {
       coordinator.onExpandGap(anchor)
     }
     controller.onVisibleRangeChanged = { [coordinator = context.coordinator] range in
-      coordinator.onVisibleRangeChanged(range)
+      coordinator.handleVisibleRange(range)
     }
     context.coordinator.onExpandGap = onExpandGap
     context.coordinator.onVisibleRangeChanged = onVisibleRangeChanged
+    context.coordinator.update(filePath: filePath, workingDirectory: workingDirectory, revision: revision)
     onController(controller)
     controller.apply(rows: rows, mode: mode, scrollPreserving: false)
     context.coordinator.lastRevision = revision
     context.coordinator.lastMode = mode
+    context.coordinator.scheduleHighlight()
     return controller.scrollView
   }
 
@@ -41,11 +51,13 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     context.coordinator.onExpandGap = onExpandGap
     context.coordinator.onVisibleRangeChanged = onVisibleRangeChanged
     let coordinator = context.coordinator
+    coordinator.update(filePath: filePath, workingDirectory: workingDirectory, revision: revision)
     guard coordinator.lastRevision != revision || coordinator.lastMode != mode else { return }
     let preserve = coordinator.lastMode == mode  // mode switch reloads; re-diff preserves scroll.
     coordinator.lastRevision = revision
     coordinator.lastMode = mode
     coordinator.controller.apply(rows: rows, mode: mode, scrollPreserving: preserve)
+    coordinator.scheduleHighlight()
   }
 
   static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
@@ -60,7 +72,110 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     var lastRevision = -1
     var lastMode: DiffViewMode = .unified
 
+    private let highlighter = SyntaxHighlighter.shared
+    private var highlightTask: Task<Void, Never>?
+    private var filePath = ""
+    private var workingDirectory: URL?
+    private var revision = -1
+    /// Source cache keyed by (path, revision) so a scroll doesn't re-read the file.
+    private var cachedSourceKey: String?
+    private var cachedSource: String?
+    private var cachedHash = 0
+
+    func update(filePath: String, workingDirectory: URL?, revision: Int) {
+      if self.filePath != filePath {
+        let previous = self.filePath
+        if !previous.isEmpty {
+          Task { [highlighter] in await highlighter.cancel(fileKey: previous) }
+        }
+      }
+      self.filePath = filePath
+      self.workingDirectory = workingDirectory
+      self.revision = revision
+    }
+
+    /// Forwards the viewport change to SwiftUI and (re)issues a highlight request
+    /// scoped to the freshly visible lines.
+    func handleVisibleRange(_ range: Range<Int>) {
+      onVisibleRangeChanged(range)
+      scheduleHighlight()
+    }
+
+    /// Kicks off a viewport-scoped, cancellable highlight pass. Renders plain when
+    /// there is no bundled grammar / no working directory / nothing visible.
+    func scheduleHighlight() {
+      highlightTask?.cancel()
+      guard
+        let workingDirectory,
+        let grammar = GrammarRegistry.grammar(forPath: filePath),
+        let visibleLines = controller.visibleNewLineRange()
+      else {
+        controller.clearSyntax()
+        return
+      }
+
+      let cacheKey = "\(revision)\u{1}\(filePath)"
+      let reusedSource = cachedSourceKey == cacheKey ? cachedSource : nil
+      let fileURL = workingDirectory.appending(path: filePath)
+      let language = grammar.language
+      let queryName = grammar.queryName
+      let fileKey = filePath
+      let highlighter = highlighter
+      let controller = controller
+
+      highlightTask = Task { [weak self] in
+        let source: String
+        let hash: Int
+        if let reusedSource {
+          source = reusedSource
+          hash = self?.cachedHash ?? reusedSource.hashValue
+        } else {
+          guard let loaded = await Self.readSource(fileURL) else { return }
+          source = loaded
+          hash = loaded.hashValue
+          await MainActor.run { self?.cache(source: source, hash: hash, key: cacheKey) }
+        }
+        if Task.isCancelled { return }
+        let lineHighlights = await highlighter.highlights(
+          SyntaxHighlighter.Request(
+            fileKey: fileKey,
+            contentHash: hash,
+            source: source,
+            language: language,
+            queryName: queryName,
+            visibleLines: visibleLines
+          )
+        )
+        if Task.isCancelled { return }
+        var byLine: [Int: [SyntaxHighlighter.HighlightSpan]] = [:]
+        for lineHighlight in lineHighlights {
+          byLine[lineHighlight.line] = lineHighlight.spans
+        }
+        await MainActor.run { controller.applySyntax(byLine) }
+      }
+    }
+
+    private func cache(source: String, hash: Int, key: String) {
+      cachedSource = source
+      cachedHash = hash
+      cachedSourceKey = key
+    }
+
+    /// Reads + UTF-8-decodes the file off the main actor. `nil` on any failure
+    /// (missing file / binary / non-UTF8) ⇒ the row stays plain.
+    private static func readSource(_ url: URL) async -> String? {
+      await Task.detached(priority: .userInitiated) {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return String(data: data, encoding: .utf8)
+      }.value
+    }
+
     func tearDown() {
+      highlightTask?.cancel()
+      let fileKey = filePath
+      if !fileKey.isEmpty {
+        Task { [highlighter] in await highlighter.cancel(fileKey: fileKey) }
+      }
       controller.onExpandGap = nil
       controller.onVisibleRangeChanged = nil
     }

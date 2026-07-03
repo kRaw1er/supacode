@@ -10,6 +10,15 @@ let zmxBinaryPath: Path = ".build/zmx/bin/zmx"
 let embedGhosttyResourcesScriptPath: Path = "scripts/embed-ghostty-resources.sh"
 let embedRuntimeAssetsScriptPath: Path = "scripts/embed-runtime-assets.sh"
 
+// Prebuilt static C xcframework of tree-sitter grammars (Phase 4). Mirrors the
+// GhosttyKit `.foreignBuild` below so Xcode links the static lib + embeds its
+// modulemap directly, sidestepping SPM's C-target modulemap path.
+let grammarsXCFrameworkPath: Path = ".build/treesitter/TreeSitterGrammars.xcframework"
+let grammarsBuildScriptPath: Path = "scripts/build-treesitter-grammars.sh"
+let grammarsFingerprintInputScript = """
+"${SRCROOT}/\(grammarsBuildScriptPath.pathString)" --print-fingerprint
+"""
+
 func shellScript(_ path: Path) -> String {
   "\"${SRCROOT}/\(path.pathString)\""
 }
@@ -26,6 +35,10 @@ let appResources: ResourceFileElements = [
   // linking exception (permits the closed-source combination) whose notice
   // clause is mandatory — see supacode/Licenses/libgit2-COPYING.txt.
   "supacode/Licenses",
+  // Bundled tree-sitter `highlights.scm` queries (Phase 4), loaded at runtime by
+  // language name. A folder reference preserves the per-language subdirectory
+  // structure the syntax highlighter looks up. Populated by the grammars build.
+  .folderReference(path: "supacode/Resources/TreeSitterQueries"),
 ]
 
 let appBuildableFolders: [BuildableFolder] = [
@@ -42,6 +55,7 @@ let appDependencies: [TargetDependency] = [
   .target(name: "SupacodeSettingsShared"),
   .target(name: "SupacodeSettingsFeature"),
   .target(name: "GhosttyKit"),
+  .target(name: "TreeSitterGrammars"),
   .target(name: "supacode-cli"),
   .external(name: "ComposableArchitecture"),
   .external(name: "CustomDump"),
@@ -54,12 +68,14 @@ let appDependencies: [TargetDependency] = [
   .external(name: "Sentry"),
   .external(name: "Sharing"),
   .external(name: "Sparkle"),
+  .external(name: "SwiftTreeSitter"),
 ]
 
 let testDependencies: [TargetDependency] = [
   .target(name: "GhosttyKit"),
   .target(name: "SupacodeSettingsShared"),
   .target(name: "SupacodeSettingsFeature"),
+  .target(name: "TreeSitterGrammars"),
   .target(name: "supacode"),
   .external(name: "Clocks"),
   .external(name: "ComposableArchitecture"),
@@ -71,6 +87,7 @@ let testDependencies: [TargetDependency] = [
   .external(name: "libgit2"),
   .external(name: "OrderedCollections"),
   .external(name: "Sharing"),
+  .external(name: "SwiftTreeSitter"),
 ]
 
 let embedGhosttyResourcesInputPaths: [FileListGlob] = [
@@ -156,6 +173,20 @@ let project = Project(
         .script(ghosttyFingerprintInputScript),
       ],
       output: .xcframework(path: ghosttyXCFrameworkPath, linking: .static)
+    ),
+    .foreignBuild(
+      name: "TreeSitterGrammars",
+      destinations: .macOS,
+      script: """
+        "${SRCROOT}/\(grammarsBuildScriptPath.pathString)"
+        """,
+      inputs: [
+        .file("mise.toml"),
+        .file(grammarsBuildScriptPath),
+        .file("scripts/treesitter-grammars.lock"),
+        .script(grammarsFingerprintInputScript),
+      ],
+      output: .xcframework(path: grammarsXCFrameworkPath, linking: .static)
     ),
     .target(
       name: "SupacodeSettingsShared",

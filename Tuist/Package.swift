@@ -21,6 +21,13 @@ let package = Package(
     .package(url: "https://github.com/PostHog/posthog-ios.git", exact: "3.38.0"),
     .package(url: "https://github.com/getsentry/sentry-cocoa/", exact: "9.3.0"),
     .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.0-beta.2"),
+    // Syntax highlighting for the diff viewer (Phase 4). Pulls its transitive
+    // `tree-sitter` runtime (0.23.x, amalgamation `sources: ["src/lib.c"]`), which
+    // resolves cleanly under the project's pinned Xcode 26.3 / Swift 6.2 — the
+    // tree-sitter#5523 "TSLanguage not in scope" break is a 26.4+/6.3 regression,
+    // so no vendored-amalgamation override is required here. Grammars themselves
+    // ship as a prebuilt static xcframework (see `TreeSitterGrammars` in Project.swift).
+    .package(url: "https://github.com/ChimeHQ/SwiftTreeSitter", exact: "0.9.0"),
     .package(url: "https://github.com/pointfreeco/swift-case-paths", exact: "1.7.2"),
     .package(url: "https://github.com/pointfreeco/swift-clocks", exact: "1.0.6"),
     .package(url: "https://github.com/pointfreeco/swift-composable-architecture", exact: "1.23.1"),

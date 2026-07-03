@@ -92,6 +92,8 @@ struct DiffTabContentView: View {
           rows: document.rows,
           mode: store.diffViewMode,
           revision: document.revision,
+          filePath: filePath,
+          workingDirectory: store.selectedWorktree?.workingDirectory,
           onExpandGap: { anchor in store.send(.expandGap(path: filePath, anchor: anchor)) }
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -56,6 +56,22 @@ struct DiffMetrics {
   }
 }
 
+/// Composited styling for one row's code content: a syntax **foreground** pass
+/// (system-color theme) and an independent intra-line word-diff **background**
+/// pass. The two never collide — one sets `foregroundColor`, the other
+/// `backgroundColor`. Only the new side carries syntax spans (highlighted from
+/// the working-tree file); deletions show pre-image text and stay plain.
+struct RowHighlight: Equatable {
+  /// Line-relative UTF-16 syntax spans for the new-side content.
+  var syntaxNew: [SyntaxHighlighter.HighlightSpan] = []
+  /// Word-diff spans on the old (deletion / split-left) content.
+  var wordOld: [WordDiff.Span] = []
+  /// Word-diff spans on the new (addition / split-right) content.
+  var wordNew: [WordDiff.Span] = []
+
+  static let empty = RowHighlight()
+}
+
 /// A single recycled cell that renders any `DiffRow` kind by custom drawing —
 /// no retained `NSTextField` per row. One reuse identifier feeds the whole
 /// table, so recycling is a single pool. Split rows draw both panes inside the
@@ -65,15 +81,31 @@ final class DiffCellView: NSView {
   private var metrics = DiffMetrics.resolve()
   private var mode: DiffViewMode = .unified
   private var onExpand: ((Int) -> Void)?
+  private var highlight: RowHighlight = .empty
 
   override var isFlipped: Bool { true }
   override var wantsDefaultClipping: Bool { true }
 
-  func configure(row: DiffRow, metrics: DiffMetrics, mode: DiffViewMode, onExpand: @escaping (Int) -> Void) {
+  func configure(
+    row: DiffRow,
+    metrics: DiffMetrics,
+    mode: DiffViewMode,
+    highlight: RowHighlight,
+    onExpand: @escaping (Int) -> Void
+  ) {
     self.row = row
     self.metrics = metrics
     self.mode = mode
+    self.highlight = highlight
     self.onExpand = onExpand
+    needsDisplay = true
+  }
+
+  /// Re-applies just the composited styling (after async highlights arrive)
+  /// without rebuilding the row, then redraws.
+  func updateHighlight(_ highlight: RowHighlight) {
+    guard self.highlight != highlight else { return }
+    self.highlight = highlight
     needsDisplay = true
   }
 
@@ -117,7 +149,7 @@ final class DiffCellView: NSView {
     let newRect = NSRect(x: metrics.gutterWidth, y: 0, width: metrics.gutterWidth, height: bounds.height)
     drawGutterNumber(line.oldLineNumber, in: oldRect)
     drawGutterNumber(line.newLineNumber, in: newRect)
-    drawCode(line.content, startX: metrics.gutterWidth * 2 + metrics.hPad, color: .labelColor)
+    drawStyledCode(line, startX: metrics.gutterWidth * 2 + metrics.hPad, maxX: nil)
   }
 
   private func drawSplitLine(old: DiffLine?, new: DiffLine?) {
@@ -143,11 +175,11 @@ final class DiffCellView: NSView {
     }
     let gutter = NSRect(x: rect.minX, y: 0, width: metrics.gutterWidth, height: bounds.height)
     drawGutterNumber(isOld ? line.oldLineNumber : line.newLineNumber, in: gutter)
-    drawCode(
-      line.content,
+    drawStyledCode(
+      line,
       startX: rect.minX + metrics.gutterWidth + metrics.hPad,
-      color: .labelColor,
-      maxX: rect.maxX
+      maxX: rect.maxX,
+      isOldPane: isOld
     )
   }
 
@@ -209,6 +241,58 @@ final class DiffCellView: NSView {
     guard width > 0 else { return }
     let rect = NSRect(x: startX, y: metrics.vPad, width: width, height: bounds.height - 2 * metrics.vPad)
     (text as NSString).draw(in: rect, withAttributes: attributes)
+  }
+
+  /// Draws one code line compositing the two independent styling passes: syntax
+  /// foreground (new side only) and word-diff background. Deletions / old panes
+  /// carry the pre-image text, so they get no syntax spans.
+  private func drawStyledCode(_ line: DiffLine, startX: CGFloat, maxX: CGFloat?, isOldPane: Bool = false) {
+    let isOldSide = isOldPane || (mode == .unified && line.origin == .deletion)
+    let foreground = isOldSide ? [] : highlight.syntaxNew
+    var background: [WordDiff.Span] = []
+    var backgroundColor: NSColor?
+    if line.origin == .addition || line.origin == .deletion {
+      background = isOldSide ? highlight.wordOld : highlight.wordNew
+      backgroundColor = Self.wordBackground(isOld: isOldSide)
+    }
+    // Fast path: nothing to composite ⇒ plain draw (avoids attributed-string cost).
+    guard !foreground.isEmpty || (backgroundColor != nil && !background.isEmpty) else {
+      drawCode(line.content, startX: startX, color: .labelColor, maxX: maxX)
+      return
+    }
+    let width = (maxX ?? bounds.width) - startX - metrics.hPad
+    guard width > 0 else { return }
+    let attributed = NSMutableAttributedString(
+      string: line.content,
+      attributes: [.font: metrics.font, .foregroundColor: NSColor.labelColor]
+    )
+    let length = attributed.length
+    for span in foreground {
+      guard let range = Self.clampedRange(span.range, length: length) else { continue }
+      attributed.addAttribute(.foregroundColor, value: HighlightTheme.color(for: span.capture), range: range)
+    }
+    if let backgroundColor {
+      for span in background {
+        guard let range = Self.clampedRange(span.range, length: length) else { continue }
+        attributed.addAttribute(.backgroundColor, value: backgroundColor, range: range)
+      }
+    }
+    let rect = NSRect(x: startX, y: metrics.vPad, width: width, height: bounds.height - 2 * metrics.vPad)
+    attributed.draw(in: rect)
+  }
+
+  /// Clamps a UTF-16 span to the drawn string's length, dropping empty/invalid
+  /// spans (guards against a span computed from a since-changed content hash).
+  private static func clampedRange(_ span: Range<Int>, length: Int) -> NSRange? {
+    let lower = max(0, span.lowerBound)
+    let upper = min(length, span.upperBound)
+    guard upper > lower else { return nil }
+    return NSRange(location: lower, length: upper - lower)
+  }
+
+  /// Stronger-than-row word-diff background tint (system colors, light + dark).
+  private static func wordBackground(isOld: Bool) -> NSColor {
+    isOld ? NSColor.systemRed.withAlphaComponent(0.35) : NSColor.systemGreen.withAlphaComponent(0.35)
   }
 
   // MARK: - Static content

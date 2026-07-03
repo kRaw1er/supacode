@@ -19,6 +19,17 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
   private nonisolated(unsafe) var boundsObserver: NSObjectProtocol?
   private var lastVisibleRange: Range<Int> = 0..<0
 
+  /// Syntax foreground spans keyed by new-side (1-based) line number. Populated
+  /// asynchronously by the highlighter; a re-diff or mode switch keeps it (spans
+  /// are re-requested for the fresh viewport).
+  private var syntaxByLine: [Int: [SyntaxHighlighter.HighlightSpan]] = [:]
+  /// Unified word-diff pairing: for a change `.line` row, the counterpart side's
+  /// content. Recomputed on every `apply` (cheap — it stores references, no diff).
+  private var counterpartByRow: [Int: String] = [:]
+  /// Lazily computed, per-row word-diff spans (keyed by row index; cleared on
+  /// `apply`). Computed on demand as rows become visible.
+  private var wordDiffCache: [Int: (old: [WordDiff.Span], new: [WordDiff.Span])] = [:]
+
   /// Fired on every clip-view bounds change so Phase 4 can style only the rows
   /// currently on screen.
   var onVisibleRangeChanged: ((Range<Int>) -> Void)?
@@ -94,6 +105,7 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     if modeChanged || rows.isEmpty || new.isEmpty || abs(new.count - rows.count) > churnThreshold {
       let anchor = scrollPreserving ? captureAnchor() : nil
       rows = new
+      rebuildStylingCaches()
       metrics = metrics.withGutter(for: new)
       tableView.reloadData()
       tableView.layoutSubtreeIfNeeded()
@@ -113,6 +125,7 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
       tableView.insertRows(at: IndexSet(integer: offset), withAnimation: [])
     }
     rows = new
+    rebuildStylingCaches()
     tableView.endUpdates()
     // Gutter width may have grown/shrunk with new line numbers; redraw survivors.
     tableView.enumerateAvailableRowViews { rowView, _ in
@@ -149,10 +162,142 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
         created.identifier = Self.cellIdentifier
         return created
       }()
-    cell.configure(row: rows[row], metrics: metrics, mode: mode) { [weak self] anchor in
+    cell.configure(row: rows[row], metrics: metrics, mode: mode, highlight: rowHighlight(at: row)) {
+      [weak self] anchor in
       self?.onExpandGap?(anchor)
     }
     return cell
+  }
+
+  // MARK: - Syntax highlighting + word-diff styling (Phase 4)
+
+  /// Replaces the syntax spans and re-styles the on-screen rows in place (no row
+  /// rebuild) so highlights hydrate progressively as the actor returns them.
+  func applySyntax(_ byLine: [Int: [SyntaxHighlighter.HighlightSpan]]) {
+    syntaxByLine = byLine
+    refreshVisibleHighlights()
+  }
+
+  /// Clears syntax spans (e.g. unbundled / capped file) and repaints plain.
+  func clearSyntax() {
+    guard !syntaxByLine.isEmpty else { return }
+    syntaxByLine = [:]
+    refreshVisibleHighlights()
+  }
+
+  /// The span of new-side (1-based) line numbers currently on screen, for scoping
+  /// the highlighter's query to the viewport. `nil` when no line-bearing rows show.
+  func visibleNewLineRange() -> Range<Int>? {
+    var lower = Int.max
+    var upper = Int.min
+    for index in visibleRowRange() where rows.indices.contains(index) {
+      guard let line = Self.newLineNumber(of: rows[index]) else { continue }
+      lower = min(lower, line)
+      upper = max(upper, line)
+    }
+    guard lower <= upper else { return nil }
+    return lower..<(upper + 1)
+  }
+
+  private func refreshVisibleHighlights() {
+    for index in visibleRowRange() where rows.indices.contains(index) {
+      guard let cell = tableView.view(atColumn: 0, row: index, makeIfNecessary: false) as? DiffCellView
+      else { continue }
+      cell.updateHighlight(rowHighlight(at: index))
+    }
+  }
+
+  private func rowHighlight(at index: Int) -> RowHighlight {
+    guard rows.indices.contains(index) else { return .empty }
+    switch rows[index] {
+    case .line(let line):
+      var highlight = RowHighlight()
+      if line.origin != .deletion, let number = line.newLineNumber {
+        highlight.syntaxNew = syntaxByLine[number] ?? []
+      }
+      let wordDiff = wordDiff(at: index)
+      highlight.wordOld = wordDiff.old
+      highlight.wordNew = wordDiff.new
+      return highlight
+    case .splitLine(_, _, let new):
+      var highlight = RowHighlight()
+      if let new, let number = new.newLineNumber {
+        highlight.syntaxNew = syntaxByLine[number] ?? []
+      }
+      let wordDiff = wordDiff(at: index)
+      highlight.wordOld = wordDiff.old
+      highlight.wordNew = wordDiff.new
+      return highlight
+    default:
+      return .empty
+    }
+  }
+
+  /// Lazily computes (and caches) the word-diff spans for one row.
+  private func wordDiff(at index: Int) -> (old: [WordDiff.Span], new: [WordDiff.Span]) {
+    if let cached = wordDiffCache[index] { return cached }
+    var result: (old: [WordDiff.Span], new: [WordDiff.Span]) = ([], [])
+    switch rows[index] {
+    case .line(let line):
+      if line.origin == .deletion, let counterpart = counterpartByRow[index] {
+        result.old = WordDiff.diff(old: line.content, new: counterpart).oldSpans
+      } else if line.origin == .addition, let counterpart = counterpartByRow[index] {
+        result.new = WordDiff.diff(old: counterpart, new: line.content).newSpans
+      }
+    case .splitLine(_, let old, let new):
+      if let old, let new, Self.isChange(old), Self.isChange(new) {
+        let difference = WordDiff.diff(old: old.content, new: new.content)
+        result.old = difference.oldSpans
+        result.new = difference.newSpans
+      }
+    default:
+      break
+    }
+    wordDiffCache[index] = result
+    return result
+  }
+
+  /// Rebuilds the per-row styling caches after `rows` changes: recomputes the
+  /// unified deletion↔addition pairing and drops stale word-diff results. Syntax
+  /// spans are kept (re-requested for the new viewport by the driver).
+  private func rebuildStylingCaches() {
+    wordDiffCache.removeAll(keepingCapacity: true)
+    counterpartByRow.removeAll(keepingCapacity: true)
+    var index = 0
+    while index < rows.count {
+      guard case .line(let line) = rows[index], line.origin == .deletion else {
+        index += 1
+        continue
+      }
+      var deletions: [Int] = []
+      while index < rows.count, case .line(let candidate) = rows[index], candidate.origin == .deletion {
+        deletions.append(index)
+        index += 1
+      }
+      var additions: [Int] = []
+      while index < rows.count, case .line(let candidate) = rows[index], candidate.origin == .addition {
+        additions.append(index)
+        index += 1
+      }
+      for pair in 0..<min(deletions.count, additions.count) {
+        guard case .line(let deletion) = rows[deletions[pair]], case .line(let addition) = rows[additions[pair]]
+        else { continue }
+        counterpartByRow[deletions[pair]] = addition.content
+        counterpartByRow[additions[pair]] = deletion.content
+      }
+    }
+  }
+
+  private static func isChange(_ line: DiffLine) -> Bool {
+    line.origin == .addition || line.origin == .deletion
+  }
+
+  private static func newLineNumber(of row: DiffRow) -> Int? {
+    switch row {
+    case .line(let line): return line.newLineNumber
+    case .splitLine(_, _, let new): return new?.newLineNumber
+    default: return nil
+    }
   }
 
   // MARK: - Geometry API (Phase 5)
