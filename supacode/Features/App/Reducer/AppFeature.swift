@@ -44,6 +44,8 @@ struct AppFeature {
     /// tab-bar views scope through `\.terminals` (narrow) instead of the full
     /// app store. Mirrors sidebar's `RepositoriesFeature` ownership pattern.
     var terminals = TerminalsFeature.State()
+    /// Right inspector panel: changed-files list for the selected worktree.
+    var review = DiffReviewFeature.State()
     var openActionSelection: OpenWorktreeAction = .finder
     var repoScripts: [ScriptDefinition] = []
     var globalScripts: [ScriptDefinition] = []
@@ -156,6 +158,7 @@ struct AppFeature {
   enum Action {
     case agentPresence(AgentPresenceFeature.Action)
     case terminals(TerminalsFeature.Action)
+    case review(DiffReviewFeature.Action)
     case appLaunched
     case scenePhaseChanged(ScenePhase)
     case repositories(RepositoriesFeature.Action)
@@ -329,7 +332,8 @@ struct AppFeature {
             },
             .run { _ in
               await worktreeInfoWatcher.send(.setSelectedWorktreeID(nil))
-            }
+            },
+            .send(.review(.worktreeSelected(nil)))
           )
         }
         let rootURL = worktree.repositoryRootURL
@@ -346,7 +350,8 @@ struct AppFeature {
           .run { _ in
             await worktreeInfoWatcher.send(.setSelectedWorktreeID(worktree.id))
           },
-          .send(.worktreeSettingsLoaded(settings, worktreeID: worktreeID))
+          .send(.worktreeSettingsLoaded(settings, worktreeID: worktreeID)),
+          .send(.review(.worktreeSelected(worktree)))
         )
 
       case .repositories(.delegate(.worktreeCreated(let worktree))):
@@ -1092,7 +1097,16 @@ struct AppFeature {
         state.pendingDeeplinks.removeAll()
         return .merge(pending.map { .send(.deeplink($0)) })
 
+      case .repositories(.worktreeInfoEvent(.filesChanged(let worktreeID))):
+        // Core runs before the `Scope`s, so `RepositoriesFeature` still consumes
+        // this event for the aggregate +N/-N stat. We only add the review fan-out
+        // (debounced re-load of the changed-files list) on top.
+        return .send(.review(.filesChanged(worktreeID)))
+
       case .repositories:
+        return .none
+
+      case .review:
         return .none
 
       case .settings:
@@ -1381,6 +1395,9 @@ struct AppFeature {
     core
     Scope(state: \.terminals, action: \.terminals) {
       TerminalsFeature()
+    }
+    Scope(state: \.review, action: \.review) {
+      DiffReviewFeature()
     }
     Scope(state: \.agentPresence, action: \.agentPresence) {
       AgentPresenceFeature()

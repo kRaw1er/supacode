@@ -323,6 +323,10 @@ final class WorktreeTerminalManager {
         // another worktree. The rare validated-then-vanished race falls to the
         // ack watchdog instead.
       }
+    case .openDiffTab(let worktree, let filePath):
+      // Phase 0's `openDiffTab` dedupes by path and skips surface allocation, so
+      // a re-click focuses the existing tab instead of creating a duplicate.
+      _ = state(for: worktree).openDiffTab(filePath: filePath)
     default:
       return false
     }
@@ -345,7 +349,7 @@ final class WorktreeTerminalManager {
       .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .performBindingAction,
       .performBindingActionOnSurface, .selectTab, .selectTabAtIndex, .focusSurface, .splitSurface,
       .destroyTab, .destroySurface, .prune, .setNotificationsEnabled, .setSelectedWorktreeID,
-      .refreshTabBarVisibility, .beginTabRename:
+      .refreshTabBarVisibility, .beginTabRename, .openDiffTab:
       return false
     }
     return true
@@ -361,7 +365,7 @@ final class WorktreeTerminalManager {
       .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .startSearch, .searchSelection,
       .navigateSearchNext, .navigateSearchPrevious, .endSearch, .selectTab, .selectTabAtIndex,
       .focusSurface, .splitSurface, .destroyTab, .destroySurface, .prune, .setNotificationsEnabled,
-      .setSelectedWorktreeID, .refreshTabBarVisibility, .beginTabRename:
+      .setSelectedWorktreeID, .refreshTabBarVisibility, .beginTabRename, .openDiffTab:
       return false
     }
     return true
@@ -390,7 +394,7 @@ final class WorktreeTerminalManager {
       .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .performBindingAction,
       .performBindingActionOnSurface, .startSearch, .searchSelection, .navigateSearchNext,
       .navigateSearchPrevious, .endSearch, .selectTab, .selectTabAtIndex, .focusSurface,
-      .splitSurface, .destroyTab, .destroySurface, .beginTabRename:
+      .splitSurface, .destroyTab, .destroySurface, .beginTabRename, .openDiffTab:
       assertionFailure("Unhandled terminal command reached management handler: \(command)")
     }
   }

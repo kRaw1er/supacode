@@ -14,6 +14,8 @@ struct WorktreeDetailView: View {
   @Bindable var store: StoreOf<AppFeature>
   let terminalManager: WorktreeTerminalManager
   @Shared(.appStorage("worktreeRowHideSubtitleOnMatch")) private var hideSubtitleOnMatch = true
+  // Global inspector visibility (per-worktree content flows through `\.review`).
+  @Shared(.appStorage("diffPanelVisible")) private var diffPanelVisible = false
   @Shared(.settingsFile) private var settingsFile: SettingsFile
   // Tracks the terminal-content window's fullscreen state for the open-menu toolbar
   // tint; the toolbar itself can't observe it (re-hosted in an accessory window).
@@ -85,6 +87,8 @@ struct WorktreeDetailView: View {
           toolbarState: toolbarState,
           terminalManager: terminalManager,
           isFullScreen: isToolbarFullScreen,
+          showsDiffToggle: selectedWorktree.host == nil && !selectedWorktree.isFolder,
+          onToggleDiffPanel: { $diffPanelVisible.withLock { $0.toggle() } },
           repositoriesStore: store.scope(state: \.repositories, action: \.repositories),
           onOpenWorktree: { action in
             store.send(.openWorktree(action))
@@ -113,6 +117,12 @@ struct WorktreeDetailView: View {
     // Observe fullscreen from the content (main terminal window), then feed it to the
     // toolbar tint above; toolbar content is re-hosted in fullscreen and can't see it.
     .windowFullScreenObserver(isFullScreen: $isToolbarFullScreen)
+    // Right inspector: changed-files list. Visibility is the global `@Shared`;
+    // content is per-worktree because `\.review` reflects the selected worktree.
+    .inspector(isPresented: Binding($diffPanelVisible)) {
+      ChangedFilesListView(store: store.scope(state: \.review, action: \.review))
+        .inspectorColumnWidth(min: 260, ideal: 320, max: 480)
+    }
     let hasRunningRunScript = state.hasRunningRunScript
     // Reveal in Finder is local-only; Open can target a remote worktree when the
     // resolved editor can express the host. `resolvedSelection` (nil when it
@@ -504,6 +514,9 @@ struct WorktreeDetailView: View {
     let toolbarState: WorktreeToolbarState
     let terminalManager: WorktreeTerminalManager
     let isFullScreen: Bool
+    // Hidden for folder / remote worktrees, which can't drive a local diff.
+    let showsDiffToggle: Bool
+    let onToggleDiffPanel: () -> Void
     let repositoriesStore: StoreOf<RepositoriesFeature>?
     let onOpenWorktree: (OpenWorktreeAction) -> Void
     let onOpenActionSelectionChanged: (OpenWorktreeAction) -> Void
@@ -567,6 +580,20 @@ struct WorktreeDetailView: View {
               onStop: { onStopScript(script) }
             )
           }
+        }
+        ToolbarSpacer(.fixed)
+      }
+
+      if showsDiffToggle {
+        ToolbarItem {
+          Button {
+            // Flips the view-layer `@Shared`; no `store.*` mutation from here.
+            onToggleDiffPanel()
+          } label: {
+            Label("Changes", systemImage: "plusminus.circle")
+          }
+          .help("Show Changes (\(WorktreeDetailView.resolveShortcutDisplay(for: AppShortcuts.toggleDiffPanel)))")
+          .keyboardShortcut("d", modifiers: [.command, .shift])
         }
         ToolbarSpacer(.fixed)
       }
@@ -1311,6 +1338,8 @@ private struct WorktreeToolbarPreview: View {
         toolbarState: toolbarState,
         terminalManager: WorktreeTerminalManager(runtime: GhosttyRuntime()),
         isFullScreen: false,
+        showsDiffToggle: true,
+        onToggleDiffPanel: {},
         repositoriesStore: nil,
         onOpenWorktree: { _ in },
         onOpenActionSelectionChanged: { _ in },
