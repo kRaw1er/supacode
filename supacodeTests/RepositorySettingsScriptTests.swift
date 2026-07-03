@@ -357,6 +357,25 @@ struct GlobalSettingsScriptsCodableTests {
     #expect(script.systemImage == "bolt.fill")
   }
 
+  @Test func decodeMissingMaxPinnedToolbarButtonsUsesDefault() throws {
+    let json = try baseGlobalSettingsJSON()
+    let settings = try JSONDecoder().decode(GlobalSettings.self, from: Data(json.utf8))
+    #expect(settings.maxPinnedToolbarButtons == GlobalSettings.default.maxPinnedToolbarButtons)
+  }
+
+  @Test func decodeClampsOutOfRangeMaxPinnedToolbarButtons() throws {
+    var dict = baseGlobalSettingsDict()
+    dict["maxPinnedToolbarButtons"] = 999
+    let high = try JSONDecoder().decode(
+      GlobalSettings.self, from: try JSONSerialization.data(withJSONObject: dict))
+    #expect(high.maxPinnedToolbarButtons == GlobalSettings.pinnedToolbarButtonRange.upperBound)
+
+    dict["maxPinnedToolbarButtons"] = 0
+    let low = try JSONDecoder().decode(
+      GlobalSettings.self, from: try JSONSerialization.data(withJSONObject: dict))
+    #expect(low.maxPinnedToolbarButtons == GlobalSettings.pinnedToolbarButtonRange.lowerBound)
+  }
+
   // MARK: - Helpers.
 
   private func baseGlobalSettingsDict() -> [String: Any] {

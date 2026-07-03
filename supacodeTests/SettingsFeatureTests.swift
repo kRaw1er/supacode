@@ -157,6 +157,25 @@ struct SettingsFeatureTests {
     #expect(settingsFile.global.globalScripts.first?.systemImage == "paperplane.fill")
   }
 
+  @Test(.dependencies) func changingMaxPinnedToolbarButtonsPersists() async {
+    var initialSettings = GlobalSettings.default
+    initialSettings.maxPinnedToolbarButtons = 4
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock { $0.global = initialSettings }
+
+    let store = TestStore(initialState: SettingsFeature.State(settings: initialSettings)) {
+      SettingsFeature()
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.binding(.set(\.maxPinnedToolbarButtons, 2))) {
+      $0.maxPinnedToolbarButtons = 2
+    }
+    await store.receive(\.delegate.settingsChanged)
+
+    #expect(settingsFile.global.maxPinnedToolbarButtons == 2)
+  }
+
   @Test(.dependencies) func setSystemNotificationsEnabledPersistsChanges() async {
     var initialSettings = GlobalSettings.default
     initialSettings.systemNotificationsEnabled = false

@@ -418,6 +418,8 @@ struct WorktreeDetailView: View {
     let repoScripts: [ScriptDefinition]
     let globalScripts: [ScriptDefinition]
     let runningScriptIDs: Set<UUID>
+    /// User-configured cap on how many pinned scripts render as toolbar buttons.
+    let maxPinnedToolbarButtons: Int
 
     var isFolder: Bool {
       if case .folder = kind { true } else { false }
@@ -473,15 +475,11 @@ struct WorktreeDetailView: View {
       allScripts.primaryScript
     }
 
-    /// Max pinned scripts rendered as individual toolbar buttons; extras stay
-    /// reachable in the ScriptMenu dropdown so the toolbar can't overcrowd.
-    static let maxPinnedToolbarButtons = 4
-
     /// Scripts pinned to the toolbar as one-click buttons, repo pins before
-    /// global pins (via `merged`), capped. Logic lives in the shared, tested
-    /// `[ScriptDefinition].pinnedToolbarScripts(limit:)` helper.
+    /// global pins (via `merged`), capped at the user's `maxPinnedToolbarButtons`.
+    /// Logic lives in the shared, tested `[ScriptDefinition].pinnedToolbarScripts(limit:)`.
     var pinnedScripts: [ScriptDefinition] {
-      allScripts.pinnedToolbarScripts(limit: Self.maxPinnedToolbarButtons)
+      allScripts.pinnedToolbarScripts(limit: maxPinnedToolbarButtons)
     }
 
     /// Whether any `.run`-kind script is currently running.
@@ -733,7 +731,8 @@ struct WorktreeDetailView: View {
       openActionSelection: state.openActionSelection,
       repoScripts: state.repoScripts,
       globalScripts: state.globalScripts,
-      runningScriptIDs: runningScriptIDs
+      runningScriptIDs: runningScriptIDs,
+      maxPinnedToolbarButtons: settingsFile.global.maxPinnedToolbarButtons
     )
   }
 
@@ -1298,6 +1297,7 @@ private struct WorktreeToolbarPreview: View {
       repoScripts: [ScriptDefinition(kind: .run, command: "npm run dev")],
       globalScripts: [],
       runningScriptIDs: [],
+      maxPinnedToolbarButtons: 4,
     )
   }
 

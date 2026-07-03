@@ -68,6 +68,7 @@ public struct SettingsFeature {
     public var autoDeleteArchivedWorktreesAfterDays: AutoDeletePeriod?
     public var shortcutOverrides: [AppShortcutID: AppShortcutOverride]
     public var globalScripts: [ScriptDefinition]
+    public var maxPinnedToolbarButtons: Int
     public var richAgentNotificationsEnabled: Bool
     public var agentPresenceBadgesEnabled: Bool
     public var autoUpdateAgentIntegrationsEnabled: Bool
@@ -116,6 +117,7 @@ public struct SettingsFeature {
       autoDeleteArchivedWorktreesAfterDays = settings.autoDeleteArchivedWorktreesAfterDays
       shortcutOverrides = settings.shortcutOverrides
       globalScripts = settings.globalScripts
+      maxPinnedToolbarButtons = settings.maxPinnedToolbarButtons
       richAgentNotificationsEnabled = settings.richAgentNotificationsEnabled
       agentPresenceBadgesEnabled = settings.agentPresenceBadgesEnabled
       autoUpdateAgentIntegrationsEnabled = settings.autoUpdateAgentIntegrationsEnabled
@@ -156,6 +158,7 @@ public struct SettingsFeature {
         autoDeleteArchivedWorktreesAfterDays: autoDeleteArchivedWorktreesAfterDays,
         shortcutOverrides: shortcutOverrides,
         globalScripts: globalScripts,
+        maxPinnedToolbarButtons: maxPinnedToolbarButtons,
         richAgentNotificationsEnabled: richAgentNotificationsEnabled,
         agentPresenceBadgesEnabled: agentPresenceBadgesEnabled,
         autoUpdateAgentIntegrationsEnabled: autoUpdateAgentIntegrationsEnabled,
@@ -293,6 +296,7 @@ public struct SettingsFeature {
         state.autoDeleteArchivedWorktreesAfterDays = normalizedSettings.autoDeleteArchivedWorktreesAfterDays
         state.shortcutOverrides = normalizedSettings.shortcutOverrides
         state.globalScripts = normalizedSettings.globalScripts
+        state.maxPinnedToolbarButtons = normalizedSettings.maxPinnedToolbarButtons
         state.richAgentNotificationsEnabled = normalizedSettings.richAgentNotificationsEnabled
         state.agentPresenceBadgesEnabled = normalizedSettings.agentPresenceBadgesEnabled
         state.autoUpdateAgentIntegrationsEnabled = normalizedSettings.autoUpdateAgentIntegrationsEnabled
