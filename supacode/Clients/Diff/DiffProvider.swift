@@ -14,6 +14,8 @@ nonisolated protocol DiffProvider: Sendable {
   func changedFiles(at worktreeURL: URL) async throws -> WorktreeDiff
 
   /// The full hunks/lines for one file, fetched on demand (typically on click).
-  /// Empty when the file is binary or large-file-capped.
-  func diff(for file: FileChange, at worktreeURL: URL) async throws -> [DiffHunk]
+  /// Empty when the file is binary or large-file-capped. `contextLines` maps to
+  /// libgit2's `context_lines` (3 = git default); the viewer raises it to
+  /// materialize an expanded gap.
+  func diff(for file: FileChange, at worktreeURL: URL, contextLines: UInt32) async throws -> [DiffHunk]
 }

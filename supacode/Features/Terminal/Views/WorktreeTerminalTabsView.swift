@@ -9,6 +9,9 @@ struct WorktreeTerminalTabsView: View {
   /// `TerminalTabFeature` stores via `\.terminalTabs[id:]` from here, so the
   /// tab-bar surface area stays bounded to terminal state.
   let terminalsStore: StoreOf<TerminalsFeature>
+  /// Scoped diff-review store: the `.diff` tab branch reads the per-file
+  /// `DiffDocument` from here (`openDiffs[path]`).
+  let reviewStore: StoreOf<DiffReviewFeature>
   let shouldRunSetupScript: Bool
   let forceAutoFocus: Bool
   let createTab: () -> Void
@@ -68,10 +71,9 @@ struct WorktreeTerminalTabsView: View {
               unfocusedSplitOverlay: unfocusedSplitOverlay
             )
           case .diff:
-            // Phase 3 replaces this placeholder with the diff viewer. The `.diff`
-            // branch never touches `TerminalSplitTreePane`, so `splitTree(for:)`
-            // is never reached for a diff tab.
-            DiffTabContentView(filePath: state.diffFilePath(for: tabId))
+            // The `.diff` branch never touches `TerminalSplitTreePane`, so
+            // `splitTree(for:)` is never reached for a diff tab.
+            DiffTabContentView(store: reviewStore, filePath: state.diffFilePath(for: tabId) ?? "")
           }
         }
       } else {

@@ -32,9 +32,9 @@ actor LibGit2DiffProvider: DiffProvider {
     return try Libgit2Diff.changedFiles(at: worktreeURL, caps: caps)
   }
 
-  func diff(for file: FileChange, at worktreeURL: URL) async throws -> [DiffHunk] {
+  func diff(for file: FileChange, at worktreeURL: URL, contextLines: UInt32 = 3) async throws -> [DiffHunk] {
     try await ensureIndexUnlocked(worktreeURL)
-    return try Libgit2Diff.hunks(for: file, at: worktreeURL, caps: caps)
+    return try Libgit2Diff.hunks(for: file, at: worktreeURL, caps: caps, contextLines: contextLines)
   }
 
   /// Replicates `GitClient.lineChanges`'s `.git/index.lock` guard verbatim —

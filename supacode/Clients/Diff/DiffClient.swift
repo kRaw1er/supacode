@@ -14,7 +14,9 @@ struct DiffClient: Sendable {
   /// Cheap changed-file list (status + counts + caps) for one worktree.
   var changedFiles: @Sendable (_ worktreeURL: URL) async throws -> WorktreeDiff
   /// Full hunks/lines for one file, on demand. Empty when binary / capped.
-  var diff: @Sendable (_ file: FileChange, _ worktreeURL: URL) async throws -> [DiffHunk]
+  /// `contextLines` sets libgit2's `context_lines` (default 3); the viewer
+  /// raises it to materialize an expanded inter-hunk gap.
+  var diff: @Sendable (_ file: FileChange, _ worktreeURL: URL, _ contextLines: UInt32) async throws -> [DiffHunk]
 }
 
 extension DiffClient: DependencyKey {
@@ -24,7 +26,7 @@ extension DiffClient: DependencyKey {
     let provider = LibGit2DiffProvider()
     return DiffClient(
       changedFiles: { try await provider.changedFiles(at: $0) },
-      diff: { try await provider.diff(for: $0, at: $1) }
+      diff: { try await provider.diff(for: $0, at: $1, contextLines: $2) }
     )
   }()
 
@@ -34,7 +36,7 @@ extension DiffClient: DependencyKey {
   static var testValue: DiffClient {
     DiffClient(
       changedFiles: { _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) },
-      diff: { _, _ in [] }
+      diff: { _, _, _ in [] }
     )
   }
 }

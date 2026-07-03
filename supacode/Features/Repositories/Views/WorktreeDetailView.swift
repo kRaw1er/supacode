@@ -262,6 +262,7 @@ struct WorktreeDetailView: View {
           worktree: selectedWorktree,
           manager: terminalManager,
           terminalsStore: store.scope(state: \.terminals, action: \.terminals),
+          reviewStore: store.scope(state: \.review, action: \.review),
           shouldRunSetupScript: shouldRunSetupScript,
           forceAutoFocus: shouldFocusTerminal,
           createTab: { store.send(.newTerminal) }

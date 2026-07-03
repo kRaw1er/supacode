@@ -281,4 +281,141 @@ struct DiffReviewFeatureTests {
     await store.finish()
     #expect(sent.value == [.openDiffTab(worktree, filePath: "a.swift")])
   }
+
+  // MARK: - openFile loads hunks → builds rows (Phase 3)
+
+  private func modifiedHunk() -> DiffHunk {
+    DiffHunk(
+      oldStart: 1,
+      oldCount: 1,
+      newStart: 1,
+      newCount: 2,
+      header: "@@ -1 +1,2 @@",
+      lines: [
+        DiffLine(origin: .context, oldLineNumber: 1, newLineNumber: 1, content: "keep", noNewlineAtEof: false),
+        DiffLine(origin: .addition, oldLineNumber: nil, newLineNumber: 2, content: "added", noNewlineAtEof: false),
+      ]
+    )
+  }
+
+  @Test(.dependencies) func openFileLoadsHunksAndBuildsRows() async {
+    let worktree = gitLocalWorktree()
+    let file = makeFile("a.swift")
+    let hunks = [modifiedHunk()]
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = worktree
+    initialState.files = [file]
+    initialState.loadState = .loaded
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.terminalClient.send = { _ in }
+      $0.diffClient.diff = { _, _, _ in hunks }
+    }
+
+    await store.send(.openFile(path: "a.swift")) {
+      $0.diffLoadToken = 1
+      $0.openDiffs["a.swift"] = DiffDocument(file: file, loadState: .loading, generation: 1)
+    }
+    await store.receive(\.diffLoaded) {
+      var document = DiffDocument(file: file, loadState: .loading, generation: 1)
+      document.hunks = hunks
+      document.loadState = .loaded
+      document.isStale = false
+      document.rows = DiffRowBuilder.build(file: file, hunks: hunks, mode: .unified, expanded: [])
+      document.revision = 1
+      $0.openDiffs["a.swift"] = document
+    }
+  }
+
+  // MARK: - mode toggle rebuilds open documents
+
+  @Test(.dependencies) func diffModeChangedRebuildsRows() async {
+    let file = makeFile("a.swift")
+    let hunks = [modifiedHunk()]
+    var document = DiffDocument(file: file, loadState: .loaded, generation: 1)
+    document.hunks = hunks
+    document.rows = DiffRowBuilder.build(file: file, hunks: hunks, mode: .unified, expanded: [])
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = gitLocalWorktree()
+    initialState.openDiffs = ["a.swift": document]
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+    }
+    store.exhaustivity = .off  // @Shared diffViewMode write is asserted separately.
+
+    await store.send(.diffModeChanged(.split))
+    #expect(store.state.diffViewMode == .split)
+    #expect(
+      store.state.openDiffs["a.swift"]?.rows
+        == DiffRowBuilder.build(file: file, hunks: hunks, mode: .split, expanded: [])
+    )
+    #expect(store.state.openDiffs["a.swift"]?.revision == 1)
+  }
+
+  // MARK: - live update: vanished file goes stale, tab stays (3.2/3.3)
+
+  @Test(.dependencies) func reloadMarksVanishedOpenDiffStale() async {
+    let worktree = gitLocalWorktree()
+    let file = makeFile("a.swift")
+    var document = DiffDocument(file: file, loadState: .loaded, generation: 1)
+    document.rows = DiffRowBuilder.build(file: file, hunks: [modifiedHunk()], mode: .unified, expanded: [])
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = worktree
+    initialState.files = [file]
+    initialState.loadState = .loaded
+    initialState.openDiffs = ["a.swift": document]
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.diffClient.changedFiles = { _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) }
+    }
+
+    await store.send(.load) { $0.generation = 1 }
+    await store.receive(\.loaded) {
+      $0.files = []
+      $0.loadState = .empty
+      $0.openDiffs["a.swift"]?.isStale = true
+    }
+    // Tab stays open with its last-rendered rows.
+    #expect(store.state.openDiffs["a.swift"]?.rows.isEmpty == false)
+  }
+
+  // MARK: - expandGap re-diffs with raised context
+
+  @Test(.dependencies) func expandGapReDiffsWithRaisedContext() async {
+    let worktree = gitLocalWorktree()
+    let file = makeFile("a.swift")
+    let context = LockIsolated<UInt32>(0)
+    let fullHunk = modifiedHunk()
+    var document = DiffDocument(file: file, loadState: .loaded, generation: 3)
+    document.hunks = [modifiedHunk()]
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = worktree
+    initialState.files = [file]
+    initialState.openDiffs = ["a.swift": document]
+    initialState.diffLoadToken = 3
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.diffClient.diff = { _, _, requestedContext in
+        context.setValue(requestedContext)
+        return [fullHunk]
+      }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.expandGap(path: "a.swift", anchor: 5)) {
+      $0.diffLoadToken = 4
+      $0.openDiffs["a.swift"]?.expanded = [5]
+      $0.openDiffs["a.swift"]?.generation = 4
+    }
+    await store.receive(\.diffLoaded)
+    #expect(context.value > 3)  // raised well above the git default of 3.
+  }
 }

@@ -63,12 +63,14 @@ nonisolated enum Libgit2Diff {
     return WorktreeDiff(files: files, isUnbornHead: isUnborn, operation: operation)
   }
 
-  static func hunks(for file: FileChange, at worktreeURL: URL, caps: Caps) throws -> [DiffHunk] {
+  static func hunks(for file: FileChange, at worktreeURL: URL, caps: Caps, contextLines: UInt32 = 3) throws
+    -> [DiffHunk]
+  {
     let repo = try openRepository(at: worktreeURL)
     defer { git_repository_free(repo) }
 
     let isUnborn = git_repository_head_unborn(repo) == 1
-    let (diff, tree) = try makeDiff(repo: repo, isUnborn: isUnborn)
+    let (diff, tree) = try makeDiff(repo: repo, isUnborn: isUnborn, contextLines: contextLines)
     defer {
       git_diff_free(diff)
       if let tree { git_tree_free(tree) }
@@ -108,7 +110,9 @@ nonisolated enum Libgit2Diff {
   /// Returns `(diff, headTree?)`. `headTree` is `nil` for an unborn HEAD, which
   /// makes `git_diff_tree_to_workdir_with_index` diff against the empty tree so
   /// every file surfaces as an addition.
-  private static func makeDiff(repo: OpaquePointer, isUnborn: Bool) throws -> (OpaquePointer, OpaquePointer?) {
+  private static func makeDiff(repo: OpaquePointer, isUnborn: Bool, contextLines: UInt32 = 3) throws -> (
+    OpaquePointer, OpaquePointer?
+  ) {
     var tree: OpaquePointer?
     if !isUnborn {
       tree = try headTree(repo: repo)
@@ -120,6 +124,9 @@ nonisolated enum Libgit2Diff {
       if let tree { git_tree_free(tree) }
       throw lastError(returnCode)
     }
+    // Context lines around each change (git default 3). The viewer raises this
+    // to materialize an expanded inter-hunk gap.
+    opts.context_lines = contextLines
     // Untracked included + recurse into untracked dirs + show their content
     // (so a new file's lines surface as additions and non-UTF8 detection can
     // run); typechanges surfaced; patience for readable diffs.

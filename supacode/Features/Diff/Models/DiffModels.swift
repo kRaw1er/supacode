@@ -81,7 +81,7 @@ nonisolated enum FileStatus: Sendable, Equatable {
 /// The role of a diff line. `noNewlineMarker` is retained for completeness;
 /// the "no newline at EOF" fact is also surfaced on `DiffLine.noNewlineAtEof`
 /// of the affected content line.
-nonisolated enum DiffLineOrigin: Sendable, Equatable {
+nonisolated enum DiffLineOrigin: Sendable, Equatable, Hashable {
   case context
   case addition
   case deletion
