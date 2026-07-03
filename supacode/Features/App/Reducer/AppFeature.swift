@@ -1101,6 +1101,15 @@ struct AppFeature {
         // Core runs before the `Scope`s, so `RepositoriesFeature` still consumes
         // this event for the aggregate +N/-N stat. We only add the review fan-out
         // (debounced re-load of the changed-files list) on top.
+        //
+        // Dual-source eventual consistency (Deferred, 9.3): this single
+        // `filesChanged` tick drives TWO independent readers — the sidebar
+        // +N/-N stat via `GitClient.lineChanges` (subprocess, in
+        // `RepositoriesFeature.worktreeInfoEvent`) and the inspector / open diff
+        // tabs via `DiffClient` (libgit2, in `DiffReviewFeature`). They can land a
+        // frame or two apart, so the two surfaces are eventually — not
+        // instantaneously — consistent. Unifying the sidebar stat onto `DiffClient`
+        // is intentionally out of scope for v1; keep both paths fed by this one tick.
         return .send(.review(.filesChanged(worktreeID)))
 
       case .repositories:
@@ -1199,6 +1208,12 @@ struct AppFeature {
 
       case .commandPalette(.delegate(.runScript(let definition))):
         return .send(.runNamedScript(definition))
+
+      case .commandPalette(.delegate(.openDiffFile(_, let filePath))):
+        // Items are gated under `selectedWorktreeID != nil`, and
+        // `.review(.openFile)` resolves the worktree from `review.selectedWorktree`,
+        // so the palette action never needs to carry the worktree past this point.
+        return .send(.review(.openFile(path: filePath)))
 
       case .commandPalette(.delegate(.stopScript(let scriptID, _))):
         // If a script was removed from settings while still running,
@@ -2632,6 +2647,22 @@ struct AppFeature {
     state: inout State
   ) -> Bool {
     guard validateTab(worktreeID: worktreeID, tabID: tabID, state: &state) else { return false }
+    // A diff tab owns no surface, so every `surface*` deeplink aimed at it would
+    // otherwise fall through to the generic "Surface not found". Reject it up front
+    // with a clearer message (mirrors the folder-target alert pattern).
+    if terminalClient.isDiffTab(worktreeID, TerminalTabID(rawValue: tabID)) {
+      deeplinkLogger.warning("Surface deeplink targeted diff tab \(tabID) in worktree \(worktreeID)")
+      state.alert = AlertState {
+        TextState("Not a terminal tab")
+      } actions: {
+        ButtonState(role: .cancel, action: .dismiss) {
+          TextState("OK")
+        }
+      } message: {
+        TextState("That tab is a diff view, not a terminal.")
+      }
+      return false
+    }
     guard terminalClient.surfaceExists(worktreeID, TerminalTabID(rawValue: tabID), surfaceID) else {
       deeplinkLogger.warning("Surface \(surfaceID) not found in tab \(tabID) of worktree \(worktreeID)")
       state.alert = AlertState {

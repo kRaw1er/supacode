@@ -187,7 +187,8 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
       highlight: rowHighlight(at: row),
       callbacks: DiffCellView.Callbacks(
         onExpand: { [weak self] anchor in self?.onExpandGap?(anchor) },
-        onCommentTap: { [weak self] id in self?.onCommentTap?(id) }
+        onCommentTap: { [weak self] id in self?.onCommentTap?(id) },
+        onAddComment: { [weak self] side, line in self?.openComposer(side: side, line: line) }
       )
     )
     return cell
@@ -407,6 +408,14 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     }
     let contextBefore = preceding.suffix(3).joined(separator: "\n")
     return (covered.joined(separator: "\n"), contextBefore)
+  }
+
+  /// Opens the comment composer for a single line (the VoiceOver "Add comment"
+  /// custom action path). Builds the same snippet/context payload the hover-driven
+  /// ribbon produces so relocation keys off identical anchor text.
+  func openComposer(side: DiffSide, line: Int) {
+    let payload = anchorPayload(side: side, startLine: line, endLine: line)
+    onOpenComposer?(side, line, line, payload.snippet, payload.contextBefore)
   }
 
   /// The side whose gutter `point.x` falls in (unified stacks old|new on the

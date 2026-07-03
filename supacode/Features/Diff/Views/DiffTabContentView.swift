@@ -14,6 +14,10 @@ struct DiffTabContentView: View {
     VStack(spacing: 0) {
       header(document: document)
       Divider()
+      if let message = store.repositoryOperation.bannerMessage {
+        DiffOperationBanner(message: message)
+        Divider()
+      }
       if document?.isStale == true {
         staleBanner
         Divider()

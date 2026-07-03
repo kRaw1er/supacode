@@ -721,6 +721,11 @@ final class WorktreeTerminalManager {
     states[worktreeID]?.hasTab(tabID) ?? false
   }
 
+  /// True iff the tab is a surface-less diff tab (backed by a file path).
+  func isDiffTab(worktreeID: Worktree.ID, tabID: TerminalTabID) -> Bool {
+    states[worktreeID]?.diffFilePath(for: tabID) != nil
+  }
+
   func surfaceExists(worktreeID: Worktree.ID, tabID: TerminalTabID, surfaceID: UUID) -> Bool {
     states[worktreeID]?.hasSurface(surfaceID, in: tabID) ?? false
   }

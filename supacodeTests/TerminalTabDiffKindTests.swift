@@ -1,3 +1,4 @@
+import ComposableArchitecture
 import Foundation
 import Sharing
 import Testing
@@ -94,5 +95,54 @@ struct TerminalTabDiffKindTests {
     let diff = state.openDiffTab(filePath: "/tmp/x")
     state.closeTab(diff)
     #expect(removed == [diff])
+  }
+
+  // MARK: - 6.A center ⌘-number switching includes the diff tab
+
+  @Test func selectTabAtIndexCountsDiffTabPositionally() {
+    let state = makeState()
+    let term = state.createTab()!
+    let diff = state.openDiffTab(filePath: "/tmp/repo/a.swift")
+    // ⌘2 selects the second positional tab — the diff tab.
+    state.selectTabAtIndex(2)
+    #expect(state.tabManager.selectedTabId == diff)
+    // ⌘1 selects the terminal tab again.
+    state.selectTabAtIndex(1)
+    #expect(state.tabManager.selectedTabId == term)
+    // Out-of-range clamps to the last tab (the diff tab).
+    state.selectTabAtIndex(9)
+    #expect(state.tabManager.selectedTabId == diff)
+  }
+
+  // MARK: - 6.C / 6.F focusing a diff tab is inert for surfaces + notifications
+
+  @Test func focusingDiffTabLeavesSurfacesAndNotificationsUntouched() {
+    // Appending a notification touches the injected clock/date, so build the
+    // state under test dependencies (they snapshot at init).
+    let state = withDependencies {
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 0))
+    } operation: {
+      makeState()
+    }
+    let term = state.createTab()!
+    let surfaceID = state.surfaceIDs(inTab: term).first!
+    // Seed an unread notification on the terminal surface.
+    state.appendHookNotification(title: "Build", body: "done", surfaceID: surfaceID)
+    let unreadBefore = state.notifications.count { !$0.isRead }
+    let surfacesBefore = state.allSurfaceIDs
+
+    var diffProjections: [WorktreeTabProjection] = []
+    state.onTabProjectionChanged = { diffProjections.append($0) }
+    let diff = state.openDiffTab(filePath: "/tmp/x")
+    // Selecting the diff tab must not create/destroy a surface (9.5 / 6.F) …
+    state.selectTab(diff)
+    #expect(state.tabManager.selectedTabId == diff)
+    #expect(state.allSurfaceIDs == surfacesBefore)
+    // … nor mark the terminal surface's notification read (bell/dock, 6.C).
+    #expect(state.notifications.count { !$0.isRead } == unreadBefore)
+    // The diff tab's own projection never contributes an unseen count.
+    #expect(diffProjections.contains { $0.tabID == diff && $0.unseenNotificationCount == 0 })
+    #expect(diffProjections.allSatisfy { $0.tabID != diff || $0.unseenNotificationCount == 0 })
   }
 }

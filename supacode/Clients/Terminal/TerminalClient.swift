@@ -5,6 +5,10 @@ struct TerminalClient {
   var send: @MainActor @Sendable (Command) -> Void
   var events: @MainActor @Sendable () -> AsyncStream<Event>
   var tabExists: @MainActor @Sendable (Worktree.ID, TerminalTabID) -> Bool
+  /// True iff the tab exists and is a surface-less diff tab. Lets deeplink
+  /// validation reject terminal-only `surface*` targets aimed at a diff tab with
+  /// a clearer message than the generic "Surface not found".
+  var isDiffTab: @MainActor @Sendable (Worktree.ID, TerminalTabID) -> Bool
   var surfaceExists: @MainActor @Sendable (Worktree.ID, TerminalTabID, UUID) -> Bool
   var surfaceExistsInWorktree: @MainActor @Sendable (Worktree.ID, UUID) -> Bool
   var tabID: @MainActor @Sendable (Worktree.ID, UUID) -> TerminalTabID?
@@ -127,6 +131,7 @@ extension TerminalClient: DependencyKey {
     send: { _ in fatalError("TerminalClient.send not configured") },
     events: { fatalError("TerminalClient.events not configured") },
     tabExists: { _, _ in fatalError("TerminalClient.tabExists not configured") },
+    isDiffTab: { _, _ in fatalError("TerminalClient.isDiffTab not configured") },
     surfaceExists: { _, _, _ in fatalError("TerminalClient.surfaceExists not configured") },
     surfaceExistsInWorktree: { _, _ in fatalError("TerminalClient.surfaceExistsInWorktree not configured") },
     tabID: { _, _ in fatalError("TerminalClient.tabID not configured") },
@@ -145,6 +150,11 @@ extension TerminalClient: DependencyKey {
     send: { _ in },
     events: { AsyncStream { $0.finish() } },
     tabExists: unimplemented("TerminalClient.tabExists", placeholder: true),
+    // Defaults to "not a diff tab" (rather than `unimplemented`) so the many
+    // existing terminal-surface deeplink tests that reach `validateSurface`
+    // without caring about diff tabs keep their prior behavior. Diff-tab tests
+    // override it explicitly.
+    isDiffTab: { _, _ in false },
     surfaceExists: unimplemented("TerminalClient.surfaceExists", placeholder: true),
     surfaceExistsInWorktree: unimplemented("TerminalClient.surfaceExistsInWorktree", placeholder: true),
     tabID: unimplemented("TerminalClient.tabID", placeholder: nil),

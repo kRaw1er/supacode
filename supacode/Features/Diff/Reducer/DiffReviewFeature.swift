@@ -44,6 +44,10 @@ struct DiffReviewFeature {
     /// Monotonic request token. Bumped on every (re)selection and load; a returning
     /// `.loaded/.failed` whose `generation` no longer matches is discarded (8.1).
     var generation: Int = 0
+    /// Mid-operation repo state from the last successful load (Phase 1 produces it
+    /// on `WorktreeDiff.operation`; Phase 6 renders the banner). `.none` outside a
+    /// merge / rebase / cherry-pick / etc. Reset on deselect + unsupported worktrees.
+    var repositoryOperation: RepositoryOperation = .none
     /// Unified vs split viewer preference (consumed in Phase 3; declared here so the
     /// panel owns the pref). Global.
     @Shared(.appStorage("diffViewMode")) var diffViewMode: DiffViewMode = .unified
@@ -103,7 +107,7 @@ struct DiffReviewFeature {
   enum Action: Equatable {
     case worktreeSelected(Worktree?)  // fan-out from AppFeature :313
     case load  // (re)issue a changedFiles request
-    case loaded([FileChange], generation: Int)  // client success
+    case loaded([FileChange], operation: RepositoryOperation, generation: Int)  // client success
     case failed(DiffError, generation: Int)  // client failure
     case filesChanged(Worktree.ID)  // raw info-event tick (pre-debounce)
     case refreshTick  // post-debounce: re-load
@@ -173,17 +177,20 @@ struct DiffReviewFeature {
         guard let worktree else {
           state.files = []
           state.loadState = .idle
+          state.repositoryOperation = .none
           return .merge(.cancel(id: CancelID.load), .cancel(id: CancelID.debounce))
         }
         // Gate BEFORE touching the client: never call libgit2 for folder/remote (1.4/1.5).
         if worktree.isFolder {
           state.files = []
           state.loadState = .unsupported(.folder)
+          state.repositoryOperation = .none
           return .merge(.cancel(id: CancelID.load), .cancel(id: CancelID.debounce))
         }
         if worktree.host != nil {
           state.files = []
           state.loadState = .unsupported(.remote)
+          state.repositoryOperation = .none
           return .merge(.cancel(id: CancelID.load), .cancel(id: CancelID.debounce))
         }
         state.files = []  // new worktree ⇒ drop the prior list
@@ -200,9 +207,10 @@ struct DiffReviewFeature {
         if state.files.isEmpty { state.loadState = .loading }
         return Self.loadEffect(worktree: worktree, generation: state.generation, diffClient: diffClient)
 
-      case .loaded(let files, let generation):
+      case .loaded(let files, let operation, let generation):
         guard generation == state.generation else { return .none }  // discard stale (8.1)
         state.files = files
+        state.repositoryOperation = operation
         state.loadState = files.isEmpty ? .empty : .loaded
         // Live-update every open center diff tab: re-diff the ones still changed,
         // flag the ones that dropped out of the set as stale (tab stays open).
@@ -440,9 +448,10 @@ struct DiffReviewFeature {
   ) -> Effect<Action> {
     .run { send in
       do {
-        // Phase 1 returns `WorktreeDiff`; the row list consumes `.files`.
+        // Phase 1 returns `WorktreeDiff`; the row list consumes `.files` and the
+        // mid-operation banner consumes `.operation`.
         let diff = try await diffClient.changedFiles(worktree.workingDirectory)
-        await send(.loaded(diff.files, generation: generation))
+        await send(.loaded(diff.files, operation: diff.operation, generation: generation))
       } catch let error as DiffError {
         await send(.failed(error, generation: generation))
       } catch {

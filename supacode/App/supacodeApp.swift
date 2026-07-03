@@ -232,6 +232,9 @@ struct SupacodeApp: App {
         tabExists: { worktreeID, tabID in
           terminalManager.tabExists(worktreeID: worktreeID, tabID: tabID)
         },
+        isDiffTab: { worktreeID, tabID in
+          terminalManager.isDiffTab(worktreeID: worktreeID, tabID: tabID)
+        },
         surfaceExists: { worktreeID, tabID, surfaceID in
           terminalManager.surfaceExists(worktreeID: worktreeID, tabID: tabID, surfaceID: surfaceID)
         },

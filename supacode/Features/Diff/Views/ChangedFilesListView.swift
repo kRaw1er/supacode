@@ -9,6 +9,18 @@ struct ChangedFilesListView: View {
   @Bindable var store: StoreOf<DiffReviewFeature>
 
   var body: some View {
+    VStack(spacing: 0) {
+      if let message = store.repositoryOperation.bannerMessage {
+        DiffOperationBanner(message: message)
+        Divider()
+      }
+      content
+    }
+    .navigationTitle("Changes")
+  }
+
+  @ViewBuilder
+  private var content: some View {
     Group {
       switch store.loadState {
       case .idle:
@@ -38,7 +50,6 @@ struct ChangedFilesListView: View {
           description: Text(Self.message(for: error)))
       }
     }
-    .navigationTitle("Changes")
   }
 
   @ViewBuilder
@@ -54,6 +65,7 @@ struct ChangedFilesListView: View {
           .contentShape(Rectangle())
           .onTapGesture { store.send(.openFile(path: file.id)) }  // file.id = newPath ?? oldPath ?? ""
           .accessibilityAddTraits(.isButton)
+          .accessibilityHint("Opens the diff in a new tab")
       }
     }
     .listStyle(.inset)
@@ -88,6 +100,12 @@ private struct FileChangeRow: View {
         }
       }
       Spacer(minLength: 8)
+      if file.status == .conflicted {
+        Text("unmerged")
+          .font(.caption2.weight(.semibold))
+          .foregroundStyle(.orange)
+          .accessibilityHidden(true)
+      }
       if file.isBinary {
         Text("bin").font(.caption2.monospaced()).foregroundStyle(.secondary)
       } else {
@@ -99,7 +117,7 @@ private struct FileChangeRow: View {
       }
     }
     .padding(.vertical, 2)
-    .accessibilityElement(children: .combine)
+    .accessibilityElement(children: .ignore)
     .accessibilityLabel(Self.axLabel(file))
   }
 
@@ -118,12 +136,34 @@ private struct FileChangeRow: View {
   }
 
   static func axLabel(_ file: FileChange) -> String {
-    let name = file.status == .renamed ? "\(tail(file.oldPath)) to \(tail(file.newPath))" : tail(file.newPath)
-    let statusLabel = StatusBadge.label(file.status)
-    if file.isBinary {
-      return "\(statusLabel), \(name), binary"
-    }
-    return "\(statusLabel), \(name), \(file.addedLines) added, \(file.removedLines) removed"
+    // Renames read "old renamed to new"; everything else is "name, statusWord".
+    let lead: String =
+      file.status == .renamed
+      ? "\(tail(file.oldPath)) renamed to \(tail(file.newPath))"
+      : "\(tail(file.newPath)), \(StatusBadge.statusWord(file.status))"
+    let detail = file.isBinary ? "binary" : "\(file.addedLines) added, \(file.removedLines) removed"
+    let unmerged = file.status == .conflicted ? ", unmerged" : ""
+    return "\(lead), \(detail)\(unmerged)"
+  }
+}
+
+/// System-styled banner shown above the changed-file list and inside the diff-tab
+/// header while the repository is mid-merge / mid-rebase / etc. (1.8). Announces
+/// itself to VoiceOver on appear so the state change is spoken.
+struct DiffOperationBanner: View {
+  let message: String
+
+  var body: some View {
+    Label(message, systemImage: "exclamationmark.triangle")
+      .font(.caption)
+      .foregroundStyle(.orange)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.horizontal, 12)
+      .padding(.vertical, 6)
+      .background(.orange.opacity(0.12))
+      .accessibilityElement(children: .combine)
+      .accessibilityAddTraits(.isStaticText)
+      .accessibilityLabel(message)
   }
 }
 
@@ -178,6 +218,22 @@ private struct StatusBadge: View {
     case .binary: "Binary"
     case .submodule: "Submodule"
     case .conflicted: "Conflicted"
+    }
+  }
+
+  /// Lowercase status word for the VoiceOver label (spec-mandated wording).
+  static func statusWord(_ status: FileStatus) -> String {
+    switch status {
+    case .added: "added"
+    case .untracked: "untracked"
+    case .modified: "modified"
+    case .deleted: "deleted"
+    case .renamed: "renamed"
+    case .copied: "copied"
+    case .modeChanged: "mode changed"
+    case .binary: "binary"
+    case .submodule: "submodule"
+    case .conflicted: "conflicted"
     }
   }
 }

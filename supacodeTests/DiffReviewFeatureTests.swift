@@ -75,9 +75,43 @@ struct DiffReviewFeatureTests {
       $0.selectedWorktree = worktree
       $0.loadState = .loading
     }
-    await store.receive(.loaded(files, generation: 1)) {
+    await store.receive(.loaded(files, operation: .none, generation: 1)) {
       $0.files = files
       $0.loadState = .loaded
+    }
+  }
+
+  // MARK: - mid-operation repository state (1.8) plumbed onto State
+
+  @Test(.dependencies) func loadedSetsRepositoryOperationForBanner() async {
+    let worktree = gitLocalWorktree()
+    let files = [makeFile("a.swift")]
+    let store = TestStore(initialState: DiffReviewFeature.State()) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.diffClient.changedFiles = { _ in WorktreeDiff(files: files, isUnbornHead: false, operation: .rebase) }
+    }
+
+    await store.send(.worktreeSelected(worktree)) {
+      $0.generation = 1
+      $0.selectedWorktree = worktree
+      $0.loadState = .loading
+    }
+    await store.receive(.loaded(files, operation: .rebase, generation: 1)) {
+      $0.files = files
+      $0.repositoryOperation = .rebase
+      $0.loadState = .loaded
+    }
+    #expect(store.state.repositoryOperation.bannerMessage != nil)
+
+    // Deselecting resets the operation so a stale banner never lingers.
+    await store.send(.worktreeSelected(nil)) {
+      $0.generation = 2
+      $0.selectedWorktree = nil
+      $0.files = []
+      $0.loadState = .idle
+      $0.repositoryOperation = .none
     }
   }
 
@@ -110,7 +144,7 @@ struct DiffReviewFeatureTests {
       $0.loadState = .idle
     }
     // Gen-1 result arrives late; the guard drops it (current generation is 2).
-    await store.send(.loaded(files, generation: 1))
+    await store.send(.loaded(files, operation: .none, generation: 1))
     #expect(store.state.files.isEmpty)
     #expect(store.state.loadState == .idle)
   }
@@ -177,7 +211,7 @@ struct DiffReviewFeatureTests {
       $0.selectedWorktree = worktree
       $0.loadState = .loading
     }
-    await store.receive(.loaded([], generation: 1)) {
+    await store.receive(.loaded([], operation: .none, generation: 1)) {
       $0.loadState = .empty
     }
   }
@@ -209,7 +243,7 @@ struct DiffReviewFeatureTests {
       $0.selectedWorktree = worktree
       $0.loadState = .loading
     }
-    await store.receive(.loaded(files, generation: 1)) {
+    await store.receive(.loaded(files, operation: .none, generation: 1)) {
       $0.files = files
       $0.loadState = .loaded
     }
@@ -241,7 +275,7 @@ struct DiffReviewFeatureTests {
       $0.selectedWorktree = worktree
       $0.loadState = .loading
     }
-    await store.receive(.loaded(files, generation: 1)) {
+    await store.receive(.loaded(files, operation: .none, generation: 1)) {
       $0.files = files
       $0.loadState = .loaded
     }
@@ -255,7 +289,7 @@ struct DiffReviewFeatureTests {
     await store.receive(.load) {
       $0.generation = 2
     }
-    await store.receive(.loaded(files, generation: 2))
+    await store.receive(.loaded(files, operation: .none, generation: 2))
 
     // A tick for a different worktree id is a no-op (no debounce effect fires).
     let other = gitLocalWorktree(path: "/tmp/repo/other")

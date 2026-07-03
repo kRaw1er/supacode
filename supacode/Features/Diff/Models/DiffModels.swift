@@ -100,6 +100,27 @@ nonisolated enum RepositoryOperation: Sendable, Equatable {
   case revert
   case bisect
   case applyMailbox
+
+  /// Short human-facing label for the in-progress operation, or `nil` when the
+  /// repository is in its normal state. Drives the Phase 6 mid-operation banner.
+  var inProgressLabel: String? {
+    switch self {
+    case .none: nil
+    case .merge: "Merge"
+    case .rebase, .rebaseInteractive, .rebaseMerge: "Rebase"
+    case .cherryPick: "Cherry-pick"
+    case .revert: "Revert"
+    case .bisect: "Bisect"
+    case .applyMailbox: "Mailbox apply"
+    }
+  }
+
+  /// Full banner sentence shown in the inspector + diff-tab headers, or `nil` in
+  /// the normal state. Explains that the diff reflects the working tree mid-op.
+  var bannerMessage: String? {
+    guard let label = inProgressLabel else { return nil }
+    return "\(label) in progress — diffs reflect the working tree mid-\(label.lowercased())."
+  }
 }
 
 /// Typed error surface for the diff data layer. `.indexLocked` is the
