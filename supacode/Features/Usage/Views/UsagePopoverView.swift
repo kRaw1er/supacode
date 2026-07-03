@@ -41,7 +41,10 @@ struct UsagePopoverView: View {
   @ViewBuilder
   private var updatedText: some View {
     if let updatedAt = usage.lastSnapshot?.updatedAt {
-      Text("Updated \(Text(updatedAt, format: .relative(presentation: .named)))")
+      // Minute granularity, refreshed once a minute (seconds don't tick).
+      TimelineView(.everyMinute) { context in
+        Text(verbatim: UsageResetFormatter.describeUpdated(since: updatedAt, now: context.date))
+      }
     } else {
       Text(verbatim: "Not yet updated")
     }

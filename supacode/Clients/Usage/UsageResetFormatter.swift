@@ -29,4 +29,26 @@ nonisolated enum UsageResetFormatter {
     // Under a minute but still positive — avoid "Resets in 0m".
     return "Resets in <1m"
   }
+
+  /// "Updated X ago" for the popover header, at MINUTE granularity — seconds are
+  /// never shown because the label doesn't tick per-second (it refreshes on a
+  /// per-minute `TimelineView`). Anything under a minute reads "less than a
+  /// minute ago"; otherwise the single largest unit (minutes / hours / days).
+  nonisolated static func describeUpdated(since updatedAt: Date, now: Date) -> String {
+    let seconds = now.timeIntervalSince(updatedAt)
+    guard seconds >= 60 else { return "Updated less than a minute ago" }
+
+    let totalMinutes = Int(seconds / 60)
+    let days = totalMinutes / (60 * 24)
+    let hours = (totalMinutes % (60 * 24)) / 60
+    let minutes = totalMinutes % 60
+
+    if days >= 1 { return "Updated \(days) \(Self.unit(days, "day")) ago" }
+    if hours >= 1 { return "Updated \(hours) \(Self.unit(hours, "hour")) ago" }
+    return "Updated \(minutes) \(Self.unit(minutes, "minute")) ago"
+  }
+
+  nonisolated private static func unit(_ count: Int, _ singular: String) -> String {
+    count == 1 ? singular : "\(singular)s"
+  }
 }
