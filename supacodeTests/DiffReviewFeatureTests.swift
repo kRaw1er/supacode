@@ -418,4 +418,174 @@ struct DiffReviewFeatureTests {
     await store.receive(\.diffLoaded)
     #expect(context.value > 3)  // raised well above the git default of 3.
   }
+
+  // MARK: - Phase 5: comments + send-to-agent
+
+  private func reviewComment(
+    path: String = "a.swift",
+    start: Int = 3,
+    end: Int = 3,
+    snippet: String = "target",
+    body: String = "please fix",
+    side: DiffSide = .new
+  ) -> ReviewComment {
+    ReviewComment(
+      id: UUID(),
+      filePath: path,
+      side: side,
+      startLine: start,
+      endLine: end,
+      anchorSnippet: snippet,
+      contextBefore: "",
+      body: body,
+      createdAt: Date(timeIntervalSince1970: 0)
+    )
+  }
+
+  @Test(.dependencies) func sendBatchInjectsPromptAndClearsComments() async {
+    let worktree = gitLocalWorktree()
+    let comment = reviewComment()
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = worktree
+    initialState.comments = [comment]
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.terminalClient.hasAgentTerminalSurface = { _ in true }
+      $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
+    }
+
+    await store.send(.sendBatchToAgent) {
+      $0.batchLocked = true
+    }
+    await store.receive(.sendBatchFinished(.sent)) {
+      $0.comments.removeAll()
+      $0.batchLocked = false
+    }
+    await store.finish()
+
+    #expect(sent.value.count == 1)
+    if case .insertTextIntoFocusedSurface(let target, let text, let submit) = sent.value.first {
+      #expect(target == worktree)
+      #expect(submit == true)
+      #expect(text.contains("please fix"))
+    } else {
+      Issue.record("expected insertTextIntoFocusedSurface, got \(String(describing: sent.value.first))")
+    }
+  }
+
+  @Test(.dependencies) func sendBatchWithoutTerminalKeepsBatchAndAlerts() async {
+    let worktree = gitLocalWorktree()
+    let comment = reviewComment()
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = worktree
+    initialState.comments = [comment]
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.terminalClient.hasAgentTerminalSurface = { _ in false }
+      $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
+    }
+
+    await store.send(.sendBatchToAgent) {
+      $0.alert = .noAgentTerminal
+    }
+    // Batch retained; no terminal command dispatched (5.7).
+    #expect(store.state.comments == [comment])
+    #expect(sent.value.isEmpty)
+  }
+
+  @Test(.dependencies) func sendEmptyBatchIsNoop() async {
+    let worktree = gitLocalWorktree()
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = worktree
+    initialState.comments = [reviewComment(body: "   ")]  // whitespace-only → dropped
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.terminalClient.hasAgentTerminalSurface = { _ in true }
+      $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
+    }
+
+    await store.send(.sendBatchToAgent)  // build → nil ⇒ no-op
+    #expect(sent.value.isEmpty)
+  }
+
+  @Test(.dependencies) func diffLoadedRelocatesCommentsThroughAnchor() async {
+    let worktree = gitLocalWorktree()
+    let file = makeFile("a.swift")
+    let comment = reviewComment(start: 3, end: 3, snippet: "target")
+    let document = DiffDocument(file: file, loadState: .loaded, generation: 5)
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = worktree
+    initialState.files = [file]
+    initialState.openDiffs = ["a.swift": document]
+    initialState.diffLoadToken = 5
+    initialState.comments = [comment]
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+    }
+    store.exhaustivity = .off
+
+    // Re-diff: "target" moved from line 3 to line 5 (2 lines inserted above).
+    let line = { (number: Int, content: String) in
+      DiffLine(origin: .context, oldLineNumber: nil, newLineNumber: number, content: content, noNewlineAtEof: false)
+    }
+    let hunk = DiffHunk(
+      oldStart: 1, oldCount: 3, newStart: 1, newCount: 5, header: "@@ -1,3 +1,5 @@",
+      lines: [line(1, "a"), line(2, "b"), line(3, "c"), line(4, "d"), line(5, "target")]
+    )
+    await store.send(.diffLoaded(path: "a.swift", hunks: [hunk], token: 5))
+    #expect(store.state.comments[id: comment.id]?.startLine == 5)
+    #expect(store.state.comments[id: comment.id]?.orphaned == false)
+  }
+
+  @Test(.dependencies) func requestDiscardPresentsConfirmAndDiscardClears() async {
+    let comment = reviewComment()
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = gitLocalWorktree()
+    initialState.comments = [comment]
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+    }
+
+    await store.send(.requestDiscardBatch) {
+      $0.discardConfirm = DiffReviewFeature.discardConfirmDialog(count: 1)
+    }
+    await store.send(.discardConfirm(.presented(.discard))) {
+      $0.discardConfirm = nil
+      $0.comments.removeAll()
+    }
+  }
+
+  @Test(.dependencies) func requestDiscardKeepRetainsComments() async {
+    let comment = reviewComment()
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = gitLocalWorktree()
+    initialState.comments = [comment]
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+    }
+
+    await store.send(.requestDiscardBatch) {
+      $0.discardConfirm = DiffReviewFeature.discardConfirmDialog(count: 1)
+    }
+    // "Keep" == dismiss; the batch is retained.
+    await store.send(.discardConfirm(.dismiss)) {
+      $0.discardConfirm = nil
+    }
+    #expect(store.state.comments == [comment])
+  }
 }

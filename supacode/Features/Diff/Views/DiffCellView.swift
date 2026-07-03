@@ -77,10 +77,17 @@ struct RowHighlight: Equatable {
 /// table, so recycling is a single pool. Split rows draw both panes inside the
 /// one full-width cell for pixel-exact structural alignment.
 final class DiffCellView: NSView {
+  /// The row's interaction callbacks, bundled so `configure` stays within the
+  /// parameter-count budget.
+  struct Callbacks {
+    let onExpand: (Int) -> Void
+    let onCommentTap: (UUID) -> Void
+  }
+
   private var row: DiffRow?
   private var metrics = DiffMetrics.resolve()
   private var mode: DiffViewMode = .unified
-  private var onExpand: ((Int) -> Void)?
+  private var callbacks: Callbacks?
   private var highlight: RowHighlight = .empty
 
   override var isFlipped: Bool { true }
@@ -91,13 +98,13 @@ final class DiffCellView: NSView {
     metrics: DiffMetrics,
     mode: DiffViewMode,
     highlight: RowHighlight,
-    onExpand: @escaping (Int) -> Void
+    callbacks: Callbacks
   ) {
     self.row = row
     self.metrics = metrics
     self.mode = mode
     self.highlight = highlight
-    self.onExpand = onExpand
+    self.callbacks = callbacks
     needsDisplay = true
   }
 
@@ -111,7 +118,11 @@ final class DiffCellView: NSView {
 
   override func mouseDown(with event: NSEvent) {
     if case .expander(let anchor, _, _) = row {
-      onExpand?(anchor)
+      callbacks?.onExpand(anchor)
+      return
+    }
+    if case .commentThread(let comment) = row {
+      callbacks?.onCommentTap(comment.id)
       return
     }
     super.mouseDown(with: event)
@@ -132,9 +143,58 @@ final class DiffCellView: NSView {
       drawPlaceholder(placeholder)
     case .plainFallback(let number, let text):
       drawPlainFallback(number: number, text: text)
-    case .commentThread:
-      break  // Phase 5 stub.
+    case .commentThread(let comment):
+      drawCommentThread(comment)
     }
+  }
+
+  // MARK: - Comment thread (Phase 5)
+
+  /// Fixed row height for an inline comment thread: a badge header line, the
+  /// body's newline-split lines, and an optional orphaned caption.
+  static func commentThreadHeight(_ comment: ReviewComment, metrics: DiffMetrics) -> CGFloat {
+    let bodyLines = max(1, comment.body.split(separator: "\n", omittingEmptySubsequences: false).count)
+    let lines = 1 + bodyLines + (comment.orphaned ? 1 : 0)
+    return metrics.lineHeight * CGFloat(lines) + 8
+  }
+
+  private func drawCommentThread(_ comment: ReviewComment) {
+    fill(bounds, with: NSColor.controlAccentColor.withAlphaComponent(0.06))
+    NSColor.controlAccentColor.withAlphaComponent(0.55).setFill()
+    NSRect(x: 0, y: 0, width: 3, height: bounds.height).fill()
+
+    let sideMarker = comment.side == .old ? "-L" : "L"
+    let range =
+      comment.startLine == comment.endLine
+      ? "\(comment.startLine)" : "\(comment.startLine)–\(comment.endLine)"
+    let paragraph = NSMutableParagraphStyle()
+    paragraph.lineBreakMode = .byWordWrapping
+
+    let attributed = NSMutableAttributedString(
+      string: "\(sideMarker)\(range)\n",
+      attributes: [
+        .font: NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize),
+        .foregroundColor: NSColor.secondaryLabelColor,
+        .paragraphStyle: paragraph,
+      ]
+    )
+    if comment.orphaned {
+      attributed.append(
+        NSAttributedString(
+          string: "original line no longer present\n",
+          attributes: [.font: metrics.font, .foregroundColor: NSColor.systemOrange, .paragraphStyle: paragraph]
+        )
+      )
+    }
+    attributed.append(
+      NSAttributedString(
+        string: comment.body,
+        attributes: [.font: metrics.font, .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph]
+      )
+    )
+    let inset = NSRect(
+      x: metrics.hPad + 6, y: 4, width: max(1, bounds.width - metrics.hPad - 12), height: bounds.height - 8)
+    attributed.draw(in: inset)
   }
 
   // MARK: - Row kinds

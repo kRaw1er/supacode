@@ -652,6 +652,41 @@ final class WorktreeTerminalState {
     surface.sendText(text)
   }
 
+  /// True iff this worktree has at least one `.terminal`-kind surface eligible
+  /// as a text sink for a review batch (5.6). A `.diff` tab is never eligible.
+  var hasAgentTerminalSurface: Bool { resolveTerminalTextSink() != nil }
+
+  /// Injects `text` into the worktree's agent terminal, then switches the center
+  /// selection to that terminal tab (Orca handoff — 5.6/5.7). Returns `false`
+  /// (caller blocks + warns) when no terminal surface exists.
+  @discardableResult
+  func insertTextIntoTerminalSurface(_ text: String) -> Bool {
+    guard let sink = resolveTerminalTextSink() else {
+      terminalStateLogger.warning("insertTextIntoTerminalSurface: no terminal surface to send to")
+      return false
+    }
+    selectTab(sink.tabID)
+    guard let surface = surfaces[sink.surfaceID] else { return false }
+    surface.requestFocus()
+    surface.sendText(text)
+    return true
+  }
+
+  /// Resolves the precedence rule via the pure `TerminalTextSinkResolver` so the
+  /// selection logic stays unit-testable without a `GhosttySurfaceView`.
+  private func resolveTerminalTextSink() -> (tabID: TerminalTabID, surfaceID: UUID)? {
+    TerminalTextSinkResolver.resolve(
+      orderedTabs: tabManager.tabs.map { ($0.id, $0.kind) },
+      selectedTabID: tabManager.selectedTabId,
+      focusedSurfaceByTab: focusedSurfaceIdByTab,
+      surfaceIDsByTab: Dictionary(
+        uniqueKeysWithValues: tabManager.tabs.compactMap { tab in
+          trees[tab.id].map { (tab.id, $0.leaves().map(\.id)) }
+        }
+      )
+    )
+  }
+
   func syncFocus(windowIsKey: Bool, windowIsVisible: Bool) {
     lastWindowIsKey = windowIsKey
     lastWindowIsVisible = windowIsVisible

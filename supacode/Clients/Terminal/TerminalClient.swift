@@ -13,6 +13,10 @@ struct TerminalClient {
   /// synchronously before an async dispatch races against AppKit focus reshuffle
   /// (e.g. when a palette dismisses and the leftmost pane reclaims first responder).
   var selectedSurfaceID: @MainActor @Sendable (Worktree.ID) -> UUID?
+  /// True iff the worktree has at least one `.terminal`-kind surface eligible as
+  /// a text sink. Lets the reducer decide send precedence synchronously before
+  /// dispatching (mirrors the `selectedSurfaceID` capture-the-target note above).
+  var hasAgentTerminalSurface: @MainActor @Sendable (Worktree.ID) -> Bool
   var latestUnreadNotification: @MainActor @Sendable () -> NotificationLocation?
   var markNotificationRead: @MainActor @Sendable (Worktree.ID, UUID) -> Void
   /// Blocking scripts (setup / archive / delete / run) bypass zmx and die
@@ -58,6 +62,9 @@ struct TerminalClient {
     case beginTabRename(Worktree, tabID: TerminalTabID? = nil)
     /// Open (or focus, deduped by path) a surface-less diff tab for `filePath`.
     case openDiffTab(Worktree, filePath: String)
+    /// Inject `text` into the worktree's resolved agent terminal surface, then
+    /// switch focus to that terminal tab. `submit` appends `\r` to run it.
+    case insertTextIntoFocusedSurface(Worktree, text: String, submit: Bool)
     case prune(keeping: Set<Worktree.ID>, protectingRepositoryIDs: Set<Repository.ID>)
     case setNotificationsEnabled(Bool)
     case setSelectedWorktreeID(Worktree.ID?)
@@ -108,6 +115,10 @@ struct TerminalClient {
     /// blocking-script tab, or the layout insert threw). Lets a CLI completion
     /// ack report the failure instead of waiting for its timeout.
     case surfaceCreationFailed(worktreeID: Worktree.ID, attemptedID: UUID, message: String)
+    /// An `insertTextIntoFocusedSurface` found no terminal surface to send to
+    /// (covers the race where the last terminal surface closed between the
+    /// reducer's pre-gate read and dispatch). Routed into the review reducer.
+    case textInjectionFailed(worktreeID: Worktree.ID, message: String)
   }
 }
 
@@ -121,6 +132,7 @@ extension TerminalClient: DependencyKey {
     tabID: { _, _ in fatalError("TerminalClient.tabID not configured") },
     selectedTabID: { _ in fatalError("TerminalClient.selectedTabID not configured") },
     selectedSurfaceID: { _ in fatalError("TerminalClient.selectedSurfaceID not configured") },
+    hasAgentTerminalSurface: { _ in fatalError("TerminalClient.hasAgentTerminalSurface not configured") },
     latestUnreadNotification: { fatalError("TerminalClient.latestUnreadNotification not configured") },
     markNotificationRead: { _, _ in fatalError("TerminalClient.markNotificationRead not configured") },
     hasInflightBlockingScripts: { fatalError("TerminalClient.hasInflightBlockingScripts not configured") },
@@ -138,6 +150,7 @@ extension TerminalClient: DependencyKey {
     tabID: unimplemented("TerminalClient.tabID", placeholder: nil),
     selectedTabID: unimplemented("TerminalClient.selectedTabID", placeholder: nil),
     selectedSurfaceID: unimplemented("TerminalClient.selectedSurfaceID", placeholder: nil),
+    hasAgentTerminalSurface: unimplemented("TerminalClient.hasAgentTerminalSurface", placeholder: false),
     latestUnreadNotification: unimplemented("TerminalClient.latestUnreadNotification", placeholder: nil),
     markNotificationRead: unimplemented("TerminalClient.markNotificationRead"),
     hasInflightBlockingScripts: unimplemented("TerminalClient.hasInflightBlockingScripts", placeholder: false),

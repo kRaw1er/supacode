@@ -250,6 +250,9 @@ struct SupacodeApp: App {
           else { return nil }
           return state.activeSurfaceID(for: tabID)
         },
+        hasAgentTerminalSurface: { worktreeID in
+          terminalManager.stateIfExists(for: worktreeID)?.hasAgentTerminalSurface ?? false
+        },
         latestUnreadNotification: {
           terminalManager.latestUnreadNotificationLocation()
         },

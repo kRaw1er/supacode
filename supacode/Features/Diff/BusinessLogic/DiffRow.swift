@@ -17,8 +17,9 @@ enum DiffRow: Equatable, Identifiable, Sendable {
   case placeholder(FilePlaceholder)
   /// Large-file / long-line cap: plain monospaced text, no gutter, no tint.
   case plainFallback(lineNumber: Int, text: String)
-  /// Phase 5 stub — renders nothing yet.
-  case commentThread(id: UUID)
+  /// An inline review-comment thread, pushed down below its anchored line
+  /// (Phase 5). Carries the full comment so a body edit re-renders in place.
+  case commentThread(ReviewComment)
 
   /// Coarse *logical* identity (line numbers / anchors), stable across content
   /// edits so the scroll anchor re-lands the same line after an agent edit.
@@ -36,8 +37,8 @@ enum DiffRow: Equatable, Identifiable, Sendable {
       return .placeholder(placeholder)
     case .plainFallback(let lineNumber, _):
       return .plainFallback(lineNumber)
-    case .commentThread(let uuid):
-      return .commentThread(uuid)
+    case .commentThread(let comment):
+      return .commentThread(comment.id)
     }
   }
 }

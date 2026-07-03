@@ -35,6 +35,14 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
   var onVisibleRangeChanged: ((Range<Int>) -> Void)?
   /// Fired when the user clicks an expander (anchor of the collapsed region).
   var onExpandGap: ((Int) -> Void)?
+  /// Fired when the user clicks an inline comment thread row (opens it to edit).
+  var onCommentTap: ((UUID) -> Void)?
+  /// Fired when the gutter ribbon resolves a click / drag range to comment on.
+  var onOpenComposer:
+    ((_ side: DiffSide, _ startLine: Int, _ endLine: Int, _ snippet: String, _ contextBefore: String) -> Void)?
+
+  /// The transparent gutter overlay owning the "+"/drag interaction (Phase 5).
+  private let ribbon = DiffGutterRibbonView()
 
   private static let cellIdentifier = NSUserInterfaceItemIdentifier("diff.cell")
   private static let columnIdentifier = NSUserInterfaceItemIdentifier("diff.code")
@@ -75,6 +83,16 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     scroll.drawsBackground = true
     scroll.backgroundColor = .textBackgroundColor
     scroll.contentView.postsBoundsChangedNotifications = true
+
+    // The comment ribbon floats over the viewport. It resolves hits through the
+    // controller and passes through non-gutter points to the diff cells.
+    ribbon.controller = self
+    ribbon.frame = scroll.bounds
+    ribbon.autoresizingMask = [.width, .height]
+    ribbon.onOpenComposer = { [weak self] side, start, end, snippet, context in
+      self?.onOpenComposer?(side, start, end, snippet, context)
+    }
+    scroll.addSubview(ribbon, positioned: .above, relativeTo: nil)
 
     boundsObserver = NotificationCenter.default.addObserver(
       forName: NSView.boundsDidChangeNotification,
@@ -146,8 +164,8 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     switch rows[row] {
     case .placeholder:
       return metrics.lineHeight * 3
-    case .commentThread:
-      return 0  // Phase 5 stub — renders nothing yet.
+    case .commentThread(let comment):
+      return DiffCellView.commentThreadHeight(comment, metrics: metrics)
     default:
       return metrics.lineHeight
     }
@@ -162,10 +180,16 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
         created.identifier = Self.cellIdentifier
         return created
       }()
-    cell.configure(row: rows[row], metrics: metrics, mode: mode, highlight: rowHighlight(at: row)) {
-      [weak self] anchor in
-      self?.onExpandGap?(anchor)
-    }
+    cell.configure(
+      row: rows[row],
+      metrics: metrics,
+      mode: mode,
+      highlight: rowHighlight(at: row),
+      callbacks: DiffCellView.Callbacks(
+        onExpand: { [weak self] anchor in self?.onExpandGap?(anchor) },
+        onCommentTap: { [weak self] id in self?.onCommentTap?(id) }
+      )
+    )
     return cell
   }
 
@@ -326,7 +350,106 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     return tableView.rowView(atRow: row, makeIfNecessary: false)
   }
 
+  // MARK: - Comment-ribbon geometry API (Phase 5)
+
+  /// A resolved single-line comment target: the row, the side its gutter was on,
+  /// and the git line number on that side.
+  struct CommentTarget: Equatable {
+    let rowIndex: Int
+    let side: DiffSide
+    let line: Int
+  }
+
+  var isSplitMode: Bool { mode == .split }
+
+  /// Converts a point in `sourceView`'s coordinate space to the row + side +
+  /// line under it, but only when it lands on a real content line inside the
+  /// gutter band. `nil` for non-line rows, gap cells, marker rows, or a point
+  /// outside the gutter — so the ribbon's "+" never shows there.
+  func commentTarget(at point: NSPoint, from sourceView: NSView) -> CommentTarget? {
+    let tablePoint = tableView.convert(point, from: sourceView)
+    guard let index = rowIndex(atContentPoint: tablePoint), rows.indices.contains(index) else { return nil }
+    guard let side = gutterSide(at: tablePoint) else { return nil }
+    guard let line = lineNumber(atRow: index, side: side) else { return nil }
+    return CommentTarget(rowIndex: index, side: side, line: line)
+  }
+
+  /// Line number on `side` for the row under `point` (drag continuation: the
+  /// side stays fixed to the anchor's, only the row varies). `nil` off a line.
+  func commentTarget(at point: NSPoint, from sourceView: NSView, side: DiffSide) -> CommentTarget? {
+    let tablePoint = tableView.convert(point, from: sourceView)
+    guard let index = rowIndex(atContentPoint: tablePoint), rows.indices.contains(index) else { return nil }
+    guard let line = lineNumber(atRow: index, side: side) else { return nil }
+    return CommentTarget(rowIndex: index, side: side, line: line)
+  }
+
+  /// The on-screen rect of `row` converted into `view`'s space — the ribbon uses
+  /// it to center the "+" and paint the drag band.
+  func rowRect(_ row: Int, in view: NSView) -> NSRect { rect(ofRow: row, in: view) }
+
+  /// The gutter band width (both line-number columns) used to gate ribbon hits
+  /// so a click on the code body falls through to the cell.
+  var gutterBandWidth: CGFloat { metrics.gutterWidth }
+
+  /// Builds the anchor snippet + preceding context (up to 3 lines) for a
+  /// resolved `side` range, read from the rendered rows so relocation keys off
+  /// exactly what the user saw.
+  func anchorPayload(side: DiffSide, startLine: Int, endLine: Int) -> (snippet: String, contextBefore: String) {
+    var covered: [String] = []
+    var preceding: [String] = []
+    for row in rows {
+      guard let (line, content) = lineOnSide(row, side: side) else { continue }
+      if line >= startLine, line <= endLine {
+        covered.append(content)
+      } else if line < startLine {
+        preceding.append(content)
+      }
+    }
+    let contextBefore = preceding.suffix(3).joined(separator: "\n")
+    return (covered.joined(separator: "\n"), contextBefore)
+  }
+
+  /// The side whose gutter `point.x` falls in (unified stacks old|new on the
+  /// left; split puts each pane's gutter at its left edge). `nil` outside a gutter.
+  private func gutterSide(at point: NSPoint) -> DiffSide? {
+    let gutter = metrics.gutterWidth
+    if mode == .unified {
+      if point.x < gutter { return .old }
+      if point.x < gutter * 2 { return .new }
+      return nil
+    }
+    let half = (tableView.bounds.width / 2).rounded()
+    if point.x < gutter { return .old }
+    if point.x >= half, point.x < half + gutter { return .new }
+    return nil
+  }
+
+  private func lineNumber(atRow index: Int, side: DiffSide) -> Int? {
+    guard rows.indices.contains(index) else { return nil }
+    guard let (line, _) = lineOnSide(rows[index], side: side) else { return nil }
+    return line
+  }
+
+  /// The git line number + content a row carries on `side`, or nil when the row
+  /// isn't a real content line on that side (gap cell, marker, header, expander).
+  private func lineOnSide(_ row: DiffRow, side: DiffSide) -> (line: Int, content: String)? {
+    switch row {
+    case .line(let diffLine):
+      guard diffLine.origin != .noNewlineMarker, let line = diffLine.lineNumber(on: side) else { return nil }
+      return (line, diffLine.content)
+    case .splitLine(_, let old, let new):
+      let candidate = side == .old ? old : new
+      guard let candidate, candidate.origin != .noNewlineMarker, let line = candidate.lineNumber(on: side)
+      else { return nil }
+      return (line, candidate.content)
+    default:
+      return nil
+    }
+  }
+
   private func fireVisibleRange() {
+    // Keep the gutter overlay's "+"/drag band aligned as the viewport moves.
+    ribbon.needsDisplay = true
     let range = visibleRowRange()
     guard range != lastVisibleRange else { return }
     lastVisibleRange = range

@@ -33,13 +33,15 @@ enum DiffRowBuilder {
     let edgeContext: Int
   }
 
-  /// Builds the row list.
+  /// Builds the row list. `comments` (Phase 5) are inserted as `.commentThread`
+  /// rows immediately below their anchored line via a post-pass.
   static func build(
     file: FileChange,
     hunks: [DiffHunk],
     mode: DiffViewMode,
     expanded: Set<Int>,
-    options: Options = Options()
+    options: Options = Options(),
+    comments: [ReviewComment] = []
   ) -> [DiffRow] {
     // 1. Cap / placeholder short-circuits (before any hunk walk).
     if file.isLargeFileCapped {
@@ -103,7 +105,55 @@ enum DiffRowBuilder {
       }
     }
 
-    return rows
+    return insertCommentThreads(rows, comments: comments)
+  }
+
+  // MARK: - Comment threads (Phase 5)
+
+  /// Inserts a `.commentThread` row immediately after the last row whose
+  /// `(side, gitLineNumber)` matches the comment's `endLine`. Following rows
+  /// flow down natively (the table's per-row heights push content). A comment
+  /// whose anchor row isn't present (e.g. collapsed) renders at the end so it
+  /// is never silently dropped.
+  private static func insertCommentThreads(_ rows: [DiffRow], comments: [ReviewComment]) -> [DiffRow] {
+    guard !comments.isEmpty else { return rows }
+    var byAnchor: [Int: [ReviewComment]] = [:]
+    var trailing: [ReviewComment] = []
+    for comment in comments.sorted(by: { $0.createdAt < $1.createdAt }) {
+      if let index = lastRowIndex(in: rows, side: comment.side, line: comment.endLine) {
+        byAnchor[index, default: []].append(comment)
+      } else {
+        trailing.append(comment)
+      }
+    }
+    var result: [DiffRow] = []
+    result.reserveCapacity(rows.count + comments.count)
+    for (index, row) in rows.enumerated() {
+      result.append(row)
+      for comment in byAnchor[index] ?? [] {
+        result.append(.commentThread(comment))
+      }
+    }
+    for comment in trailing {
+      result.append(.commentThread(comment))
+    }
+    return result
+  }
+
+  private static func lastRowIndex(in rows: [DiffRow], side: DiffSide, line: Int) -> Int? {
+    var found: Int?
+    for (index, row) in rows.enumerated() {
+      switch row {
+      case .line(let diffLine):
+        if diffLine.lineNumber(on: side) == line { found = index }
+      case .splitLine(_, let old, let new):
+        let sideLine = side == .old ? old?.oldLineNumber : new?.newLineNumber
+        if sideLine == line { found = index }
+      default:
+        break
+      }
+    }
+    return found
   }
 
   // MARK: - Hunk body

@@ -6,7 +6,7 @@ import SwiftUI
 /// the per-file `DiffDocument` from `DiffReviewFeature.State.openDiffs[filePath]`;
 /// all mutations go through actions (`store_state_mutation_in_views`).
 struct DiffTabContentView: View {
-  let store: StoreOf<DiffReviewFeature>
+  @Bindable var store: StoreOf<DiffReviewFeature>
   let filePath: String
 
   var body: some View {
@@ -21,6 +21,11 @@ struct DiffTabContentView: View {
       body(document: document)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .sheet(item: $store.scope(state: \.composer, action: \.composer)) { composerStore in
+      CommentComposerView(store: composerStore)
+    }
+    .alert($store.scope(state: \.alert, action: \.alert))
+    .confirmationDialog($store.scope(state: \.discardConfirm, action: \.discardConfirm))
   }
 
   // MARK: - Header
@@ -53,9 +58,33 @@ struct DiffTabContentView: View {
       .labelsHidden()
       .fixedSize()
       .help("Toggle unified / split diff view")
+      sendToAgentButton
     }
     .padding(.horizontal, 12)
     .padding(.vertical, 6)
+  }
+
+  @ViewBuilder
+  private var sendToAgentButton: some View {
+    let count = store.sendableCommentCount
+    let oversize = ReviewPromptBuilder.build(Array(store.comments))?.isOversize == true
+    HStack(spacing: 6) {
+      if oversize {
+        Label("Large prompt", systemImage: "exclamationmark.circle")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .labelStyle(.titleAndIcon)
+          .help("The prompt is large but will still be sent.")
+      }
+      Button {
+        store.send(.sendBatchToAgent)
+      } label: {
+        Label("Send to agent\(count > 0 ? " (\(count))" : "")", systemImage: "paperplane")
+      }
+      .keyboardShortcut(.return, modifiers: .command)
+      .disabled(count == 0 || store.batchLocked)
+      .help("Send \(count) review comment\(count == 1 ? "" : "s") to the agent's terminal (⌘↩)")
+    }
   }
 
   private var staleBanner: some View {
@@ -94,7 +123,14 @@ struct DiffTabContentView: View {
           revision: document.revision,
           filePath: filePath,
           workingDirectory: store.selectedWorktree?.workingDirectory,
-          onExpandGap: { anchor in store.send(.expandGap(path: filePath, anchor: anchor)) }
+          onExpandGap: { anchor in store.send(.expandGap(path: filePath, anchor: anchor)) },
+          onOpenComposer: { side, start, end, snippet, context in
+            store.send(
+              .openCommentComposer(
+                filePath: filePath, side: side, startLine: start, endLine: end,
+                anchorSnippet: snippet, contextBefore: context))
+          },
+          onCommentTap: { id in store.send(.editComment(id: id)) }
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
       }

@@ -1388,6 +1388,11 @@ struct AppFeature {
       case .terminalEvent(.agentHookEventReceived(let event)):
         return .send(.agentPresence(.hookEventReceived(event)))
 
+      case .terminalEvent(.textInjectionFailed):
+        // The last terminal surface raced away between the review reducer's
+        // pre-gate and dispatch; tell it to keep the batch and warn (5.7).
+        return .send(.review(.sendBatchFinished(.noTerminal)))
+
       case .terminalEvent:
         return .none
       }

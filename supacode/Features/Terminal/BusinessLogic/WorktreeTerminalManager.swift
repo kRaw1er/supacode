@@ -327,6 +327,14 @@ final class WorktreeTerminalManager {
       // Phase 0's `openDiffTab` dedupes by path and skips surface allocation, so
       // a re-click focuses the existing tab instead of creating a duplicate.
       _ = state(for: worktree).openDiffTab(filePath: filePath)
+    case .insertTextIntoFocusedSurface(let worktree, let text, let submit):
+      // `\r` submits, mirroring `.focusSurface`'s input handling. Use the
+      // non-creating lookup so a send never spins up an empty terminal state.
+      let payload = text + (submit ? "\r" : "")
+      let injected = stateIfExists(for: worktree.id)?.insertTextIntoTerminalSurface(payload) ?? false
+      if !injected {
+        emit(.textInjectionFailed(worktreeID: worktree.id, message: "No agent terminal to send to."))
+      }
     default:
       return false
     }
@@ -349,7 +357,7 @@ final class WorktreeTerminalManager {
       .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .performBindingAction,
       .performBindingActionOnSurface, .selectTab, .selectTabAtIndex, .focusSurface, .splitSurface,
       .destroyTab, .destroySurface, .prune, .setNotificationsEnabled, .setSelectedWorktreeID,
-      .refreshTabBarVisibility, .beginTabRename, .openDiffTab:
+      .refreshTabBarVisibility, .beginTabRename, .openDiffTab, .insertTextIntoFocusedSurface:
       return false
     }
     return true
@@ -365,7 +373,8 @@ final class WorktreeTerminalManager {
       .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .startSearch, .searchSelection,
       .navigateSearchNext, .navigateSearchPrevious, .endSearch, .selectTab, .selectTabAtIndex,
       .focusSurface, .splitSurface, .destroyTab, .destroySurface, .prune, .setNotificationsEnabled,
-      .setSelectedWorktreeID, .refreshTabBarVisibility, .beginTabRename, .openDiffTab:
+      .setSelectedWorktreeID, .refreshTabBarVisibility, .beginTabRename, .openDiffTab,
+      .insertTextIntoFocusedSurface:
       return false
     }
     return true
@@ -394,7 +403,8 @@ final class WorktreeTerminalManager {
       .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .performBindingAction,
       .performBindingActionOnSurface, .startSearch, .searchSelection, .navigateSearchNext,
       .navigateSearchPrevious, .endSearch, .selectTab, .selectTabAtIndex, .focusSurface,
-      .splitSurface, .destroyTab, .destroySurface, .beginTabRename, .openDiffTab:
+      .splitSurface, .destroyTab, .destroySurface, .beginTabRename, .openDiffTab,
+      .insertTextIntoFocusedSurface:
       assertionFailure("Unhandled terminal command reached management handler: \(command)")
     }
   }

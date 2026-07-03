@@ -55,6 +55,30 @@ struct DiffReviewFeature {
     /// `.diffLoaded/.diffFailed` is discarded when it no longer matches (8.1).
     var diffLoadToken: Int = 0
 
+    /// Review comments for the selected worktree, spanning every open diff tab
+    /// (5.4/5.9). Session-only — not persisted (no `Codable` on `State`). Kept
+    /// across a diff-tab close/reopen; cleared only on send or explicit discard.
+    var comments: IdentifiedArrayOf<ReviewComment> = []
+    /// The inline comment composer (new or edit), when open.
+    @Presents var composer: CommentComposer.State?
+    /// True while a send is in flight so a double-send can't duplicate (5.5).
+    var batchLocked = false
+    /// "No agent terminal to send to." (5.7).
+    @Presents var alert: AlertState<Action.Alert>?
+    /// Confirm-on-close for a non-empty batch (3.4).
+    @Presents var discardConfirm: ConfirmationDialogState<Action.DiscardConfirm>?
+
+    /// Count of comments that would actually send (non-empty body); drives the
+    /// send button's label + disabled state.
+    var sendableCommentCount: Int {
+      comments.count { !$0.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    /// Comments scoped to one diff tab (grouped by `filePath`).
+    func commentsForPath(_ path: String) -> [ReviewComment] {
+      comments.filter { $0.filePath == path }
+    }
+
     enum LoadState: Equatable {
       case idle  // no selection (1.1)
       case loading  // in-flight, no prior list to show
@@ -88,6 +112,32 @@ struct DiffReviewFeature {
     case diffFailed(path: String, DiffError, token: Int)  // per-file hunk load failure
     case diffModeChanged(DiffViewMode)  // unified/split toggle → rebuild all open docs
     case expandGap(path: String, anchor: Int)  // expander tap → re-diff with raised context
+
+    // MARK: Phase 5 — comments + send-to-agent
+    /// Gutter "+"/drag resolved a range. Opens the composer (edit mode if a
+    /// comment already covers the identical `(filePath, side, range)`).
+    case openCommentComposer(
+      filePath: String, side: DiffSide, startLine: Int, endLine: Int, anchorSnippet: String, contextBefore: String)
+    case composer(PresentationAction<CommentComposer.Action>)
+    case commitComment(ReviewComment)  // upsert (replace by id on edit, else append)
+    case editComment(id: UUID)  // open an existing thread to edit
+    case deleteComment(id: UUID)  // remove a thread
+    case sendBatchToAgent  // serialize + inject into the worktree terminal
+    case sendBatchFinished(TextInjectionResult)  // clears lock; on `.sent` clears comments
+    case requestDiscardBatch  // close-with-unsent → confirm
+    case discardConfirm(PresentationAction<DiscardConfirm>)
+    case alert(PresentationAction<Alert>)
+
+    /// Outcome of a batch injection.
+    enum TextInjectionResult: Equatable {
+      case sent
+      case noTerminal
+    }
+    /// The "no agent terminal" alert has a single dismiss button, no payload.
+    enum Alert: Equatable {}
+    enum DiscardConfirm: Equatable {
+      case discard
+    }
   }
 
   private nonisolated enum CancelID: Hashable, Sendable {
@@ -105,12 +155,20 @@ struct DiffReviewFeature {
       @Dependency(DiffClient.self) var diffClient
       @Dependency(TerminalClient.self) var terminalClient
       @Dependency(\.continuousClock) var clock
+      @Dependency(\.date.now) var now
       switch action {
 
       case .worktreeSelected(let worktree):
         // Any selection change invalidates in-flight results (8.1) and cancels
         // both the load and a pending debounce.
         state.generation &+= 1
+        // Comments are per-worktree and session-only (not persisted). A real
+        // worktree change drops the prior batch so it never leaks across
+        // worktrees; a re-select of the same worktree keeps it.
+        if state.selectedWorktree?.id != worktree?.id {
+          state.comments.removeAll()
+          state.composer = nil
+        }
         state.selectedWorktree = worktree
         guard let worktree else {
           state.files = []
@@ -211,7 +269,11 @@ struct DiffReviewFeature {
         document.hunks = hunks
         document.loadState = .loaded
         document.isStale = false
-        document.rows = Self.buildRows(document: document, mode: state.diffViewMode)
+        // Re-anchor this file's comments against the fresh lines (5.1); orphans
+        // are marked, never dropped.
+        Self.relocateComments(&state, path: path, lines: hunks.flatMap(\.lines))
+        document.rows = Self.buildRows(
+          document: document, mode: state.diffViewMode, comments: state.commentsForPath(path))
         document.revision &+= 1
         state.openDiffs[path] = document
         return .none
@@ -228,7 +290,7 @@ struct DiffReviewFeature {
         // Rebuild every open document's rows from its cached hunks (no I/O).
         for path in state.openDiffs.keys {
           guard var document = state.openDiffs[path] else { continue }
-          document.rows = Self.buildRows(document: document, mode: mode)
+          document.rows = Self.buildRows(document: document, mode: mode, comments: state.commentsForPath(path))
           document.revision &+= 1
           state.openDiffs[path] = document
         }
@@ -253,8 +315,118 @@ struct DiffReviewFeature {
           ),
           diffClient: diffClient
         )
+
+      // MARK: Phase 5 — comments
+
+      case .openCommentComposer(let filePath, let side, let startLine, let endLine, let snippet, let context):
+        // Editing an existing identical-range comment instead of stacking a dup.
+        if let existing = state.comments.first(where: {
+          $0.filePath == filePath && $0.side == side && $0.startLine == startLine && $0.endLine == endLine
+        }) {
+          state.composer = CommentComposer.State(draft: existing, isEditing: true)
+        } else {
+          let draft = ReviewComment(
+            filePath: filePath,
+            side: side,
+            startLine: startLine,
+            endLine: endLine,
+            anchorSnippet: snippet,
+            contextBefore: context,
+            body: "",
+            createdAt: now
+          )
+          state.composer = CommentComposer.State(draft: draft, isEditing: false)
+        }
+        return .none
+
+      case .composer(.presented(.delegate(.commit(let comment)))):
+        return .send(.commitComment(comment))
+
+      case .composer(.presented(.delegate(.cancel))):
+        state.composer = nil
+        return .none
+
+      case .composer(.presented(.delegate(.delete(let id)))):
+        state.composer = nil
+        return .send(.deleteComment(id: id))
+
+      case .composer:
+        return .none
+
+      case .commitComment(let comment):
+        state.comments[id: comment.id] = comment
+        state.composer = nil
+        Self.rebuildRows(&state, path: comment.filePath)
+        return .none
+
+      case .editComment(let id):
+        guard let comment = state.comments[id: id] else { return .none }
+        state.composer = CommentComposer.State(draft: comment, isEditing: true)
+        return .none
+
+      case .deleteComment(let id):
+        guard let comment = state.comments[id: id] else { return .none }
+        state.comments.remove(id: id)
+        Self.rebuildRows(&state, path: comment.filePath)
+        return .none
+
+      case .sendBatchToAgent:
+        guard !state.batchLocked,
+          let worktree = state.selectedWorktree,
+          let output = ReviewPromptBuilder.build(Array(state.comments))
+        else { return .none }
+        guard terminalClient.hasAgentTerminalSurface(worktree.id) else {
+          state.discardConfirm = nil
+          state.alert = .noAgentTerminal
+          return .none
+        }
+        state.batchLocked = true
+        return .merge(
+          .run { _ in
+            await terminalClient.send(.insertTextIntoFocusedSurface(worktree, text: output.markdown, submit: true))
+          },
+          // Optimistic; a same-tick `.textInjectionFailed` routes `.noTerminal`.
+          .send(.sendBatchFinished(.sent))
+        )
+
+      case .sendBatchFinished(.sent):
+        state.comments.removeAll()
+        state.batchLocked = false
+        // Drop the now-stale comment threads from every open document.
+        for path in state.openDiffs.keys {
+          Self.rebuildRows(&state, path: path)
+        }
+        return .none
+
+      case .sendBatchFinished(.noTerminal):
+        state.batchLocked = false
+        state.alert = .noAgentTerminal
+        return .none
+
+      case .requestDiscardBatch:
+        guard !state.comments.isEmpty, !state.batchLocked else { return .none }
+        state.discardConfirm = Self.discardConfirmDialog(count: state.comments.count)
+        return .none
+
+      case .discardConfirm(.presented(.discard)):
+        state.comments.removeAll()
+        for path in state.openDiffs.keys {
+          Self.rebuildRows(&state, path: path)
+        }
+        return .none
+
+      case .discardConfirm:
+        return .none
+
+      case .alert:
+        return .none
       }
     }
+    .ifLet(\.$composer, action: \.composer) {
+      CommentComposer()
+    }
+    .ifLet(\.$alert, action: \.alert)
+    .ifLet(\.$discardConfirm, action: \.discardConfirm)
   }
 
   /// Tags the request with `generation`; the return is checked against the live
@@ -283,14 +455,53 @@ struct DiffReviewFeature {
   /// Builds the flat row list for a document. When the user has expanded a gap,
   /// collapsing is disabled (threshold → max) so the full-context re-diff renders
   /// the whole file.
-  private static func buildRows(document: DiffDocument, mode: DiffViewMode) -> [DiffRow] {
+  private static func buildRows(
+    document: DiffDocument,
+    mode: DiffViewMode,
+    comments: [ReviewComment] = []
+  ) -> [DiffRow] {
     DiffRowBuilder.build(
       file: document.file,
       hunks: document.hunks,
       mode: mode,
       expanded: document.expanded,
-      options: DiffRowBuilder.Options(collapseThreshold: document.expanded.isEmpty ? 10 : .max)
+      options: DiffRowBuilder.Options(collapseThreshold: document.expanded.isEmpty ? 10 : .max),
+      comments: comments
     )
+  }
+
+  /// Rebuilds one open document's rows from its cached hunks + the current
+  /// comments for its path, bumping `revision` so the viewer re-applies. No I/O.
+  private static func rebuildRows(_ state: inout State, path: String) {
+    guard var document = state.openDiffs[path] else { return }
+    document.rows = Self.buildRows(
+      document: document, mode: state.diffViewMode, comments: state.commentsForPath(path))
+    document.revision &+= 1
+    state.openDiffs[path] = document
+  }
+
+  /// Re-anchors every comment for `path` against the freshly re-diffed `lines`
+  /// (5.1). A comment whose lines vanished is marked `orphaned`, never removed.
+  private static func relocateComments(_ state: inout State, path: String, lines: [DiffLine]) {
+    for comment in state.comments where comment.filePath == path {
+      state.comments[id: comment.id] = CommentAnchor.relocate(comment, in: lines, side: comment.side)
+    }
+  }
+
+  /// Single dismiss-only alert for the missing-terminal case (5.7).
+  static func discardConfirmDialog(count: Int) -> ConfirmationDialogState<Action.DiscardConfirm> {
+    ConfirmationDialogState {
+      TextState("Discard \(count) comment\(count == 1 ? "" : "s")?")
+    } actions: {
+      ButtonState(role: .destructive, action: .discard) {
+        TextState("Discard")
+      }
+      ButtonState(role: .cancel) {
+        TextState("Keep")
+      }
+    } message: {
+      TextState("These review comments haven't been sent to the agent yet.")
+    }
   }
 
   /// Fetches one file's hunks (generation-guarded, 8.1) and feeds them back as
@@ -348,5 +559,20 @@ struct DiffReviewFeature {
       )
     }
     return .merge(effects)
+  }
+}
+
+extension AlertState where Action == DiffReviewFeature.Action.Alert {
+  /// "No agent terminal to send to." — dismiss-only (5.7).
+  static var noAgentTerminal: Self {
+    AlertState {
+      TextState("No agent terminal to send to")
+    } actions: {
+      ButtonState(role: .cancel) {
+        TextState("OK")
+      }
+    } message: {
+      TextState("Open a terminal tab in this worktree, then send your review comments again.")
+    }
   }
 }

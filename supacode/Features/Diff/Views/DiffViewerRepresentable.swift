@@ -23,6 +23,13 @@ struct DiffViewerRepresentable: NSViewRepresentable {
   /// Handed the controller once so Phase 5 can reach the geometry API.
   var onController: (DiffTableController) -> Void = { _ in }
   var onVisibleRangeChanged: (Range<Int>) -> Void = { _ in }
+  /// Gutter "+"/drag resolved a range → open the composer (Phase 5).
+  var onOpenComposer:
+    (_ side: DiffSide, _ startLine: Int, _ endLine: Int, _ snippet: String, _ contextBefore: String) -> Void = {
+      _, _, _, _, _ in
+    }
+  /// An inline comment thread row was clicked → open it to edit (Phase 5).
+  var onCommentTap: (UUID) -> Void = { _ in }
 
   func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -34,8 +41,16 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     controller.onVisibleRangeChanged = { [coordinator = context.coordinator] range in
       coordinator.handleVisibleRange(range)
     }
+    controller.onOpenComposer = { [coordinator = context.coordinator] side, start, end, snippet, context in
+      coordinator.onOpenComposer(side, start, end, snippet, context)
+    }
+    controller.onCommentTap = { [coordinator = context.coordinator] id in
+      coordinator.onCommentTap(id)
+    }
     context.coordinator.onExpandGap = onExpandGap
     context.coordinator.onVisibleRangeChanged = onVisibleRangeChanged
+    context.coordinator.onOpenComposer = onOpenComposer
+    context.coordinator.onCommentTap = onCommentTap
     context.coordinator.update(filePath: filePath, workingDirectory: workingDirectory, revision: revision)
     onController(controller)
     controller.apply(rows: rows, mode: mode, scrollPreserving: false)
@@ -50,6 +65,8 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     // state) are used, then apply only when something actually changed.
     context.coordinator.onExpandGap = onExpandGap
     context.coordinator.onVisibleRangeChanged = onVisibleRangeChanged
+    context.coordinator.onOpenComposer = onOpenComposer
+    context.coordinator.onCommentTap = onCommentTap
     let coordinator = context.coordinator
     coordinator.update(filePath: filePath, workingDirectory: workingDirectory, revision: revision)
     guard coordinator.lastRevision != revision || coordinator.lastMode != mode else { return }
@@ -69,6 +86,8 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     let controller = DiffTableController()
     var onExpandGap: (Int) -> Void = { _ in }
     var onVisibleRangeChanged: (Range<Int>) -> Void = { _ in }
+    var onOpenComposer: (DiffSide, Int, Int, String, String) -> Void = { _, _, _, _, _ in }
+    var onCommentTap: (UUID) -> Void = { _ in }
     var lastRevision = -1
     var lastMode: DiffViewMode = .unified
 
