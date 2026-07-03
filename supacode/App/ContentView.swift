@@ -38,6 +38,12 @@ struct ContentView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
           SidebarBottomCardView(store: store)
         }
+        // Ordered AFTER the card (outermost) so the card's spring transition
+        // can't jitter the pill. The scoped store confines usage-tick
+        // invalidation to `UsagePillHost` (never `ContentView`/sidebar).
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+          UsagePillHost(store: store.scope(state: \.usage, action: \.usage))
+        }
     } detail: {
       WorktreeDetailView(store: store, terminalManager: terminalManager)
     }
