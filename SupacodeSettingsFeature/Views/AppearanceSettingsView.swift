@@ -4,6 +4,10 @@ import SwiftUI
 
 public struct AppearanceSettingsView: View {
   @Bindable var store: StoreOf<SettingsFeature>
+  /// Dumb binding to the shared toggle; the popover is the live-status source of
+  /// truth, so this pane only flips the key. `UsagePillHost.onChange` observes
+  /// the same key and carries the flip into the usage reducer's lifecycle.
+  @Shared(.usagePillEnabled) private var showClaudeUsage: Bool
 
   public init(store: StoreOf<SettingsFeature>) {
     self.store = store
@@ -64,6 +68,27 @@ public struct AppearanceSettingsView: View {
           Text("Default Editor")
           Text("Applies to Worktrees without repository overrides.")
         }
+      }
+      Section {
+        Toggle(
+          isOn: Binding(
+            get: { showClaudeUsage },
+            set: { newValue in $showClaudeUsage.withLock { $0 = newValue } }
+          )
+        ) {
+          Text("Show Claude usage")
+          Text("Displays session and weekly Claude usage in the sidebar.")
+        }
+        .help("Show a Claude usage pill at the bottom of the sidebar.")
+      } header: {
+        Text("Usage")
+      } footer: {
+        Text(
+          """
+          Usage is read from the account signed in to the Claude Code CLI. \
+          Turning this off stops all usage checks.
+          """
+        )
       }
       Section {
         Toggle(isOn: $store.analyticsEnabled) {

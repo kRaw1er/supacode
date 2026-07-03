@@ -44,6 +44,8 @@ struct AppFeature {
     /// tab-bar views scope through `\.terminals` (narrow) instead of the full
     /// app store. Mirrors sidebar's `RepositoriesFeature` ownership pattern.
     var terminals = TerminalsFeature.State()
+    /// Claude usage indicator (pill + popover). App-global; one poll loop.
+    var usage = UsageFeature.State()
     var openActionSelection: OpenWorktreeAction = .finder
     var repoScripts: [ScriptDefinition] = []
     var globalScripts: [ScriptDefinition] = []
@@ -156,6 +158,7 @@ struct AppFeature {
   enum Action {
     case agentPresence(AgentPresenceFeature.Action)
     case terminals(TerminalsFeature.Action)
+    case usage(UsageFeature.Action)
     case appLaunched
     case scenePhaseChanged(ScenePhase)
     case repositories(RepositoriesFeature.Action)
@@ -223,6 +226,7 @@ struct AppFeature {
         return .merge(
           .send(.repositories(.task)),
           .send(.settings(.task)),
+          .send(.usage(.task)),
           .run { _ in
             await MainActor.run {
               NSApplication.shared.dockTile.badgeLabel = nil
@@ -276,6 +280,8 @@ struct AppFeature {
           analyticsClient.capture("app_activated", nil)
           return .merge(
             .send(.repositories(.refreshWorktrees)),
+            // Refresh usage on foreground (no-op if the pill is disabled).
+            .send(.usage(.scenePhaseChanged(.active))),
             // Re-probe agent integrations on activation so the sidebar
             // card reflects external installs (e.g. `claude install`)
             // for users who keep the app open across days.
@@ -1376,11 +1382,18 @@ struct AppFeature {
 
       case .terminalEvent:
         return .none
+
+      // Handled by the `UsageFeature` Scope below; the core reducer ignores it.
+      case .usage:
+        return .none
       }
     }
     core
     Scope(state: \.terminals, action: \.terminals) {
       TerminalsFeature()
+    }
+    Scope(state: \.usage, action: \.usage) {
+      UsageFeature()
     }
     Scope(state: \.agentPresence, action: \.agentPresence) {
       AgentPresenceFeature()
