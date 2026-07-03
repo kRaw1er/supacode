@@ -15,6 +15,7 @@ let package = Package(
   name: "supacode",
   dependencies: [
     .package(url: "https://github.com/apple/swift-argument-parser", exact: "1.7.1"),
+    .package(url: "https://github.com/ibrahimcetin/libgit2", exact: "1.9.2"),
     .package(url: "https://github.com/apple/swift-collections", exact: "1.3.0"),
     .package(url: "https://github.com/onevcat/Kingfisher.git", exact: "8.8.0"),
     .package(url: "https://github.com/PostHog/posthog-ios.git", exact: "3.38.0"),

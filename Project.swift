@@ -22,6 +22,10 @@ let appResources: ResourceFileElements = [
   "supacode/AppIcon.icon",
   "supacode/Assets.xcassets",
   "supacode/notification.wav",
+  // Third-party license notices shipped in the bundle. libgit2 is GPLv2 with a
+  // linking exception (permits the closed-source combination) whose notice
+  // clause is mandatory — see supacode/Licenses/libgit2-COPYING.txt.
+  "supacode/Licenses",
 ]
 
 let appBuildableFolders: [BuildableFolder] = [
@@ -44,6 +48,7 @@ let appDependencies: [TargetDependency] = [
   .external(name: "Dependencies"),
   .external(name: "IdentifiedCollections"),
   .external(name: "Kingfisher"),
+  .external(name: "libgit2"),
   .external(name: "OrderedCollections"),
   .external(name: "PostHog"),
   .external(name: "Sentry"),
@@ -63,6 +68,7 @@ let testDependencies: [TargetDependency] = [
   .external(name: "Dependencies"),
   .external(name: "DependenciesTestSupport"),
   .external(name: "IdentifiedCollections"),
+  .external(name: "libgit2"),
   .external(name: "OrderedCollections"),
   .external(name: "Sharing"),
 ]
