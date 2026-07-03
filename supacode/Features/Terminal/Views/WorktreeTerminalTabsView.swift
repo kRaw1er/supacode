@@ -59,12 +59,20 @@ struct WorktreeTerminalTabsView: View {
       }
       if let selectedId = state.tabManager.selectedTabId {
         TerminalTabContentStack(tabs: state.tabManager.tabs, selectedTabId: selectedId) { tabId in
-          TerminalSplitTreePane(
-            tabId: tabId,
-            terminalState: state,
-            terminalsStore: terminalsStore,
-            unfocusedSplitOverlay: unfocusedSplitOverlay
-          )
+          switch state.tabManager.tabs.first(where: { $0.id == tabId })?.kind ?? .terminal {
+          case .terminal:
+            TerminalSplitTreePane(
+              tabId: tabId,
+              terminalState: state,
+              terminalsStore: terminalsStore,
+              unfocusedSplitOverlay: unfocusedSplitOverlay
+            )
+          case .diff:
+            // Phase 3 replaces this placeholder with the diff viewer. The `.diff`
+            // branch never touches `TerminalSplitTreePane`, so `splitTree(for:)`
+            // is never reached for a diff tab.
+            DiffTabContentView(filePath: state.diffFilePath(for: tabId))
+          }
         }
       } else {
         EmptyTerminalPaneView(message: "No terminals open")
