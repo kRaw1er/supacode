@@ -72,3 +72,6 @@ fastlane/test_output
 *.profraw
 .env
 .DS_Store
+
+# AI workflow planning artifacts (compound-engineering /plan) — kept local, not committed
+docs/plans/
