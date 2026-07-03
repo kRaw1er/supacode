@@ -52,11 +52,14 @@ public struct RepositoryScriptsSettingsView: View {
           Section {
             if script.kind == .custom {
               TextField("Name", text: $script.name)
+              ScriptSymbolPickerRow(systemImage: $script.systemImage, tint: script.resolvedTintColor)
               LabeledContent("Color") {
                 ColorSwatchRow(color: $script.tintColor)
               }
             }
             ScriptCommandEditor(text: $script.command, label: script.displayName)
+            Toggle("Show in toolbar", isOn: $script.showInToolbar)
+              .help("Pin this script to the worktree toolbar as a one-click button.")
             Button("Remove Script…", role: .destructive) {
               store.send(.removeScript(script.id))
             }

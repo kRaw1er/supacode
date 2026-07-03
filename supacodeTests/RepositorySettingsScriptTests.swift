@@ -126,6 +126,110 @@ struct RepositorySettingsCodableTests {
   }
 }
 
+// MARK: - Script icon + pin decoding.
+
+struct ScriptDefinitionIconPinCodableTests {
+  private static let id = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+
+  @Test func showInToolbarRoundTrips() throws {
+    var script = ScriptDefinition(id: Self.id, kind: .custom, name: "Deploy", command: "fly deploy")
+    script.showInToolbar = true
+    let decoded = try JSONDecoder().decode(
+      ScriptDefinition.self,
+      from: try JSONEncoder().encode(script),
+    )
+    #expect(decoded.showInToolbar == true)
+    #expect(decoded == script)  // whole-value round-trip guards against field drift
+  }
+
+  @Test func missingShowInToolbarKeyDecodesFalse() throws {
+    // Simulates a script written by a build that predates the flag.
+    let json = """
+      {"id":"\(Self.id)","kind":"custom","name":"Lint","command":"make lint"}
+      """
+    let decoded = try JSONDecoder().decode(ScriptDefinition.self, from: Data(json.utf8))
+    #expect(decoded.showInToolbar == false)  // opt-in default: no surprise pins on upgrade
+  }
+
+  @Test func malformedShowInToolbarCollapsesToFalseAndKeepsScript() throws {
+    // A corrupt / hand-edited value must not fail the whole entry.
+    let json = """
+      {"id":"\(Self.id)","kind":"custom","name":"Lint","command":"make lint","showInToolbar":"yes-please"}
+      """
+    let decoded = try JSONDecoder().decode(ScriptDefinition.self, from: Data(json.utf8))
+    #expect(decoded.showInToolbar == false)
+    #expect(decoded.name == "Lint")  // rest of the script survives
+    #expect(decoded.command == "make lint")
+  }
+
+  @Test func systemImageRoundTrips() throws {
+    var script = ScriptDefinition(id: Self.id, kind: .custom, name: "Deploy", command: "fly deploy")
+    script.systemImage = "paperplane.fill"
+    let decoded = try JSONDecoder().decode(
+      ScriptDefinition.self,
+      from: try JSONEncoder().encode(script),
+    )
+    #expect(decoded.systemImage == "paperplane.fill")
+    #expect(decoded.resolvedSystemImage == "paperplane.fill")
+  }
+
+  @Test func malformedSystemImageDropsOverrideNotScript() throws {
+    // A non-string systemImage drops to nil → resolvedSystemImage falls back to the kind default.
+    let json = """
+      {"id":"\(Self.id)","kind":"custom","name":"Lint","command":"make lint","systemImage":123}
+      """
+    let decoded = try JSONDecoder().decode(ScriptDefinition.self, from: Data(json.utf8))
+    #expect(decoded.systemImage == nil)
+    #expect(decoded.name == "Lint")
+    #expect(decoded.resolvedSystemImage == ScriptKind.custom.defaultSystemImage)
+  }
+}
+
+// MARK: - Pin-to-toolbar helper.
+
+struct ScriptDefinitionPinHelperTests {
+  private func pinned(_ script: ScriptDefinition) -> ScriptDefinition {
+    var copy = script
+    copy.showInToolbar = true
+    return copy
+  }
+
+  @Test func filtersToShowInToolbar() {
+    let pin = pinned(ScriptDefinition(kind: .custom, name: "A", command: "a"))
+    let plain = ScriptDefinition(kind: .custom, name: "B", command: "b")
+    #expect([pin, plain].pinnedToolbarScripts(limit: 4) == [pin])
+  }
+
+  @Test func preservesMergedOrderRepoBeforeGlobal() {
+    let repoPin = pinned(ScriptDefinition(kind: .run, name: "Repo", command: "r"))
+    let globalPin = pinned(ScriptDefinition(kind: .custom, name: "Global", command: "g"))
+    let merged = [ScriptDefinition].merged(repo: [repoPin], global: [globalPin])
+    #expect(merged.pinnedToolbarScripts(limit: 4) == [repoPin, globalPin])
+  }
+
+  @Test func respectsLimitCapKeepingLeadingOrder() {
+    let pins = (0..<6).map { pinned(ScriptDefinition(kind: .custom, name: "S\($0)", command: "c")) }
+    #expect(pins.pinnedToolbarScripts(limit: 4) == Array(pins.prefix(4)))
+  }
+
+  @Test func keepsBlankCommandPins() {
+    // Explicitly pinned but blank-command scripts stay (rendered disabled), unlike
+    // visibleGlobalScripts which hides half-configured UNpinned globals.
+    let blankPin = pinned(ScriptDefinition(kind: .custom, name: "Empty", command: "   "))
+    #expect([blankPin].pinnedToolbarScripts(limit: 4) == [blankPin])
+  }
+
+  @Test func dropsGlobalShadowedByRepoID() {
+    // A pinned global shadowed by a repo script of the same ID must not double-render:
+    // `.merged` already drops it, so the helper on the merged input reflects that.
+    let id = UUID()
+    let repoPin = pinned(ScriptDefinition(id: id, kind: .test, name: "Repo", command: "r"))
+    let globalPin = pinned(ScriptDefinition(id: id, kind: .custom, name: "Global", command: "g"))
+    let merged = [ScriptDefinition].merged(repo: [repoPin], global: [globalPin])
+    #expect(merged.pinnedToolbarScripts(limit: 4) == [repoPin])
+  }
+}
+
 // MARK: - Global scripts decoding.
 
 struct GlobalSettingsScriptsCodableTests {
@@ -231,6 +335,26 @@ struct GlobalSettingsScriptsCodableTests {
     let settings = try JSONDecoder().decode(GlobalSettings.self, from: data)
     #expect(settings.globalScripts.count == 1)
     #expect(settings.globalScripts.first?.kind == .custom)
+  }
+
+  @Test func decodePreservesShowInToolbarAndSystemImageWhileForcingCustomKind() throws {
+    // The `.custom` normalization loop must not wipe the new fields.
+    var dict = baseGlobalSettingsDict()
+    dict["globalScripts"] = [
+      [
+        "id": "00000000-0000-0000-0000-000000000001",
+        "kind": "run",  // forged — must normalize to .custom
+        "name": "Sneaky", "command": "echo hi",
+        "showInToolbar": true,
+        "systemImage": "bolt.fill",
+      ]
+    ]
+    let data = try JSONSerialization.data(withJSONObject: dict)
+    let settings = try JSONDecoder().decode(GlobalSettings.self, from: data)
+    let script = try #require(settings.globalScripts.first)
+    #expect(script.kind == .custom)  // security invariant unchanged
+    #expect(script.showInToolbar == true)  // new field survives normalization
+    #expect(script.systemImage == "bolt.fill")
   }
 
   // MARK: - Helpers.
@@ -393,6 +517,23 @@ struct RepositorySettingsScriptTests {
     }
 
     #expect(store.state.settings.scripts.count == 1)
+  }
+
+  @Test(.dependencies) func togglingShowInToolbarPersists() async {
+    // A `.run` script also exercises "predefined kinds are pinnable".
+    let script = ScriptDefinition(kind: .run, command: "npm run dev")
+    let store = makeStore(scripts: [script])
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    var pinned = script
+    pinned.showInToolbar = true
+    await store.send(.binding(.set(\.settings.scripts, [pinned]))) {
+      $0.settings.scripts = [pinned]
+    }
+    await store.receive(\.delegate.settingsChanged)
+
+    @Shared(.repositorySettings(Self.rootURL, host: nil)) var persisted
+    #expect(persisted.scripts.first?.showInToolbar == true)
   }
 
 }

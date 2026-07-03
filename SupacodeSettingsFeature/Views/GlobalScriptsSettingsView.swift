@@ -46,10 +46,13 @@ public struct GlobalScriptsSettingsView: View {
         ForEach($store.globalScripts) { $script in
           Section {
             TextField("Name", text: $script.name)
+            ScriptSymbolPickerRow(systemImage: $script.systemImage, tint: script.resolvedTintColor)
             LabeledContent("Color") {
               ColorSwatchRow(color: $script.tintColor)
             }
             ScriptCommandEditor(text: $script.command, label: script.displayName)
+            Toggle("Show in toolbar", isOn: $script.showInToolbar)
+              .help("Pin this script to the worktree toolbar as a one-click button.")
             Button("Remove Script…", role: .destructive) {
               store.send(.removeGlobalScript(script.id))
             }

@@ -14,6 +14,11 @@ public nonisolated struct ScriptDefinition: Identifiable, Codable, Equatable, Ha
   public var systemImage: String?
   public var tintColor: RepositoryColor?
 
+  /// Whether this script is pinned to the worktree toolbar as a
+  /// one-click button. Opt-in (defaults `false`) so upgrading never
+  /// surfaces existing scripts unexpectedly. Meaningful for every kind.
+  public var showInToolbar: Bool
+
   /// Display name for toolbar labels: predefined types show their
   /// kind name ("Run", "Test"), custom types show user-defined name.
   public nonisolated var displayName: String {
@@ -38,6 +43,7 @@ public nonisolated struct ScriptDefinition: Identifiable, Codable, Equatable, Ha
     name: String? = nil,
     systemImage: String? = nil,
     tintColor: RepositoryColor? = nil,
+    showInToolbar: Bool = false,
     command: String = ""
   ) {
     self.id = id
@@ -45,11 +51,12 @@ public nonisolated struct ScriptDefinition: Identifiable, Codable, Equatable, Ha
     self.name = name ?? kind.defaultName
     self.systemImage = systemImage
     self.tintColor = tintColor
+    self.showInToolbar = showInToolbar
     self.command = command
   }
 
   private enum CodingKeys: String, CodingKey {
-    case id, kind, name, command, systemImage, tintColor
+    case id, kind, name, command, systemImage, tintColor, showInToolbar
   }
 
   /// Optional fields use `try?` so a malformed `tintColor` / `systemImage`
@@ -62,6 +69,9 @@ public nonisolated struct ScriptDefinition: Identifiable, Codable, Equatable, Ha
     command = try container.decode(String.self, forKey: .command)
     systemImage = (try? container.decodeIfPresent(String.self, forKey: .systemImage)) ?? nil
     tintColor = (try? container.decodeIfPresent(RepositoryColor.self, forKey: .tintColor)) ?? nil
+    // `try?` (not a bare `decodeIfPresent`) so a corrupt value collapses to
+    // `false` instead of throwing and dropping the whole script via `Lossy`.
+    showInToolbar = (try? container.decodeIfPresent(Bool.self, forKey: .showInToolbar)) ?? false
   }
 }
 
@@ -84,6 +94,14 @@ extension [ScriptDefinition] {
   /// Whether any `.run`-kind script is currently running.
   public func hasRunningRunScript(in runningIDs: Set<UUID>) -> Bool {
     contains { $0.kind == .run && runningIDs.contains($0.id) }
+  }
+
+  /// Scripts pinned to the toolbar, in the receiver's order, capped to `limit`.
+  /// Call on the already-`merged` array (repo-first) so repo pins precede global
+  /// pins and a global shadowed by a same-ID repo script is already dropped.
+  /// Blank-command pins are kept (rendered disabled) — the user pinned them explicitly.
+  public func pinnedToolbarScripts(limit: Int) -> [ScriptDefinition] {
+    Array(filter(\.showInToolbar).prefix(limit))
   }
 
   /// Repo scripts followed by globals; repo wins on ID collisions.

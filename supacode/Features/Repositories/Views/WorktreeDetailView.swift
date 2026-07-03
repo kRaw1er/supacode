@@ -473,6 +473,17 @@ struct WorktreeDetailView: View {
       allScripts.primaryScript
     }
 
+    /// Max pinned scripts rendered as individual toolbar buttons; extras stay
+    /// reachable in the ScriptMenu dropdown so the toolbar can't overcrowd.
+    static let maxPinnedToolbarButtons = 4
+
+    /// Scripts pinned to the toolbar as one-click buttons, repo pins before
+    /// global pins (via `merged`), capped. Logic lives in the shared, tested
+    /// `[ScriptDefinition].pinnedToolbarScripts(limit:)` helper.
+    var pinnedScripts: [ScriptDefinition] {
+      allScripts.pinnedToolbarScripts(limit: Self.maxPinnedToolbarButtons)
+    }
+
     /// Whether any `.run`-kind script is currently running.
     var hasRunningRunScript: Bool {
       allScripts.hasRunningRunScript(in: runningScriptIDs)
@@ -541,6 +552,26 @@ struct WorktreeDetailView: View {
           .transaction { $0.animation = nil }
       }
       ToolbarSpacer(.fixed)
+
+      // Pinned scripts surface as individual one-click buttons. Unlike the
+      // ScriptMenu below (an NSMenu that needs `.id` cache-busting), these are
+      // plain Buttons refreshed by native observation — `makeToolbarState`
+      // rebuilds a fresh value each pass, so no identity trick is needed.
+      if !toolbarState.pinnedScripts.isEmpty {
+        ToolbarItemGroup {
+          ForEach(toolbarState.pinnedScripts) { script in
+            PinnedScriptToolbarButton(
+              script: script,
+              isRunning: toolbarState.runningScriptIDs.contains(script.id),
+              terminalManager: terminalManager,
+              isFullScreen: isFullScreen,
+              onRun: { onRunNamedScript(script) },
+              onStop: { onStopScript(script) }
+            )
+          }
+        }
+        ToolbarSpacer(.fixed)
+      }
 
       ToolbarItem {
         ScriptMenu(
@@ -1076,6 +1107,60 @@ private struct MultiSelectedWorktreesDetailView: View {
   }
 }
 
+/// Shared run/stop affordance so the pinned toolbar buttons and the ScriptMenu
+/// rows stay in lockstep (help copy + has-command check).
+private enum ScriptRunControl {
+  static func hasCommand(_ script: ScriptDefinition) -> Bool {
+    !script.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  static func helpText(for script: ScriptDefinition, isRunning: Bool, hasCommand: Bool) -> String {
+    if isRunning { return "Stop \(script.displayName)." }
+    if !hasCommand { return "\"\(script.displayName)\" has no command. Configure it in Settings." }
+    return "Run \(script.displayName)."
+  }
+}
+
+/// A script pinned to the toolbar, rendered as a single tinted icon button.
+/// Click runs the script (or stops it while running); blank-command pins are
+/// disabled with an explanatory tooltip. No `.id` cache-busting — a plain
+/// Button refreshes through native observation (see the ScriptMenu note).
+private struct PinnedScriptToolbarButton: View {
+  let script: ScriptDefinition
+  let isRunning: Bool
+  let terminalManager: WorktreeTerminalManager
+  let isFullScreen: Bool
+  let onRun: () -> Void
+  let onStop: () -> Void
+
+  var body: some View {
+    let hasCommand = ScriptRunControl.hasCommand(script)
+    Button {
+      if isRunning {
+        onStop()
+      } else {
+        onRun()
+      }
+    } label: {
+      Label {
+        // Kept for the narrow-window overflow menu + VoiceOver; hidden in the bar.
+        Text(isRunning ? "Stop \(script.displayName)" : script.displayName)
+      } icon: {
+        Image.tintedSymbol(
+          isRunning ? "stop" : script.resolvedSystemImage,
+          color: script.resolvedTintColor.nsColor,
+        )
+      }
+      .labelStyle(.iconOnly)
+    }
+    .disabled(!isRunning && !hasCommand)
+    .help(ScriptRunControl.helpText(for: script, isRunning: isRunning, hasCommand: hasCommand))
+    // The tinted app-icon glyph opts out of AppKit's vibrant foreground, so
+    // apply the terminal-aware chrome tint manually (mirrors the Open menu).
+    .toolbarTintColorScheme(manager: terminalManager, isFullScreen: isFullScreen)
+  }
+}
+
 /// Menu with primary action for running scripts in the toolbar.
 /// Click runs the default script, stops running scripts, or opens settings;
 /// long-press/arrow opens the full script list.
@@ -1136,7 +1221,7 @@ private struct ScriptMenu: View {
   private func scriptButtons(for scripts: [ScriptDefinition]) -> some View {
     ForEach(scripts) { script in
       let isRunning = toolbarState.runningScriptIDs.contains(script.id)
-      let hasCommand = !script.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      let hasCommand = ScriptRunControl.hasCommand(script)
       Button {
         if isRunning {
           onStopScript(script)
@@ -1159,9 +1244,7 @@ private struct ScriptMenu: View {
   }
 
   private func scriptButtonHelp(script: ScriptDefinition, isRunning: Bool, hasCommand: Bool) -> String {
-    if isRunning { return "Stop \(script.displayName)." }
-    if !hasCommand { return "\"\(script.displayName)\" has no command. Configure it in Settings." }
-    return "Run \(script.displayName)."
+    ScriptRunControl.helpText(for: script, isRunning: isRunning, hasCommand: hasCommand)
   }
 
   @ViewBuilder
