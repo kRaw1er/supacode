@@ -113,6 +113,69 @@ struct SettingsFeatureTests {
     expectNoDifference(settingsFile.global, expectedSettings)
   }
 
+  @Test(.dependencies) func togglingGlobalScriptShowInToolbarPersists() async {
+    var initialSettings = GlobalSettings.default
+    let script = ScriptDefinition(kind: .custom, name: "Lint", command: "make lint")
+    initialSettings.globalScripts = [script]
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock { $0.global = initialSettings }
+
+    let store = TestStore(initialState: SettingsFeature.State(settings: initialSettings)) {
+      SettingsFeature()
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    var pinned = script
+    pinned.showInToolbar = true
+    await store.send(.binding(.set(\.globalScripts, [pinned]))) {
+      $0.globalScripts = [pinned]
+    }
+    await store.receive(\.delegate.settingsChanged)
+
+    #expect(settingsFile.global.globalScripts.first?.showInToolbar == true)
+  }
+
+  @Test(.dependencies) func editingGlobalScriptSystemImagePersists() async {
+    var initialSettings = GlobalSettings.default
+    let script = ScriptDefinition(kind: .custom, name: "Deploy", command: "fly deploy")
+    initialSettings.globalScripts = [script]
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock { $0.global = initialSettings }
+
+    let store = TestStore(initialState: SettingsFeature.State(settings: initialSettings)) {
+      SettingsFeature()
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    var updated = script
+    updated.systemImage = "paperplane.fill"
+    await store.send(.binding(.set(\.globalScripts, [updated]))) {
+      $0.globalScripts = [updated]
+    }
+    await store.receive(\.delegate.settingsChanged)
+
+    #expect(settingsFile.global.globalScripts.first?.systemImage == "paperplane.fill")
+  }
+
+  @Test(.dependencies) func changingMaxPinnedToolbarButtonsPersists() async {
+    var initialSettings = GlobalSettings.default
+    initialSettings.maxPinnedToolbarButtons = 4
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock { $0.global = initialSettings }
+
+    let store = TestStore(initialState: SettingsFeature.State(settings: initialSettings)) {
+      SettingsFeature()
+    }
+    store.exhaustivity = .off(showSkippedAssertions: false)
+
+    await store.send(.binding(.set(\.maxPinnedToolbarButtons, 2))) {
+      $0.maxPinnedToolbarButtons = 2
+    }
+    await store.receive(\.delegate.settingsChanged)
+
+    #expect(settingsFile.global.maxPinnedToolbarButtons == 2)
+  }
+
   @Test(.dependencies) func setSystemNotificationsEnabledPersistsChanges() async {
     var initialSettings = GlobalSettings.default
     initialSettings.systemNotificationsEnabled = false

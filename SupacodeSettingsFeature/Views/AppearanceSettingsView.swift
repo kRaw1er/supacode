@@ -84,6 +84,11 @@ public struct AppearanceSettingsView: View {
           Text("Hide Tab Bar for Single Tab")
           Text("Automatically hides the tab bar when only one tab is open.")
         }
+        Stepper(value: $store.maxPinnedToolbarButtons, in: GlobalSettings.pinnedToolbarButtonRange) {
+          Text("Pinned Toolbar Buttons: \(store.maxPinnedToolbarButtons)")
+          Text("How many pinned scripts show as toolbar buttons before the rest fall into the Scripts menu.")
+        }
+        .help("Set how many pinned scripts appear as one-click toolbar buttons.")
         Picker(selection: $store.automatedActionPolicy.sending(\.setAutomatedActionPolicy)) {
           ForEach(AutomatedActionPolicy.allCases, id: \.self) { policy in
             Text(policy.displayName).tag(policy)

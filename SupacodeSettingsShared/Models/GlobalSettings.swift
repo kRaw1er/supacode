@@ -55,6 +55,9 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
   public var shortcutOverrides: [AppShortcutID: AppShortcutOverride]
   /// Scripts shared across every repository. Always `.custom` kind.
   public var globalScripts: [ScriptDefinition]
+  /// How many pinned scripts surface as individual toolbar buttons before the
+  /// rest fall back into the Scripts menu. User-configurable in General settings.
+  public var maxPinnedToolbarButtons: Int
   public var richAgentNotificationsEnabled: Bool
   public var agentPresenceBadgesEnabled: Bool
   /// When true, an agent integration that reports `.outdated` at launch /
@@ -67,6 +70,15 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
   /// down the bundled zmx daemon's sessions, so nothing keeps running in
   /// the background. Default off because persistence is the headline feature.
   public var terminateSessionsOnQuit: Bool
+
+  /// Valid range for `maxPinnedToolbarButtons`, enforced on decode and by the
+  /// General-settings stepper.
+  public static let pinnedToolbarButtonRange: ClosedRange<Int> = 1...8
+
+  /// Clamps a (possibly hand-edited) count into `pinnedToolbarButtonRange`.
+  public static func clampedPinnedToolbarButtons(_ value: Int) -> Int {
+    min(max(value, pinnedToolbarButtonRange.lowerBound), pinnedToolbarButtonRange.upperBound)
+  }
 
   public static let `default` = GlobalSettings(
     appearanceMode: .dark,
@@ -96,6 +108,7 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     autoDeleteArchivedWorktreesAfterDays: nil,
     shortcutOverrides: [:],
     globalScripts: [],
+    maxPinnedToolbarButtons: 4,
     richAgentNotificationsEnabled: true,
     agentPresenceBadgesEnabled: true,
     autoUpdateAgentIntegrationsEnabled: true,
@@ -131,6 +144,7 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     autoDeleteArchivedWorktreesAfterDays: AutoDeletePeriod? = nil,
     shortcutOverrides: [AppShortcutID: AppShortcutOverride] = [:],
     globalScripts: [ScriptDefinition] = [],
+    maxPinnedToolbarButtons: Int = 4,
     richAgentNotificationsEnabled: Bool = true,
     agentPresenceBadgesEnabled: Bool = true,
     autoUpdateAgentIntegrationsEnabled: Bool = true,
@@ -164,6 +178,7 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     self.autoDeleteArchivedWorktreesAfterDays = autoDeleteArchivedWorktreesAfterDays
     self.shortcutOverrides = shortcutOverrides
     self.globalScripts = globalScripts
+    self.maxPinnedToolbarButtons = maxPinnedToolbarButtons
     self.richAgentNotificationsEnabled = richAgentNotificationsEnabled
     self.agentPresenceBadgesEnabled = agentPresenceBadgesEnabled
     self.autoUpdateAgentIntegrationsEnabled = autoUpdateAgentIntegrationsEnabled
@@ -301,6 +316,11 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
       if script.name.isEmpty { script.name = ScriptKind.custom.defaultName }
       return script
     }
+    // Clamp so a corrupt / hand-edited count can't overrun the toolbar.
+    maxPinnedToolbarButtons = Self.clampedPinnedToolbarButtons(
+      try container.decodeIfPresent(Int.self, forKey: .maxPinnedToolbarButtons)
+        ?? Self.default.maxPinnedToolbarButtons
+    )
     richAgentNotificationsEnabled =
       try container.decodeIfPresent(Bool.self, forKey: .richAgentNotificationsEnabled)
       ?? Self.default.richAgentNotificationsEnabled
