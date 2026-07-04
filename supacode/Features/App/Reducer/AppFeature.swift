@@ -333,7 +333,7 @@ struct AppFeature {
             .run { _ in
               await worktreeInfoWatcher.send(.setSelectedWorktreeID(nil))
             },
-            .send(.review(.worktreeSelected(nil)))
+            .send(.review(.worktreeSelected(nil, prBaseRefName: nil)))
           )
         }
         let rootURL = worktree.repositoryRootURL
@@ -351,7 +351,13 @@ struct AppFeature {
             await worktreeInfoWatcher.send(.setSelectedWorktreeID(worktree.id))
           },
           .send(.worktreeSettingsLoaded(settings, worktreeID: worktreeID)),
-          .send(.review(.worktreeSelected(worktree)))
+          // Read the PR base here where `sidebarItems` lives; the reducer owns the
+          // default-branch fallback when there is no PR.
+          .send(
+            .review(
+              .worktreeSelected(
+                worktree,
+                prBaseRefName: state.repositories.sidebarItems[id: worktree.id]?.pullRequest?.baseRefName)))
         )
 
       case .repositories(.delegate(.worktreeCreated(let worktree))):
@@ -1213,7 +1219,7 @@ struct AppFeature {
         // Items are gated under `selectedWorktreeID != nil`, and
         // `.review(.openFile)` resolves the worktree from `review.selectedWorktree`,
         // so the palette action never needs to carry the worktree past this point.
-        return .send(.review(.openFile(path: filePath)))
+        return .send(.review(.openFile(path: filePath, source: .workingTree)))
 
       case .commandPalette(.delegate(.stopScript(let scriptID, _))):
         // If a script was removed from settings while still running,

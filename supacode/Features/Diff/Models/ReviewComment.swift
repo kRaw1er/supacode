@@ -16,6 +16,11 @@ nonisolated struct ReviewComment: Identifiable, Equatable, Sendable {
   /// New-side path (rename → post-rename path); the grouping key for the
   /// prompt and for scoping a comment to a diff tab.
   var filePath: String
+  /// Which diff produced the tab this comment was drawn on. A comment on the
+  /// working-tree diff of a file and one on the base-branch diff of the same
+  /// file are distinct threads — the `(filePath, source)` pair is the scope key.
+  var source: DiffSource
+
   /// Which gutter the range was drawn on (5.2).
   var side: DiffSide
   /// 1-based line number on `side`, inclusive.
@@ -35,6 +40,7 @@ nonisolated struct ReviewComment: Identifiable, Equatable, Sendable {
   init(
     id: UUID = UUID(),
     filePath: String,
+    source: DiffSource = .workingTree,
     side: DiffSide,
     startLine: Int,
     endLine: Int,
@@ -46,6 +52,7 @@ nonisolated struct ReviewComment: Identifiable, Equatable, Sendable {
   ) {
     self.id = id
     self.filePath = filePath
+    self.source = source
     self.side = side
     self.startLine = startLine
     self.endLine = endLine

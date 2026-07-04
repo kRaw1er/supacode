@@ -24,7 +24,7 @@ struct TerminalTabDiffKindTests {
   @Test func diffTabAllocatesNoSurface() {
     let state = makeState()
     let term = state.createTab()!
-    let diff = state.openDiffTab(filePath: "/tmp/repo/wt-diff/a.swift")
+    let diff = state.openDiffTab(filePath: "/tmp/repo/wt-diff/a.swift", source: .workingTree)
     #expect(state.tabManager.tabs.map(\.id) == [term, diff])
     #expect(state.tabManager.tabs.first { $0.id == diff }?.kind == .diff)
     #expect(state.surfaceIDs(inTab: diff).isEmpty)
@@ -35,7 +35,7 @@ struct TerminalTabDiffKindTests {
   @Test func selectingDiffTabDoesNotSpawnSurface() {
     let state = makeState()
     _ = state.createTab()!
-    let diff = state.openDiffTab(filePath: "/tmp/x")
+    let diff = state.openDiffTab(filePath: "/tmp/x", source: .workingTree)
     let before = state.allSurfaceIDs.count
     state.selectTab(diff)
     #expect(state.tabManager.selectedTabId == diff)
@@ -45,7 +45,7 @@ struct TerminalTabDiffKindTests {
   @Test func closeDiffTabPicksNeighborAndLeavesTerminalIntact() {
     let state = makeState()
     let term = state.createTab()!
-    let diff = state.openDiffTab(filePath: "/tmp/x")
+    let diff = state.openDiffTab(filePath: "/tmp/x", source: .workingTree)
     state.closeTab(diff)
     #expect(state.tabManager.tabs.map(\.id) == [term])
     #expect(state.tabManager.selectedTabId == term)
@@ -55,7 +55,7 @@ struct TerminalTabDiffKindTests {
   @Test func closingTerminalNeighborOfDiffTabIsUnaffected() {
     let state = makeState()
     let term = state.createTab()!
-    let diff = state.openDiffTab(filePath: "/tmp/x")
+    let diff = state.openDiffTab(filePath: "/tmp/x", source: .workingTree)
     state.selectTab(term)
     state.closeTab(term)
     #expect(state.tabManager.tabs.map(\.id) == [diff])
@@ -65,17 +65,33 @@ struct TerminalTabDiffKindTests {
 
   @Test func openDiffTabDedupesByPath() {
     let state = makeState()
-    let first = state.openDiffTab(filePath: "/tmp/repo/a.swift")
-    let second = state.openDiffTab(filePath: "/tmp/repo/a.swift")
+    let first = state.openDiffTab(filePath: "/tmp/repo/a.swift", source: .workingTree)
+    let second = state.openDiffTab(filePath: "/tmp/repo/a.swift", source: .workingTree)
     #expect(first == second)
     #expect(state.tabManager.tabs.filter { $0.kind == .diff }.count == 1)
     #expect(state.tabManager.selectedTabId == first)
   }
 
+  @Test func openDiffTabScopesDedupBySource() {
+    let state = makeState()
+    // Same path under two sources → two distinct tabs.
+    let working = state.openDiffTab(filePath: "/tmp/repo/a.swift", source: .workingTree)
+    let base = state.openDiffTab(filePath: "/tmp/repo/a.swift", source: .baseBranch(ref: "main"))
+    #expect(working != base)
+    #expect(state.tabManager.tabs.filter { $0.kind == .diff }.count == 2)
+    #expect(state.diffSource(for: working) == .workingTree)
+    #expect(state.diffSource(for: base) == .baseBranch(ref: "main"))
+    // Re-opening the same (path, source) focuses the existing tab (no third tab).
+    let baseAgain = state.openDiffTab(filePath: "/tmp/repo/a.swift", source: .baseBranch(ref: "main"))
+    #expect(baseAgain == base)
+    #expect(state.tabManager.tabs.filter { $0.kind == .diff }.count == 2)
+    #expect(state.tabManager.selectedTabId == base)
+  }
+
   @Test func captureLayoutSnapshotExcludesDiffTabs() {
     let state = makeState()
     _ = state.createTab()!
-    _ = state.openDiffTab(filePath: "/tmp/x")
+    _ = state.openDiffTab(filePath: "/tmp/x", source: .workingTree)
     let snapshot = state.captureLayoutSnapshot()
     #expect(snapshot?.tabs.count == 1)
   }
@@ -84,7 +100,7 @@ struct TerminalTabDiffKindTests {
     let state = makeState()
     var projected: [TerminalTabID] = []
     state.onTabProjectionChanged = { projected.append($0.tabID) }
-    let diff = state.openDiffTab(filePath: "/tmp/x")
+    let diff = state.openDiffTab(filePath: "/tmp/x", source: .workingTree)
     #expect(projected.contains(diff))
   }
 
@@ -92,7 +108,7 @@ struct TerminalTabDiffKindTests {
     let state = makeState()
     var removed: [TerminalTabID] = []
     state.onTabRemoved = { removed.append($0) }
-    let diff = state.openDiffTab(filePath: "/tmp/x")
+    let diff = state.openDiffTab(filePath: "/tmp/x", source: .workingTree)
     state.closeTab(diff)
     #expect(removed == [diff])
   }
@@ -102,7 +118,7 @@ struct TerminalTabDiffKindTests {
   @Test func selectTabAtIndexCountsDiffTabPositionally() {
     let state = makeState()
     let term = state.createTab()!
-    let diff = state.openDiffTab(filePath: "/tmp/repo/a.swift")
+    let diff = state.openDiffTab(filePath: "/tmp/repo/a.swift", source: .workingTree)
     // ⌘2 selects the second positional tab — the diff tab.
     state.selectTabAtIndex(2)
     #expect(state.tabManager.selectedTabId == diff)
@@ -134,7 +150,7 @@ struct TerminalTabDiffKindTests {
 
     var diffProjections: [WorktreeTabProjection] = []
     state.onTabProjectionChanged = { diffProjections.append($0) }
-    let diff = state.openDiffTab(filePath: "/tmp/x")
+    let diff = state.openDiffTab(filePath: "/tmp/x", source: .workingTree)
     // Selecting the diff tab must not create/destroy a surface (9.5 / 6.F) …
     state.selectTab(diff)
     #expect(state.tabManager.selectedTabId == diff)

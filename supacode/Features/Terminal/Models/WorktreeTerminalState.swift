@@ -55,6 +55,9 @@ final class WorktreeTerminalState {
   /// (Phase 2/3); this payload is only the tab↔path link the tab bar needs.
   struct DiffTabPayload: Equatable, Sendable {
     var filePath: String
+    /// Which diff this tab renders. Part of the dedup key so a working-tree tab
+    /// and a base-branch tab of the same file coexist (Phase 2).
+    var source: DiffSource
   }
 
   private static let diffTabIcon = "plus.forwardslash.minus"
@@ -524,26 +527,33 @@ final class WorktreeTerminalState {
   /// File path backing a diff tab, or nil for a terminal tab.
   func diffFilePath(for tabID: TerminalTabID) -> String? { diffTabs[tabID]?.filePath }
 
-  /// Opens a diff tab for `filePath` without allocating a Ghostty surface, or
-  /// focuses the existing one for the same path (dedupe).
+  /// Diff source backing a diff tab, or nil for a terminal tab.
+  func diffSource(for tabID: TerminalTabID) -> DiffSource? { diffTabs[tabID]?.source }
+
+  /// Opens a diff tab for `(filePath, source)` without allocating a Ghostty
+  /// surface, or focuses the existing one for the same pair (dedupe). The same
+  /// path under a different `source` gets its own tab.
   @discardableResult
-  func openDiffTab(filePath: String) -> TerminalTabID {
-    if let existing = diffTabs.first(where: { $0.value.filePath == filePath })?.key {
+  func openDiffTab(filePath: String, source: DiffSource) -> TerminalTabID {
+    if let existing = diffTabs.first(where: { $0.value.filePath == filePath && $0.value.source == source })?.key {
       selectTab(existing)
       return existing
     }
-    return createDiffTab(filePath: filePath)
+    return createDiffTab(filePath: filePath, source: source)
   }
 
   @discardableResult
-  private func createDiffTab(filePath: String) -> TerminalTabID {
-    let title = URL(filePath: filePath, directoryHint: .notDirectory).lastPathComponent
+  private func createDiffTab(filePath: String, source: DiffSource) -> TerminalTabID {
+    let fileName = URL(filePath: filePath, directoryHint: .notDirectory).lastPathComponent
+    // Base-branch tabs disambiguate their title so a working-tree tab and a
+    // base tab of the same file are distinguishable in the tab bar.
+    let title = source.displayName.map { "\(fileName) · \($0)" } ?? fileName
     let tabID = tabManager.createTab(
       title: title,
       icon: Self.diffTabIcon,
       kind: .diff,
     )
-    diffTabs[tabID] = DiffTabPayload(filePath: filePath)
+    diffTabs[tabID] = DiffTabPayload(filePath: filePath, source: source)
     // No `splitTree(for:)` / `createSurface` — a diff tab owns no surface.
     // `tabManager.createTab` already set `selectedTabId`; do not route through
     // `selectTab` / `focusSurface`, which are the terminal-tab focus path.

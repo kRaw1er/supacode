@@ -14,6 +14,9 @@ enum DiffViewMode: String, Codable, Sendable, Equatable, CaseIterable { case uni
 /// the viewer watches to re-apply while preserving scroll.
 struct DiffDocument: Equatable, Sendable {
   var file: FileChange
+  /// Which diff this document renders. Part of its `DiffDocumentKey` identity so
+  /// a working-tree tab and a base-branch tab of the same file are distinct.
+  var source: DiffSource = .workingTree
   var hunks: [DiffHunk] = []
   var rows: [DiffRow] = []
   var loadState: LoadState = .loading
@@ -29,6 +32,14 @@ struct DiffDocument: Equatable, Sendable {
     case loaded
     case error(DiffError)
   }
+}
+
+/// Composite identity for an open center diff tab: a file path scoped to the
+/// diff it belongs to. A file that changed both in the working tree and against
+/// the base opens two independent documents/tabs, one per `source` (Phase 2).
+nonisolated struct DiffDocumentKey: Hashable, Sendable {
+  var path: String
+  var source: DiffSource
 }
 
 @Reducer
@@ -52,9 +63,21 @@ struct DiffReviewFeature {
     /// panel owns the pref). Global.
     @Shared(.appStorage("diffViewMode")) var diffViewMode: DiffViewMode = .unified
 
-    /// Open center diff tabs, keyed by file path. Additive over the Phase 2 state
-    /// (Phase 0's `DiffTabPayload` stays `filePath`-only; the document lives here).
-    var openDiffs: [String: DiffDocument] = [:]
+    // MARK: Base-branch diff (second source) — committed `merge-base..HEAD` changes
+    /// Committed branch changes vs the resolved base. Independent of `files`; a
+    /// file may appear in both lists. Kept across an `.indexLocked` refresh.
+    var baseFiles: [FileChange] = []
+    /// The resolved base ref (PR base → default branch). `nil` ⇒ nothing
+    /// resolved ⇒ the base section is hidden entirely (never an error).
+    var baseRef: String?
+    var baseLoadState: LoadState = .idle
+    /// Stale token for the base list, independent of `generation`: a slow base
+    /// diff from a previous worktree can't overwrite the current one (8.1).
+    var baseGeneration: Int = 0
+
+    /// Open center diff tabs, keyed by `(path, source)`. Additive over the
+    /// Phase 0 state (`DiffTabPayload` stays `filePath`-only; the document lives here).
+    var openDiffs: [DiffDocumentKey: DiffDocument] = [:]
     /// Monotonic token stamped onto a document on each (re)load; the returning
     /// `.diffLoaded/.diffFailed` is discarded when it no longer matches (8.1).
     var diffLoadToken: Int = 0
@@ -78,9 +101,10 @@ struct DiffReviewFeature {
       comments.count { !$0.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
-    /// Comments scoped to one diff tab (grouped by `filePath`).
-    func commentsForPath(_ path: String) -> [ReviewComment] {
-      comments.filter { $0.filePath == path }
+    /// Comments scoped to one diff tab, keyed by `(filePath, source)` so a
+    /// working-tree thread and a base-branch thread on the same file stay apart.
+    func comments(forPath path: String, source: DiffSource) -> [ReviewComment] {
+      comments.filter { $0.filePath == path && $0.source == source }
     }
 
     enum LoadState: Equatable {
@@ -102,26 +126,37 @@ struct DiffReviewFeature {
       guard let worktree = selectedWorktree else { return false }
       return !worktree.isFolder && worktree.host == nil
     }
+
+    /// The base section renders only when the panel is supported AND a base ref
+    /// resolved; otherwise section 2 is hidden entirely (Phase 3 consumes this).
+    var supportsBaseDiff: Bool { supportsDiffReview && baseRef != nil }
   }
 
   enum Action: Equatable {
-    case worktreeSelected(Worktree?)  // fan-out from AppFeature :313
-    case load  // (re)issue a changedFiles request
-    case loaded([FileChange], operation: RepositoryOperation, generation: Int)  // client success
-    case failed(DiffError, generation: Int)  // client failure
+    /// Fan-out from AppFeature. `prBaseRefName` carries the worktree's PR base
+    /// (read from `sidebarItems`) so the reducer resolves the base ref PR-first.
+    case worktreeSelected(Worktree?, prBaseRefName: String?)
+    case load  // (re)issue a changedFiles request (both sources)
+    case loaded([FileChange], operation: RepositoryOperation, generation: Int)  // working-tree success
+    case failed(DiffError, generation: Int)  // working-tree failure
+    // MARK: Base-branch source
+    case baseRefResolved(ref: String?, generation: Int)  // resolver result; nil ⇒ hide section 2
+    case baseLoaded([FileChange], generation: Int)  // base `changedFiles` success
+    case baseFailed(DiffError, generation: Int)  // base `changedFiles` failure
     case filesChanged(Worktree.ID)  // raw info-event tick (pre-debounce)
     case refreshTick  // post-debounce: re-load
-    case openFile(path: String)  // row tap → open center diff tab
-    case diffLoaded(path: String, hunks: [DiffHunk], token: Int)  // per-file hunk load success
-    case diffFailed(path: String, DiffError, token: Int)  // per-file hunk load failure
+    case openFile(path: String, source: DiffSource)  // row tap → open center diff tab
+    case diffLoaded(key: DiffDocumentKey, hunks: [DiffHunk], token: Int)  // per-file hunk load success
+    case diffFailed(key: DiffDocumentKey, DiffError, token: Int)  // per-file hunk load failure
     case diffModeChanged(DiffViewMode)  // unified/split toggle → rebuild all open docs
-    case expandGap(path: String, anchor: Int)  // expander tap → re-diff with raised context
+    case expandGap(path: String, source: DiffSource, anchor: Int)  // expander tap → re-diff with raised context
 
     // MARK: Phase 5 — comments + send-to-agent
     /// Gutter "+"/drag resolved a range. Opens the composer (edit mode if a
     /// comment already covers the identical `(filePath, side, range)`).
     case openCommentComposer(
-      filePath: String, side: DiffSide, startLine: Int, endLine: Int, anchorSnippet: String, contextBefore: String)
+      filePath: String, source: DiffSource, side: DiffSide, startLine: Int, endLine: Int, anchorSnippet: String,
+      contextBefore: String)
     case composer(PresentationAction<CommentComposer.Action>)
     case commitComment(ReviewComment)  // upsert (replace by id on edit, else append)
     case editComment(id: UUID)  // open an existing thread to edit
@@ -146,7 +181,8 @@ struct DiffReviewFeature {
 
   private nonisolated enum CancelID: Hashable, Sendable {
     case load, debounce
-    case diff(String)
+    case baseLoad, baseResolve
+    case diff(DiffDocumentKey)
   }
 
   /// libgit2 `context_lines` used to materialize an expanded gap. High enough to
@@ -158,14 +194,16 @@ struct DiffReviewFeature {
     Reduce { state, action in
       @Dependency(DiffClient.self) var diffClient
       @Dependency(TerminalClient.self) var terminalClient
+      @Dependency(GitClientDependency.self) var gitClient
       @Dependency(\.continuousClock) var clock
       @Dependency(\.date.now) var now
       switch action {
 
-      case .worktreeSelected(let worktree):
-        // Any selection change invalidates in-flight results (8.1) and cancels
-        // both the load and a pending debounce.
+      case .worktreeSelected(let worktree, let prBaseRefName):
+        // Any selection change invalidates in-flight results (8.1) for BOTH
+        // sources and cancels the load, base load, base resolve, and debounce.
         state.generation &+= 1
+        state.baseGeneration &+= 1
         // Comments are per-worktree and session-only (not persisted). A real
         // worktree change drops the prior batch so it never leaks across
         // worktrees; a re-select of the same worktree keeps it.
@@ -174,28 +212,42 @@ struct DiffReviewFeature {
           state.composer = nil
         }
         state.selectedWorktree = worktree
+        // Base list resets to hidden on every (re)selection until resolution runs.
+        state.baseFiles = []
+        state.baseRef = nil
+        state.baseLoadState = .idle
+        let cancelAll: Effect<Action> = .merge(
+          .cancel(id: CancelID.load), .cancel(id: CancelID.debounce),
+          .cancel(id: CancelID.baseLoad), .cancel(id: CancelID.baseResolve))
         guard let worktree else {
           state.files = []
           state.loadState = .idle
           state.repositoryOperation = .none
-          return .merge(.cancel(id: CancelID.load), .cancel(id: CancelID.debounce))
+          return cancelAll
         }
         // Gate BEFORE touching the client: never call libgit2 for folder/remote (1.4/1.5).
+        // The base resolve/load lives inside this guarded branch, so it is never
+        // issued for an unsupported worktree.
         if worktree.isFolder {
           state.files = []
           state.loadState = .unsupported(.folder)
           state.repositoryOperation = .none
-          return .merge(.cancel(id: CancelID.load), .cancel(id: CancelID.debounce))
+          return cancelAll
         }
         if worktree.host != nil {
           state.files = []
           state.loadState = .unsupported(.remote)
           state.repositoryOperation = .none
-          return .merge(.cancel(id: CancelID.load), .cancel(id: CancelID.debounce))
+          return cancelAll
         }
         state.files = []  // new worktree ⇒ drop the prior list
         state.loadState = .loading
-        return Self.loadEffect(worktree: worktree, generation: state.generation, diffClient: diffClient)
+        state.baseLoadState = .loading
+        return .merge(
+          Self.loadEffect(worktree: worktree, generation: state.generation, diffClient: diffClient),
+          Self.resolveBaseRefEffect(
+            worktree: worktree, prBaseRefName: prBaseRefName, generation: state.baseGeneration, gitClient: gitClient)
+        )
 
       case .load:
         guard let worktree = state.selectedWorktree,
@@ -205,16 +257,29 @@ struct DiffReviewFeature {
         // Keep `files` on a re-load so live refresh doesn't flash empty; the row
         // list swaps atomically on `.loaded`.
         if state.files.isEmpty { state.loadState = .loading }
-        return Self.loadEffect(worktree: worktree, generation: state.generation, diffClient: diffClient)
+        var effects: [Effect<Action>] = [
+          Self.loadEffect(worktree: worktree, generation: state.generation, diffClient: diffClient)
+        ]
+        // HEAD moving (a new commit) changes `base...HEAD`, so refresh the base
+        // list on the tick — against the ALREADY-resolved ref (no re-resolution;
+        // that is on-selection only). Base list keeps last-good (no `.loading`
+        // flash) and swaps atomically on `.baseLoaded`.
+        if let ref = state.baseRef {
+          state.baseGeneration &+= 1
+          effects.append(
+            Self.baseLoadEffect(worktree: worktree, ref: ref, generation: state.baseGeneration, diffClient: diffClient)
+          )
+        }
+        return .merge(effects)
 
       case .loaded(let files, let operation, let generation):
         guard generation == state.generation else { return .none }  // discard stale (8.1)
         state.files = files
         state.repositoryOperation = operation
         state.loadState = files.isEmpty ? .empty : .loaded
-        // Live-update every open center diff tab: re-diff the ones still changed,
-        // flag the ones that dropped out of the set as stale (tab stays open).
-        return Self.refreshOpenDiffs(&state, diffClient: diffClient)
+        // Live-update every open working-tree center diff tab: re-diff the ones
+        // still changed, flag the vanished ones as stale (tab stays open).
+        return Self.refreshOpenDiffs(&state, scope: .workingTree, diffClient: diffClient)
 
       case .failed(let error, let generation):
         guard generation == state.generation else { return .none }  // discard stale (8.1)
@@ -224,6 +289,43 @@ struct DiffReviewFeature {
           state.loadState = state.files.isEmpty ? .loading : .refreshing
         default:
           state.loadState = .error(error)
+        }
+        return .none
+
+      case .baseRefResolved(let ref, let generation):
+        guard generation == state.baseGeneration else { return .none }  // discard stale (8.1)
+        state.baseRef = ref
+        // Nothing resolved (no PR, base branch gone, unusual HEAD) → hide section 2.
+        guard let ref else {
+          state.baseLoadState = .idle
+          return .none
+        }
+        guard let worktree = state.selectedWorktree else {
+          state.baseLoadState = .idle
+          return .none
+        }
+        state.baseLoadState = .loading
+        return Self.baseLoadEffect(worktree: worktree, ref: ref, generation: generation, diffClient: diffClient)
+
+      case .baseLoaded(let files, let generation):
+        guard generation == state.baseGeneration else { return .none }  // discard stale (8.1)
+        state.baseFiles = files
+        // `base == HEAD` (no commits ahead) → empty → "up to date with <base>".
+        state.baseLoadState = files.isEmpty ? .empty : .loaded
+        return Self.refreshOpenDiffs(&state, scope: .base, diffClient: diffClient)
+
+      case .baseFailed(let error, let generation):
+        guard generation == state.baseGeneration else { return .none }  // discard stale (8.1)
+        switch error {
+        case .baseRefUnresolved:
+          // Not a user-visible error — the ref stopped resolving; hide section 2.
+          state.baseRef = nil
+          state.baseLoadState = .idle
+        case .indexLocked:
+          // Keep the last-good base list; show "updating…" instead of clearing.
+          state.baseLoadState = state.baseFiles.isEmpty ? .loading : .refreshing
+        default:
+          state.baseLoadState = .error(error)
         }
         return .none
 
@@ -243,79 +345,85 @@ struct DiffReviewFeature {
       case .refreshTick:
         return .send(.load)
 
-      case .openFile(let path):
+      case .openFile(let path, let source):
         guard let worktree = state.selectedWorktree else { return .none }
+        let key = DiffDocumentKey(path: path, source: source)
         let focusEffect: Effect<Action> = .run { _ in
           // Reducer can't touch the @Observable manager directly; go through the
           // TerminalClient command path (mirrors every other terminal reach-out).
-          await terminalClient.send(.openDiffTab(worktree, filePath: path))
+          await terminalClient.send(.openDiffTab(worktree, filePath: path, source: source))
         }
+        // Resolve the file from the source's own list.
+        let fileList = source == .workingTree ? state.files : state.baseFiles
         // Without file metadata there is nothing to diff — just open/focus the tab.
-        guard let file = state.files.first(where: { $0.id == path }) else { return focusEffect }
+        guard let file = fileList.first(where: { $0.id == path }) else { return focusEffect }
         // Already open and healthy: focus it, keep its rows (no redundant reload).
         // A prior error re-loads (Retry routes here).
-        if let existing = state.openDiffs[path] {
+        if let existing = state.openDiffs[key] {
           if case .error = existing.loadState {} else { return focusEffect }
         }
         state.diffLoadToken &+= 1
         let token = state.diffLoadToken
-        var document = state.openDiffs[path] ?? DiffDocument(file: file)
+        var document = state.openDiffs[key] ?? DiffDocument(file: file, source: source)
         document.file = file
+        document.source = source
         document.loadState = .loading
         document.generation = token
-        state.openDiffs[path] = document
+        state.openDiffs[key] = document
         return .merge(
           focusEffect,
           Self.diffEffect(
-            DiffRequest(path: path, file: file, worktree: worktree, contextLines: 3, token: token),
+            DiffRequest(key: key, file: file, worktree: worktree, contextLines: 3, token: token),
             diffClient: diffClient
           )
         )
 
-      case .diffLoaded(let path, let hunks, let token):
-        guard var document = state.openDiffs[path], document.generation == token else { return .none }
+      case .diffLoaded(let key, let hunks, let token):
+        guard var document = state.openDiffs[key], document.generation == token else { return .none }
         document.hunks = hunks
         document.loadState = .loaded
         document.isStale = false
-        // Re-anchor this file's comments against the fresh lines (5.1); orphans
-        // are marked, never dropped.
-        Self.relocateComments(&state, path: path, lines: hunks.flatMap(\.lines))
+        // Re-anchor this document's comments against the fresh lines (5.1);
+        // orphans are marked, never dropped.
+        Self.relocateComments(&state, key: key, lines: hunks.flatMap(\.lines))
         document.rows = Self.buildRows(
-          document: document, mode: state.diffViewMode, comments: state.commentsForPath(path))
+          document: document, mode: state.diffViewMode, comments: state.comments(forPath: key.path, source: key.source))
         document.revision &+= 1
-        state.openDiffs[path] = document
+        state.openDiffs[key] = document
         return .none
 
-      case .diffFailed(let path, let error, let token):
-        guard var document = state.openDiffs[path], document.generation == token else { return .none }
+      case .diffFailed(let key, let error, let token):
+        guard var document = state.openDiffs[key], document.generation == token else { return .none }
         document.loadState = .error(error)
         document.revision &+= 1
-        state.openDiffs[path] = document
+        state.openDiffs[key] = document
         return .none
 
       case .diffModeChanged(let mode):
         state.$diffViewMode.withLock { $0 = mode }
         // Rebuild every open document's rows from its cached hunks (no I/O).
-        for path in state.openDiffs.keys {
-          guard var document = state.openDiffs[path] else { continue }
-          document.rows = Self.buildRows(document: document, mode: mode, comments: state.commentsForPath(path))
+        for key in state.openDiffs.keys {
+          guard var document = state.openDiffs[key] else { continue }
+          document.rows = Self.buildRows(
+            document: document, mode: mode, comments: state.comments(forPath: key.path, source: key.source))
           document.revision &+= 1
-          state.openDiffs[path] = document
+          state.openDiffs[key] = document
         }
         return .none
 
-      case .expandGap(let path, let anchor):
-        guard let worktree = state.selectedWorktree, var document = state.openDiffs[path] else { return .none }
+      case .expandGap(let path, let source, let anchor):
+        let key = DiffDocumentKey(path: path, source: source)
+        guard let worktree = state.selectedWorktree, var document = state.openDiffs[key] else { return .none }
         document.expanded.insert(anchor)
         state.diffLoadToken &+= 1
         let token = state.diffLoadToken
         document.generation = token
-        state.openDiffs[path] = document
+        state.openDiffs[key] = document
         // Re-diff with full context so the gap's real lines materialize; the
         // rebuild (in `.diffLoaded`) then shows the whole file.
         return Self.diffEffect(
           DiffRequest(
-            path: path,
+            key: key,
             file: document.file,
             worktree: worktree,
             contextLines: Self.expandedContextLines,
@@ -326,15 +434,20 @@ struct DiffReviewFeature {
 
       // MARK: Phase 5 — comments
 
-      case .openCommentComposer(let filePath, let side, let startLine, let endLine, let snippet, let context):
+      case .openCommentComposer(
+        let filePath, let source, let side, let startLine, let endLine, let snippet, let context):
         // Editing an existing identical-range comment instead of stacking a dup.
+        // Scoped by `source` too, so the same range on the working-tree and the
+        // base-branch diff are distinct threads.
         if let existing = state.comments.first(where: {
-          $0.filePath == filePath && $0.side == side && $0.startLine == startLine && $0.endLine == endLine
+          $0.filePath == filePath && $0.source == source && $0.side == side && $0.startLine == startLine
+            && $0.endLine == endLine
         }) {
           state.composer = CommentComposer.State(draft: existing, isEditing: true)
         } else {
           let draft = ReviewComment(
             filePath: filePath,
+            source: source,
             side: side,
             startLine: startLine,
             endLine: endLine,
@@ -364,7 +477,7 @@ struct DiffReviewFeature {
       case .commitComment(let comment):
         state.comments[id: comment.id] = comment
         state.composer = nil
-        Self.rebuildRows(&state, path: comment.filePath)
+        Self.rebuildRows(&state, key: DiffDocumentKey(path: comment.filePath, source: comment.source))
         return .none
 
       case .editComment(let id):
@@ -375,7 +488,7 @@ struct DiffReviewFeature {
       case .deleteComment(let id):
         guard let comment = state.comments[id: id] else { return .none }
         state.comments.remove(id: id)
-        Self.rebuildRows(&state, path: comment.filePath)
+        Self.rebuildRows(&state, key: DiffDocumentKey(path: comment.filePath, source: comment.source))
         return .none
 
       case .sendBatchToAgent:
@@ -401,8 +514,8 @@ struct DiffReviewFeature {
         state.comments.removeAll()
         state.batchLocked = false
         // Drop the now-stale comment threads from every open document.
-        for path in state.openDiffs.keys {
-          Self.rebuildRows(&state, path: path)
+        for key in state.openDiffs.keys {
+          Self.rebuildRows(&state, key: key)
         }
         return .none
 
@@ -418,8 +531,8 @@ struct DiffReviewFeature {
 
       case .discardConfirm(.presented(.discard)):
         state.comments.removeAll()
-        for path in state.openDiffs.keys {
-          Self.rebuildRows(&state, path: path)
+        for key in state.openDiffs.keys {
+          Self.rebuildRows(&state, key: key)
         }
         return .none
 
@@ -480,19 +593,21 @@ struct DiffReviewFeature {
   }
 
   /// Rebuilds one open document's rows from its cached hunks + the current
-  /// comments for its path, bumping `revision` so the viewer re-applies. No I/O.
-  private static func rebuildRows(_ state: inout State, path: String) {
-    guard var document = state.openDiffs[path] else { return }
+  /// comments for its `(path, source)`, bumping `revision` so the viewer
+  /// re-applies. No I/O.
+  private static func rebuildRows(_ state: inout State, key: DiffDocumentKey) {
+    guard var document = state.openDiffs[key] else { return }
     document.rows = Self.buildRows(
-      document: document, mode: state.diffViewMode, comments: state.commentsForPath(path))
+      document: document, mode: state.diffViewMode, comments: state.comments(forPath: key.path, source: key.source))
     document.revision &+= 1
-    state.openDiffs[path] = document
+    state.openDiffs[key] = document
   }
 
-  /// Re-anchors every comment for `path` against the freshly re-diffed `lines`
-  /// (5.1). A comment whose lines vanished is marked `orphaned`, never removed.
-  private static func relocateComments(_ state: inout State, path: String, lines: [DiffLine]) {
-    for comment in state.comments where comment.filePath == path {
+  /// Re-anchors every comment for `key` (matched on both `filePath` and
+  /// `source`) against the freshly re-diffed `lines` (5.1). A comment whose
+  /// lines vanished is marked `orphaned`, never removed.
+  private static func relocateComments(_ state: inout State, key: DiffDocumentKey, lines: [DiffLine]) {
+    for comment in state.comments where comment.filePath == key.path && comment.source == key.source {
       state.comments[id: comment.id] = CommentAnchor.relocate(comment, in: lines, side: comment.side)
     }
   }
@@ -519,7 +634,7 @@ struct DiffReviewFeature {
   /// One per-file hunk request (grouped so the effect factory stays a two-arg
   /// call site).
   private struct DiffRequest {
-    let path: String
+    let key: DiffDocumentKey
     let file: FileChange
     let worktree: Worktree
     let contextLines: UInt32
@@ -533,29 +648,40 @@ struct DiffReviewFeature {
           request.file,
           request.worktree.workingDirectory,
           request.contextLines,
-          .workingTree
+          request.key.source
         )
-        await send(.diffLoaded(path: request.path, hunks: hunks, token: request.token))
+        await send(.diffLoaded(key: request.key, hunks: hunks, token: request.token))
       } catch let error as DiffError {
-        await send(.diffFailed(path: request.path, error, token: request.token))
+        await send(.diffFailed(key: request.key, error, token: request.token))
       } catch {
-        await send(.diffFailed(path: request.path, .libgit2(code: -1, message: "\(error)"), token: request.token))
+        await send(.diffFailed(key: request.key, .libgit2(code: -1, message: "\(error)"), token: request.token))
       }
     }
-    .cancellable(id: CancelID.diff(request.path), cancelInFlight: true)
+    .cancellable(id: CancelID.diff(request.key), cancelInFlight: true)
   }
+
+  /// Which open documents `refreshOpenDiffs` touches after a list reload. Keeps
+  /// a working-tree `.loaded` from re-diffing base tabs (and vice versa) — each
+  /// source's reload only refreshes its own open tabs.
+  private enum RefreshScope { case workingTree, base }
 
   /// Live-update fan-out for open center diff tabs after the changed-file list
   /// reloads: re-diff the ones still in the set, flag the vanished ones as stale
-  /// while keeping the tab and its last rows (3.2/3.3).
-  private static func refreshOpenDiffs(_ state: inout State, diffClient: DiffClient) -> Effect<Action> {
+  /// while keeping the tab and its last rows (3.2/3.3). Scoped to one `source`
+  /// so it looks each document up in the matching file list.
+  private static func refreshOpenDiffs(
+    _ state: inout State, scope: RefreshScope, diffClient: DiffClient
+  ) -> Effect<Action> {
     guard let worktree = state.selectedWorktree, !state.openDiffs.isEmpty else { return .none }
+    let fileList = scope == .workingTree ? state.files : state.baseFiles
     var effects: [Effect<Action>] = []
-    for path in state.openDiffs.keys {
-      guard var document = state.openDiffs[path] else { continue }
-      guard let file = state.files.first(where: { $0.id == path }) else {
+    for key in state.openDiffs.keys {
+      let isWorkingTree = key.source == .workingTree
+      guard (scope == .workingTree) == isWorkingTree else { continue }
+      guard var document = state.openDiffs[key] else { continue }
+      guard let file = fileList.first(where: { $0.id == key.path }) else {
         document.isStale = true
-        state.openDiffs[path] = document
+        state.openDiffs[key] = document
         continue
       }
       document.file = file
@@ -563,16 +689,58 @@ struct DiffReviewFeature {
       state.diffLoadToken &+= 1
       let token = state.diffLoadToken
       document.generation = token
-      state.openDiffs[path] = document
+      state.openDiffs[key] = document
       let contextLines: UInt32 = document.expanded.isEmpty ? 3 : Self.expandedContextLines
       effects.append(
         Self.diffEffect(
-          DiffRequest(path: path, file: file, worktree: worktree, contextLines: contextLines, token: token),
+          DiffRequest(key: key, file: file, worktree: worktree, contextLines: contextLines, token: token),
           diffClient: diffClient
         )
       )
     }
     return .merge(effects)
+  }
+
+  /// Resolves the base ref (PR base → default-branch fallback) off the main
+  /// thread, then feeds it back as `.baseRefResolved`. `cancelInFlight` so a new
+  /// selection cancels a slow in-flight resolution (8.1). Re-resolution is
+  /// on-selection only — never re-run on a `filesChanged` tick.
+  private static func resolveBaseRefEffect(
+    worktree: Worktree,
+    prBaseRefName: String?,
+    generation: Int,
+    gitClient: GitClientDependency
+  ) -> Effect<Action> {
+    .run { send in
+      let ref = await DiffBaseRefResolver.resolve(
+        prBaseRefName: prBaseRefName,
+        repositoryRoot: worktree.repositoryRootURL,
+        gitClient: gitClient
+      )
+      await send(.baseRefResolved(ref: ref, generation: generation))
+    }
+    .cancellable(id: CancelID.baseResolve, cancelInFlight: true)
+  }
+
+  /// Loads the base (three-dot `merge-base..HEAD`) changed-file list against the
+  /// already-resolved `ref`, generation-guarded by `baseGeneration` (8.1).
+  private static func baseLoadEffect(
+    worktree: Worktree,
+    ref: String,
+    generation: Int,
+    diffClient: DiffClient
+  ) -> Effect<Action> {
+    .run { send in
+      do {
+        let diff = try await diffClient.changedFiles(.baseBranch(ref: ref), worktree.workingDirectory)
+        await send(.baseLoaded(diff.files, generation: generation))
+      } catch let error as DiffError {
+        await send(.baseFailed(error, generation: generation))
+      } catch {
+        await send(.baseFailed(.libgit2(code: -1, message: "\(error)"), generation: generation))
+      }
+    }
+    .cancellable(id: CancelID.baseLoad, cancelInFlight: true)
   }
 }
 

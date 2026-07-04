@@ -68,17 +68,142 @@ struct DiffReviewFeatureTests {
     } withDependencies: {
       $0.continuousClock = TestClock()
       $0.diffClient.changedFiles = { _, _ in WorktreeDiff(files: files, isUnbornHead: false, operation: .none) }
+      $0.gitClient.automaticWorktreeBaseRef = { _ in nil }  // no base → section 2 hidden
     }
 
-    await store.send(.worktreeSelected(worktree)) {
+    await store.send(.worktreeSelected(worktree, prBaseRefName: nil)) {
       $0.generation = 1
+      $0.baseGeneration = 1
       $0.selectedWorktree = worktree
       $0.loadState = .loading
+      $0.baseLoadState = .loading
+    }
+    // The base-ref resolve effect settles before the working-tree load in the
+    // merged effect, so `.baseRefResolved` is received first.
+    await store.receive(.baseRefResolved(ref: nil, generation: 1)) {
+      $0.baseLoadState = .idle
     }
     await store.receive(.loaded(files, operation: .none, generation: 1)) {
       $0.files = files
       $0.loadState = .loaded
     }
+  }
+
+  // MARK: - base diff: PR base resolves & loads
+
+  @Test(.dependencies) func selectingWorktreeWithPRResolvesAndLoadsBaseDiff() async {
+    let worktree = gitLocalWorktree()
+    let files = [makeFile("a.swift")]
+    let baseFiles = [makeFile("committed.swift")]
+    let store = TestStore(initialState: DiffReviewFeature.State()) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.diffClient.changedFiles = { source, _ in
+        switch source {
+        case .workingTree: WorktreeDiff(files: files, isUnbornHead: false, operation: .none)
+        case .baseBranch: WorktreeDiff(files: baseFiles, isUnbornHead: false, operation: .none)
+        }
+      }
+      // PR base wins; the resolver never consults the default-branch fallback.
+      $0.gitClient.automaticWorktreeBaseRef = { _ in "origin/should-not-be-used" }
+    }
+
+    await store.send(.worktreeSelected(worktree, prBaseRefName: "main")) {
+      $0.generation = 1
+      $0.baseGeneration = 1
+      $0.selectedWorktree = worktree
+      $0.loadState = .loading
+      $0.baseLoadState = .loading
+    }
+    // Merged-effect settle order: base resolve → working-tree load → base load.
+    await store.receive(.baseRefResolved(ref: "main", generation: 1)) {
+      $0.baseRef = "main"
+    }
+    await store.receive(.loaded(files, operation: .none, generation: 1)) {
+      $0.files = files
+      $0.loadState = .loaded
+    }
+    await store.receive(.baseLoaded(baseFiles, generation: 1)) {
+      $0.baseFiles = baseFiles
+      $0.baseLoadState = .loaded
+    }
+    #expect(store.state.baseRef == "main")
+    #expect(store.state.baseFiles == baseFiles)
+  }
+
+  // MARK: - base diff: no PR → default-branch fallback
+
+  @Test(.dependencies) func noPRFallsBackToDefaultBranch() async {
+    let worktree = gitLocalWorktree()
+    let store = TestStore(initialState: DiffReviewFeature.State()) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.diffClient.changedFiles = { _, _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) }
+      $0.gitClient.automaticWorktreeBaseRef = { _ in "origin/main" }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.worktreeSelected(worktree, prBaseRefName: nil))
+    await store.receive(.baseRefResolved(ref: "origin/main", generation: 1)) {
+      $0.baseRef = "origin/main"
+      $0.baseLoadState = .loading
+    }
+    await store.receive(.baseLoaded([], generation: 1)) {
+      $0.baseLoadState = .empty  // base == HEAD → up-to-date
+    }
+    #expect(store.state.baseRef == "origin/main")
+  }
+
+  // MARK: - base diff: unresolvable base hides section 2
+
+  @Test(.dependencies) func unresolvableBaseHidesSectionTwo() async {
+    let worktree = gitLocalWorktree()
+    let files = [makeFile("a.swift")]
+    let store = TestStore(initialState: DiffReviewFeature.State()) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.diffClient.changedFiles = { _, _ in WorktreeDiff(files: files, isUnbornHead: false, operation: .none) }
+      $0.gitClient.automaticWorktreeBaseRef = { _ in nil }  // nothing resolves
+    }
+
+    await store.send(.worktreeSelected(worktree, prBaseRefName: nil)) {
+      $0.generation = 1
+      $0.baseGeneration = 1
+      $0.selectedWorktree = worktree
+      $0.loadState = .loading
+      $0.baseLoadState = .loading
+    }
+    await store.receive(.baseRefResolved(ref: nil, generation: 1)) {
+      $0.baseLoadState = .idle
+    }
+    await store.receive(.loaded(files, operation: .none, generation: 1)) {
+      $0.files = files
+      $0.loadState = .loaded  // working-tree list still loads
+    }
+    #expect(store.state.baseRef == nil)
+    #expect(store.state.supportsBaseDiff == false)
+  }
+
+  // MARK: - base generation guard discards a late base load
+
+  @Test(.dependencies) func lateBaseLoadFromPreviousWorktreeIsDiscarded() async {
+    let worktree = gitLocalWorktree()
+    let store = TestStore(initialState: DiffReviewFeature.State()) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.diffClient.changedFiles = { _, _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) }
+      $0.gitClient.automaticWorktreeBaseRef = { _ in nil }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.worktreeSelected(worktree, prBaseRefName: nil))
+    // A base load tagged with the previous generation (0) must be dropped.
+    await store.send(.baseLoaded([makeFile("stale.swift")], generation: 0))
+    #expect(store.state.baseFiles.isEmpty)
   }
 
   // MARK: - mid-operation repository state (1.8) plumbed onto State
@@ -91,12 +216,18 @@ struct DiffReviewFeatureTests {
     } withDependencies: {
       $0.continuousClock = TestClock()
       $0.diffClient.changedFiles = { _, _ in WorktreeDiff(files: files, isUnbornHead: false, operation: .rebase) }
+      $0.gitClient.automaticWorktreeBaseRef = { _ in nil }
     }
 
-    await store.send(.worktreeSelected(worktree)) {
+    await store.send(.worktreeSelected(worktree, prBaseRefName: nil)) {
       $0.generation = 1
+      $0.baseGeneration = 1
       $0.selectedWorktree = worktree
       $0.loadState = .loading
+      $0.baseLoadState = .loading
+    }
+    await store.receive(.baseRefResolved(ref: nil, generation: 1)) {
+      $0.baseLoadState = .idle
     }
     await store.receive(.loaded(files, operation: .rebase, generation: 1)) {
       $0.files = files
@@ -106,8 +237,9 @@ struct DiffReviewFeatureTests {
     #expect(store.state.repositoryOperation.bannerMessage != nil)
 
     // Deselecting resets the operation so a stale banner never lingers.
-    await store.send(.worktreeSelected(nil)) {
+    await store.send(.worktreeSelected(nil, prBaseRefName: nil)) {
       $0.generation = 2
+      $0.baseGeneration = 2
       $0.selectedWorktree = nil
       $0.files = []
       $0.loadState = .idle
@@ -127,21 +259,29 @@ struct DiffReviewFeatureTests {
       // Suspend forever so the gen-1 load never resolves on its own; the nil
       // selection cancels it. We then deliver a gen-1 `.loaded` by hand.
       $0.diffClient.changedFiles = { _, _ in try await Task.never() }
+      // Base resolves to nil immediately (exhaustivity is off, so the resulting
+      // `.baseRefResolved(nil)` is tolerated); only the working-tree load is left
+      // in-flight for the deselect to cancel.
+      $0.gitClient.automaticWorktreeBaseRef = { _ in nil }
     }
     // The cancelled suspend may throw and enqueue a discarded `.failed`; keep the
     // assertion focused on the generation guard by relaxing exhaustivity.
     store.exhaustivity = .off
 
-    await store.send(.worktreeSelected(worktree)) {
+    await store.send(.worktreeSelected(worktree, prBaseRefName: nil)) {
       $0.generation = 1
+      $0.baseGeneration = 1
       $0.selectedWorktree = worktree
       $0.loadState = .loading
+      $0.baseLoadState = .loading
     }
-    await store.send(.worktreeSelected(nil)) {
+    await store.send(.worktreeSelected(nil, prBaseRefName: nil)) {
       $0.generation = 2
+      $0.baseGeneration = 2
       $0.selectedWorktree = nil
       $0.files = []
       $0.loadState = .idle
+      $0.baseLoadState = .idle
     }
     // Gen-1 result arrives late; the guard drops it (current generation is 2).
     await store.send(.loaded(files, operation: .none, generation: 1))
@@ -154,6 +294,7 @@ struct DiffReviewFeatureTests {
   @Test(.dependencies) func folderWorktreeIsUnsupportedWithoutClientCall() async {
     let worktree = folderWorktree()
     let callCount = LockIsolated(0)
+    let baseResolveCount = LockIsolated(0)
     let store = TestStore(initialState: DiffReviewFeature.State()) {
       DiffReviewFeature()
     } withDependencies: {
@@ -162,14 +303,20 @@ struct DiffReviewFeatureTests {
         callCount.withValue { $0 += 1 }
         return WorktreeDiff(files: [], isUnbornHead: false, operation: .none)
       }
+      $0.gitClient.automaticWorktreeBaseRef = { _ in
+        baseResolveCount.withValue { $0 += 1 }
+        return nil
+      }
     }
 
-    await store.send(.worktreeSelected(worktree)) {
+    await store.send(.worktreeSelected(worktree, prBaseRefName: nil)) {
       $0.generation = 1
+      $0.baseGeneration = 1
       $0.selectedWorktree = worktree
       $0.loadState = .unsupported(.folder)
     }
     #expect(callCount.value == 0)
+    #expect(baseResolveCount.value == 0)  // folder → no base resolve/load
   }
 
   // MARK: - remote unsupported (1.5) — client never called
@@ -177,6 +324,7 @@ struct DiffReviewFeatureTests {
   @Test(.dependencies) func remoteWorktreeIsUnsupportedWithoutClientCall() async {
     let worktree = remoteWorktree()
     let callCount = LockIsolated(0)
+    let baseResolveCount = LockIsolated(0)
     let store = TestStore(initialState: DiffReviewFeature.State()) {
       DiffReviewFeature()
     } withDependencies: {
@@ -185,14 +333,20 @@ struct DiffReviewFeatureTests {
         callCount.withValue { $0 += 1 }
         return WorktreeDiff(files: [], isUnbornHead: false, operation: .none)
       }
+      $0.gitClient.automaticWorktreeBaseRef = { _ in
+        baseResolveCount.withValue { $0 += 1 }
+        return nil
+      }
     }
 
-    await store.send(.worktreeSelected(worktree)) {
+    await store.send(.worktreeSelected(worktree, prBaseRefName: nil)) {
       $0.generation = 1
+      $0.baseGeneration = 1
       $0.selectedWorktree = worktree
       $0.loadState = .unsupported(.remote)
     }
     #expect(callCount.value == 0)
+    #expect(baseResolveCount.value == 0)  // remote → no base resolve/load
   }
 
   // MARK: - empty (1.6)
@@ -204,12 +358,18 @@ struct DiffReviewFeatureTests {
     } withDependencies: {
       $0.continuousClock = TestClock()
       $0.diffClient.changedFiles = { _, _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) }
+      $0.gitClient.automaticWorktreeBaseRef = { _ in nil }
     }
 
-    await store.send(.worktreeSelected(worktree)) {
+    await store.send(.worktreeSelected(worktree, prBaseRefName: nil)) {
       $0.generation = 1
+      $0.baseGeneration = 1
       $0.selectedWorktree = worktree
       $0.loadState = .loading
+      $0.baseLoadState = .loading
+    }
+    await store.receive(.baseRefResolved(ref: nil, generation: 1)) {
+      $0.baseLoadState = .idle
     }
     await store.receive(.loaded([], operation: .none, generation: 1)) {
       $0.loadState = .empty
@@ -236,18 +396,25 @@ struct DiffReviewFeatureTests {
         }
         throw DiffError.indexLocked
       }
+      $0.gitClient.automaticWorktreeBaseRef = { _ in nil }
     }
 
-    await store.send(.worktreeSelected(worktree)) {
+    await store.send(.worktreeSelected(worktree, prBaseRefName: nil)) {
       $0.generation = 1
+      $0.baseGeneration = 1
       $0.selectedWorktree = worktree
       $0.loadState = .loading
+      $0.baseLoadState = .loading
+    }
+    await store.receive(.baseRefResolved(ref: nil, generation: 1)) {
+      $0.baseLoadState = .idle
     }
     await store.receive(.loaded(files, operation: .none, generation: 1)) {
       $0.files = files
       $0.loadState = .loaded
     }
     // Re-load keeps the last-good list (files non-empty ⇒ no `.loading` flash).
+    // `baseRef` is nil, so `.load` issues no base effect.
     await store.send(.load) {
       $0.generation = 2
     }
@@ -268,12 +435,18 @@ struct DiffReviewFeatureTests {
     } withDependencies: {
       $0.continuousClock = clock
       $0.diffClient.changedFiles = { _, _ in WorktreeDiff(files: files, isUnbornHead: false, operation: .none) }
+      $0.gitClient.automaticWorktreeBaseRef = { _ in nil }
     }
 
-    await store.send(.worktreeSelected(worktree)) {
+    await store.send(.worktreeSelected(worktree, prBaseRefName: nil)) {
       $0.generation = 1
+      $0.baseGeneration = 1
       $0.selectedWorktree = worktree
       $0.loadState = .loading
+      $0.baseLoadState = .loading
+    }
+    await store.receive(.baseRefResolved(ref: nil, generation: 1)) {
+      $0.baseLoadState = .idle
     }
     await store.receive(.loaded(files, operation: .none, generation: 1)) {
       $0.files = files
@@ -311,9 +484,45 @@ struct DiffReviewFeatureTests {
       $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
     }
 
-    await store.send(.openFile(path: "a.swift"))
+    await store.send(.openFile(path: "a.swift", source: .workingTree))
     await store.finish()
-    #expect(sent.value == [.openDiffTab(worktree, filePath: "a.swift")])
+    #expect(sent.value == [.openDiffTab(worktree, filePath: "a.swift", source: .workingTree)])
+  }
+
+  // MARK: - source-scoped openFile opens two distinct tabs + documents
+
+  @Test(.dependencies) func openFileScopesTabAndDocumentBySource() async {
+    let worktree = gitLocalWorktree()
+    let file = makeFile("a.swift")
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = worktree
+    initialState.files = [file]
+    initialState.baseFiles = [file]
+    initialState.baseRef = "main"
+    initialState.loadState = .loaded
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
+      $0.diffClient.diff = { _, _, _, _ in [] }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.openFile(path: "a.swift", source: .workingTree))
+    await store.send(.openFile(path: "a.swift", source: .baseBranch(ref: "main")))
+    await store.finish()
+
+    // Two distinct documents keyed by `(path, source)`.
+    #expect(store.state.openDiffs[DiffDocumentKey(path: "a.swift", source: .workingTree)] != nil)
+    #expect(store.state.openDiffs[DiffDocumentKey(path: "a.swift", source: .baseBranch(ref: "main"))] != nil)
+    #expect(store.state.openDiffs.count == 2)
+    // Two `.openDiffTab` commands with different sources.
+    #expect(
+      sent.value.contains(.openDiffTab(worktree, filePath: "a.swift", source: .workingTree)))
+    #expect(
+      sent.value.contains(.openDiffTab(worktree, filePath: "a.swift", source: .baseBranch(ref: "main"))))
   }
 
   // MARK: - openFile loads hunks → builds rows (Phase 3)
@@ -348,9 +557,10 @@ struct DiffReviewFeatureTests {
       $0.diffClient.diff = { _, _, _, _ in hunks }
     }
 
-    await store.send(.openFile(path: "a.swift")) {
+    let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
+    await store.send(.openFile(path: "a.swift", source: .workingTree)) {
       $0.diffLoadToken = 1
-      $0.openDiffs["a.swift"] = DiffDocument(file: file, loadState: .loading, generation: 1)
+      $0.openDiffs[key] = DiffDocument(file: file, loadState: .loading, generation: 1)
     }
     await store.receive(\.diffLoaded) {
       var document = DiffDocument(file: file, loadState: .loading, generation: 1)
@@ -359,7 +569,7 @@ struct DiffReviewFeatureTests {
       document.isStale = false
       document.rows = DiffRowBuilder.build(file: file, hunks: hunks, mode: .unified, expanded: [])
       document.revision = 1
-      $0.openDiffs["a.swift"] = document
+      $0.openDiffs[key] = document
     }
   }
 
@@ -371,9 +581,10 @@ struct DiffReviewFeatureTests {
     var document = DiffDocument(file: file, loadState: .loaded, generation: 1)
     document.hunks = hunks
     document.rows = DiffRowBuilder.build(file: file, hunks: hunks, mode: .unified, expanded: [])
+    let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
     var initialState = DiffReviewFeature.State()
     initialState.selectedWorktree = gitLocalWorktree()
-    initialState.openDiffs = ["a.swift": document]
+    initialState.openDiffs = [key: document]
     let store = TestStore(initialState: initialState) {
       DiffReviewFeature()
     } withDependencies: {
@@ -384,10 +595,10 @@ struct DiffReviewFeatureTests {
     await store.send(.diffModeChanged(.split))
     #expect(store.state.diffViewMode == .split)
     #expect(
-      store.state.openDiffs["a.swift"]?.rows
+      store.state.openDiffs[key]?.rows
         == DiffRowBuilder.build(file: file, hunks: hunks, mode: .split, expanded: [])
     )
-    #expect(store.state.openDiffs["a.swift"]?.revision == 1)
+    #expect(store.state.openDiffs[key]?.revision == 1)
   }
 
   // MARK: - live update: vanished file goes stale, tab stays (3.2/3.3)
@@ -397,11 +608,12 @@ struct DiffReviewFeatureTests {
     let file = makeFile("a.swift")
     var document = DiffDocument(file: file, loadState: .loaded, generation: 1)
     document.rows = DiffRowBuilder.build(file: file, hunks: [modifiedHunk()], mode: .unified, expanded: [])
+    let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
     var initialState = DiffReviewFeature.State()
     initialState.selectedWorktree = worktree
     initialState.files = [file]
     initialState.loadState = .loaded
-    initialState.openDiffs = ["a.swift": document]
+    initialState.openDiffs = [key: document]
     let store = TestStore(initialState: initialState) {
       DiffReviewFeature()
     } withDependencies: {
@@ -409,14 +621,15 @@ struct DiffReviewFeatureTests {
       $0.diffClient.changedFiles = { _, _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) }
     }
 
+    // `baseRef` is nil, so `.load` issues no base effect.
     await store.send(.load) { $0.generation = 1 }
     await store.receive(\.loaded) {
       $0.files = []
       $0.loadState = .empty
-      $0.openDiffs["a.swift"]?.isStale = true
+      $0.openDiffs[key]?.isStale = true
     }
     // Tab stays open with its last-rendered rows.
-    #expect(store.state.openDiffs["a.swift"]?.rows.isEmpty == false)
+    #expect(store.state.openDiffs[key]?.rows.isEmpty == false)
   }
 
   // MARK: - expandGap re-diffs with raised context
@@ -428,10 +641,11 @@ struct DiffReviewFeatureTests {
     let fullHunk = modifiedHunk()
     var document = DiffDocument(file: file, loadState: .loaded, generation: 3)
     document.hunks = [modifiedHunk()]
+    let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
     var initialState = DiffReviewFeature.State()
     initialState.selectedWorktree = worktree
     initialState.files = [file]
-    initialState.openDiffs = ["a.swift": document]
+    initialState.openDiffs = [key: document]
     initialState.diffLoadToken = 3
     let store = TestStore(initialState: initialState) {
       DiffReviewFeature()
@@ -444,10 +658,10 @@ struct DiffReviewFeatureTests {
     }
     store.exhaustivity = .off
 
-    await store.send(.expandGap(path: "a.swift", anchor: 5)) {
+    await store.send(.expandGap(path: "a.swift", source: .workingTree, anchor: 5)) {
       $0.diffLoadToken = 4
-      $0.openDiffs["a.swift"]?.expanded = [5]
-      $0.openDiffs["a.swift"]?.generation = 4
+      $0.openDiffs[key]?.expanded = [5]
+      $0.openDiffs[key]?.generation = 4
     }
     await store.receive(\.diffLoaded)
     #expect(context.value > 3)  // raised well above the git default of 3.
@@ -555,11 +769,12 @@ struct DiffReviewFeatureTests {
     let worktree = gitLocalWorktree()
     let file = makeFile("a.swift")
     let comment = reviewComment(start: 3, end: 3, snippet: "target")
+    let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
     let document = DiffDocument(file: file, loadState: .loaded, generation: 5)
     var initialState = DiffReviewFeature.State()
     initialState.selectedWorktree = worktree
     initialState.files = [file]
-    initialState.openDiffs = ["a.swift": document]
+    initialState.openDiffs = [key: document]
     initialState.diffLoadToken = 5
     initialState.comments = [comment]
     let store = TestStore(initialState: initialState) {
@@ -577,9 +792,68 @@ struct DiffReviewFeatureTests {
       oldStart: 1, oldCount: 3, newStart: 1, newCount: 5, header: "@@ -1,3 +1,5 @@",
       lines: [line(1, "a"), line(2, "b"), line(3, "c"), line(4, "d"), line(5, "target")]
     )
-    await store.send(.diffLoaded(path: "a.swift", hunks: [hunk], token: 5))
+    await store.send(.diffLoaded(key: key, hunks: [hunk], token: 5))
     #expect(store.state.comments[id: comment.id]?.startLine == 5)
     #expect(store.state.comments[id: comment.id]?.orphaned == false)
+  }
+
+  // MARK: - comments are isolated by source
+
+  @Test(.dependencies) func commentsAreIsolatedBySource() {
+    let file = makeFile("a.swift")
+    let workingComment = reviewComment(body: "working note")
+    var baseComment = reviewComment(body: "base note")
+    baseComment.source = .baseBranch(ref: "main")
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = gitLocalWorktree()
+    initialState.files = [file]
+    initialState.baseFiles = [file]
+    initialState.baseRef = "main"
+    initialState.comments = [workingComment, baseComment]
+
+    // A working-tree document only sees the working-tree comment, and vice versa.
+    #expect(initialState.comments(forPath: "a.swift", source: .workingTree) == [workingComment])
+    #expect(initialState.comments(forPath: "a.swift", source: .baseBranch(ref: "main")) == [baseComment])
+  }
+
+  // MARK: - HEAD-tick refreshes the base list without re-resolving
+
+  @Test(.dependencies) func headTickRefreshesBaseWithoutReResolving() async {
+    let worktree = gitLocalWorktree()
+    let resolveCount = LockIsolated(0)
+    let baseFiles = [makeFile("committed.swift")]
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = worktree
+    initialState.files = []
+    initialState.baseFiles = baseFiles
+    initialState.baseRef = "main"
+    initialState.baseLoadState = .loaded
+    initialState.loadState = .loaded
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.diffClient.changedFiles = { _, _ in WorktreeDiff(files: baseFiles, isUnbornHead: false, operation: .none) }
+      $0.gitClient.automaticWorktreeBaseRef = { _ in
+        resolveCount.withValue { $0 += 1 }
+        return "origin/should-not-resolve"
+      }
+    }
+    store.exhaustivity = .off
+
+    // A `.load` (post-tick) bumps `baseGeneration` and re-diffs the base against
+    // the already-resolved ref — no re-resolution.
+    await store.send(.load) {
+      $0.generation = 1
+      $0.baseGeneration = 1
+    }
+    await store.receive(.baseLoaded(baseFiles, generation: 1)) {
+      $0.baseFiles = baseFiles
+      $0.baseLoadState = .loaded
+    }
+    await store.finish()
+    #expect(resolveCount.value == 0)  // base ref never re-resolved on a tick
+    #expect(store.state.baseRef == "main")
   }
 
   @Test(.dependencies) func requestDiscardPresentsConfirmAndDiscardClears() async {

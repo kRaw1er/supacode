@@ -63,7 +63,9 @@ struct ChangedFilesListView: View {
       ForEach(store.files) { file in
         FileChangeRow(file: file)
           .contentShape(Rectangle())
-          .onTapGesture { store.send(.openFile(path: file.id)) }  // file.id = newPath ?? oldPath ?? ""
+          // Phase 3 splits this into two sections; the base rows pass `.baseBranch`.
+          // file.id = newPath ?? oldPath ?? ""
+          .onTapGesture { store.send(.openFile(path: file.id, source: .workingTree)) }
           .accessibilityAddTraits(.isButton)
           .accessibilityHint("Opens the diff in a new tab")
       }

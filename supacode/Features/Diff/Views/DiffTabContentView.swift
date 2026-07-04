@@ -10,7 +10,9 @@ struct DiffTabContentView: View {
   let filePath: String
 
   var body: some View {
-    let document = store.openDiffs[filePath]
+    // Phase 3 threads the real `source` through; Phase 2 keeps the working-tree
+    // read so the composite key compiles.
+    let document = store.openDiffs[DiffDocumentKey(path: filePath, source: .workingTree)]
     VStack(spacing: 0) {
       header(document: document)
       Divider()
@@ -116,7 +118,7 @@ struct DiffTabContentView: View {
       } description: {
         Text(Self.message(for: error))
       } actions: {
-        Button("Retry") { store.send(.openFile(path: filePath)) }
+        Button("Retry") { store.send(.openFile(path: filePath, source: .workingTree)) }
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
     case .loaded:
@@ -127,11 +129,11 @@ struct DiffTabContentView: View {
           revision: document.revision,
           filePath: filePath,
           workingDirectory: store.selectedWorktree?.workingDirectory,
-          onExpandGap: { anchor in store.send(.expandGap(path: filePath, anchor: anchor)) },
+          onExpandGap: { anchor in store.send(.expandGap(path: filePath, source: .workingTree, anchor: anchor)) },
           onOpenComposer: { side, start, end, snippet, context in
             store.send(
               .openCommentComposer(
-                filePath: filePath, side: side, startLine: start, endLine: end,
+                filePath: filePath, source: .workingTree, side: side, startLine: start, endLine: end,
                 anchorSnippet: snippet, contextBefore: context))
           },
           onCommentTap: { id in store.send(.editComment(id: id)) }

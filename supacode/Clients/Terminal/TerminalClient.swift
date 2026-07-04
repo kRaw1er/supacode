@@ -64,8 +64,10 @@ struct TerminalClient {
     case destroyTab(Worktree, tabID: TerminalTabID)
     case destroySurface(Worktree, tabID: TerminalTabID, surfaceID: UUID)
     case beginTabRename(Worktree, tabID: TerminalTabID? = nil)
-    /// Open (or focus, deduped by path) a surface-less diff tab for `filePath`.
-    case openDiffTab(Worktree, filePath: String)
+    /// Open (or focus, deduped by `(path, source)`) a surface-less diff tab for
+    /// `filePath`. `source` distinguishes the working-tree diff from the
+    /// base-branch diff of the same file so they get independent tabs.
+    case openDiffTab(Worktree, filePath: String, source: DiffSource)
     /// Inject `text` into the worktree's resolved agent terminal surface, then
     /// switch focus to that terminal tab. `submit` appends `\r` to run it.
     case insertTextIntoFocusedSurface(Worktree, text: String, submit: Bool)
