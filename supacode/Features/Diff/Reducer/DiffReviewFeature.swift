@@ -130,6 +130,14 @@ struct DiffReviewFeature {
     /// The base section renders only when the panel is supported AND a base ref
     /// resolved; otherwise section 2 is hidden entirely (Phase 3 consumes this).
     var supportsBaseDiff: Bool { supportsDiffReview && baseRef != nil }
+
+    /// Header for the "vs `<base>`" inspector section, or `nil` when the section
+    /// is hidden (no base resolved). The view switches section visibility on this
+    /// so the render decision stays testable without a view harness (Phase 3).
+    var baseSectionTitle: String? {
+      guard supportsBaseDiff, let ref = baseRef else { return nil }
+      return "vs \(DiffSource.baseBranch(ref: ref).displayName ?? "base")"
+    }
   }
 
   enum Action: Equatable {

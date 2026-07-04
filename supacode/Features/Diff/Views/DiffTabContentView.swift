@@ -3,16 +3,18 @@ import SwiftUI
 
 /// Center diff tab content: a header (path + status + unified/split toggle), an
 /// optional "no longer changed" stale banner, and the virtualized viewer. Reads
-/// the per-file `DiffDocument` from `DiffReviewFeature.State.openDiffs[filePath]`;
+/// the per-file `DiffDocument` from `openDiffs[DiffDocumentKey(path, source)]`;
 /// all mutations go through actions (`store_state_mutation_in_views`).
 struct DiffTabContentView: View {
   @Bindable var store: StoreOf<DiffReviewFeature>
   let filePath: String
+  /// Which diff this tab renders; scopes the `openDiffs` read, the comment
+  /// composer, and the tab title so a working-tree tab and a base-branch tab of
+  /// the same file stay distinct.
+  let source: DiffSource
 
   var body: some View {
-    // Phase 3 threads the real `source` through; Phase 2 keeps the working-tree
-    // read so the composite key compiles.
-    let document = store.openDiffs[DiffDocumentKey(path: filePath, source: .workingTree)]
+    let document = store.openDiffs[DiffDocumentKey(path: filePath, source: source)]
     VStack(spacing: 0) {
       header(document: document)
       Divider()
@@ -118,7 +120,7 @@ struct DiffTabContentView: View {
       } description: {
         Text(Self.message(for: error))
       } actions: {
-        Button("Retry") { store.send(.openFile(path: filePath, source: .workingTree)) }
+        Button("Retry") { store.send(.openFile(path: filePath, source: source)) }
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
     case .loaded:
@@ -129,11 +131,11 @@ struct DiffTabContentView: View {
           revision: document.revision,
           filePath: filePath,
           workingDirectory: store.selectedWorktree?.workingDirectory,
-          onExpandGap: { anchor in store.send(.expandGap(path: filePath, source: .workingTree, anchor: anchor)) },
+          onExpandGap: { anchor in store.send(.expandGap(path: filePath, source: source, anchor: anchor)) },
           onOpenComposer: { side, start, end, snippet, context in
             store.send(
               .openCommentComposer(
-                filePath: filePath, source: .workingTree, side: side, startLine: start, endLine: end,
+                filePath: filePath, source: source, side: side, startLine: start, endLine: end,
                 anchorSnippet: snippet, contextBefore: context))
           },
           onCommentTap: { id in store.send(.editComment(id: id)) }
@@ -146,11 +148,19 @@ struct DiffTabContentView: View {
   // MARK: - Content
 
   private func title(document: DiffDocument?) -> String {
-    guard let file = document?.file else { return filePath }
-    if file.status == .renamed, let old = file.oldPath, let new = file.newPath {
-      return "\(old) → \(new)"
+    let base: String
+    if let file = document?.file {
+      if file.status == .renamed, let old = file.oldPath, let new = file.newPath {
+        base = "\(old) → \(new)"
+      } else {
+        base = file.newPath ?? file.oldPath ?? filePath
+      }
+    } else {
+      base = filePath
     }
-    return file.newPath ?? file.oldPath ?? filePath
+    // Base-branch tabs disambiguate: "file.swift — vs main".
+    guard let name = source.displayName else { return base }
+    return "\(base) — vs \(name)"
   }
 
   private static func message(for error: DiffError) -> String {

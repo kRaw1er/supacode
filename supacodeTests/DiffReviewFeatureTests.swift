@@ -816,6 +816,49 @@ struct DiffReviewFeatureTests {
     #expect(initialState.comments(forPath: "a.swift", source: .baseBranch(ref: "main")) == [baseComment])
   }
 
+  // MARK: - two-section inspector visibility (Phase 3 view-facing state)
+
+  @Test(.dependencies) func baseSectionHiddenWhenNoBaseResolved() {
+    var state = DiffReviewFeature.State()
+    state.selectedWorktree = gitLocalWorktree()
+    state.files = [makeFile("a.swift")]
+    state.baseRef = nil
+    // No base ref ⇒ the "vs <base>" section is hidden entirely (no header).
+    #expect(state.baseSectionTitle == nil)
+    #expect(state.supportsBaseDiff == false)
+  }
+
+  @Test(.dependencies) func baseSectionTitleStripsOriginPrefix() {
+    var state = DiffReviewFeature.State()
+    state.selectedWorktree = gitLocalWorktree()
+    state.baseRef = "origin/main"
+    // The header strips a leading `origin/` for display.
+    #expect(state.baseSectionTitle == "vs main")
+    state.baseRef = "feature/x"
+    #expect(state.baseSectionTitle == "vs feature/x")
+  }
+
+  @Test(.dependencies) func baseSectionHiddenForUnsupportedWorktree() {
+    var state = DiffReviewFeature.State()
+    state.selectedWorktree = folderWorktree()
+    state.baseRef = "main"
+    // Folder/remote worktrees never show the base section even if a stale
+    // `baseRef` lingers (supportsDiffReview is false).
+    #expect(state.baseSectionTitle == nil)
+  }
+
+  @Test(.dependencies) func baseUpToDateIsEmptyStateNotError() {
+    var state = DiffReviewFeature.State()
+    state.selectedWorktree = gitLocalWorktree()
+    state.baseRef = "main"
+    state.baseFiles = []
+    state.baseLoadState = .empty
+    // Branch up to date with base ⇒ section present, empty (never an error).
+    #expect(state.baseSectionTitle == "vs main")
+    #expect(state.baseFiles.isEmpty)
+    if case .error = state.baseLoadState { Issue.record("up-to-date must not be an error state") }
+  }
+
   // MARK: - HEAD-tick refreshes the base list without re-resolving
 
   @Test(.dependencies) func headTickRefreshesBaseWithoutReResolving() async {

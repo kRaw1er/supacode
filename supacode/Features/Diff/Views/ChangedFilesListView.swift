@@ -33,9 +33,17 @@ struct ChangedFilesListView: View {
       case .loaded, .refreshing:
         fileList(updating: store.loadState == .refreshing)
       case .empty:
-        ContentUnavailableView(
-          "No Changes", systemImage: "checkmark.circle",
-          description: Text("This worktree has no uncommitted changes."))
+        // Zero uncommitted changes: when a base section is present, render the
+        // two-section list (a compact "no uncommitted changes" row + the base
+        // section) rather than swallowing the base changes behind a full-screen
+        // placeholder. Only a whole-panel empty (no base) keeps the placeholder.
+        if store.baseSectionTitle != nil {
+          fileList(updating: false)
+        } else {
+          ContentUnavailableView(
+            "No Changes", systemImage: "checkmark.circle",
+            description: Text("This worktree has no uncommitted changes."))
+        }
       case .unsupported(.folder):
         ContentUnavailableView(
           "Not a Git Repository", systemImage: "folder",
@@ -52,25 +60,91 @@ struct ChangedFilesListView: View {
     }
   }
 
+  /// Two Orca-style sections: "Uncommitted" (working tree vs HEAD) and, when a
+  /// base ref resolved, "vs `<base>`" (committed `merge-base..HEAD` changes).
   @ViewBuilder
   private func fileList(updating: Bool) -> some View {
     List {
-      if updating {
+      Section {
+        uncommittedSection(updating: updating)
+      } header: {
+        Text("Uncommitted")
+      }
+      if let title = store.baseSectionTitle, let baseRef = store.baseRef {
+        Section {
+          baseSection(baseRef: baseRef)
+        } header: {
+          Text(title)
+        }
+      }
+    }
+    .listStyle(.inset)
+  }
+
+  /// Working-tree (uncommitted) rows. Empty here only ever shows when a base
+  /// section is present (the whole-panel empty case keeps its placeholder).
+  @ViewBuilder
+  private func uncommittedSection(updating: Bool) -> some View {
+    if updating {
+      Label("Updating…", systemImage: "arrow.triangle.2.circlepath")
+        .font(.caption).foregroundStyle(.secondary)
+        .listRowSeparator(.hidden)
+    }
+    if store.files.isEmpty {
+      Label("No uncommitted changes", systemImage: "checkmark.circle")
+        .font(.caption).foregroundStyle(.secondary)
+        .listRowSeparator(.hidden)
+        .accessibilityAddTraits(.isStaticText)
+    } else {
+      ForEach(store.files) { file in
+        // file.id = newPath ?? oldPath ?? ""
+        fileRow(file, source: .workingTree, axPrefix: nil)
+      }
+    }
+  }
+
+  /// Base ("vs `<base>`") rows, driven by `baseLoadState`. `.empty` is the
+  /// "up to date with `<base>`" state — never an error.
+  @ViewBuilder
+  private func baseSection(baseRef: String) -> some View {
+    let baseName = DiffSource.baseBranch(ref: baseRef).displayName ?? "base"
+    switch store.baseLoadState {
+    case .loaded, .refreshing:
+      if store.baseLoadState == .refreshing {
         Label("Updating…", systemImage: "arrow.triangle.2.circlepath")
           .font(.caption).foregroundStyle(.secondary)
           .listRowSeparator(.hidden)
       }
-      ForEach(store.files) { file in
-        FileChangeRow(file: file)
-          .contentShape(Rectangle())
-          // Phase 3 splits this into two sections; the base rows pass `.baseBranch`.
-          // file.id = newPath ?? oldPath ?? ""
-          .onTapGesture { store.send(.openFile(path: file.id, source: .workingTree)) }
-          .accessibilityAddTraits(.isButton)
-          .accessibilityHint("Opens the diff in a new tab")
+      ForEach(store.baseFiles) { file in
+        fileRow(file, source: .baseBranch(ref: baseRef), axPrefix: "vs \(baseName)")
       }
+    case .empty:
+      Label("Up to date with \(baseName)", systemImage: "checkmark.circle")
+        .font(.caption).foregroundStyle(.secondary)
+        .listRowSeparator(.hidden)
+        .accessibilityAddTraits(.isStaticText)
+    case .loading:
+      ProgressView().controlSize(.small)
+        .listRowSeparator(.hidden)
+    case .error(let error):
+      Label(Self.message(for: error), systemImage: "exclamationmark.triangle")
+        .font(.caption).foregroundStyle(.secondary)
+        .listRowSeparator(.hidden)
+    case .idle, .unsupported:
+      EmptyView()
     }
-    .listStyle(.inset)
+  }
+
+  /// A tappable changed-file row shared by both sections. `axPrefix` prefixes the
+  /// VoiceOver label so a file appearing in both sections is distinguishable.
+  @ViewBuilder
+  private func fileRow(_ file: FileChange, source: DiffSource, axPrefix: String?) -> some View {
+    FileChangeRow(file: file)
+      .contentShape(Rectangle())
+      .onTapGesture { store.send(.openFile(path: file.id, source: source)) }
+      .accessibilityAddTraits(.isButton)
+      .accessibilityHint("Opens the diff in a new tab")
+      .accessibilityLabel(axPrefix.map { "\($0): \(FileChangeRow.axLabel(file))" } ?? FileChangeRow.axLabel(file))
   }
 
   private static func message(for error: DiffError) -> String {

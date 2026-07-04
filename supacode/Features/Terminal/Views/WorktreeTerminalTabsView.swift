@@ -73,7 +73,11 @@ struct WorktreeTerminalTabsView: View {
           case .diff:
             // The `.diff` branch never touches `TerminalSplitTreePane`, so
             // `splitTree(for:)` is never reached for a diff tab.
-            DiffTabContentView(store: reviewStore, filePath: state.diffFilePath(for: tabId) ?? "")
+            DiffTabContentView(
+              store: reviewStore,
+              filePath: state.diffFilePath(for: tabId) ?? "",
+              source: state.diffSource(for: tabId) ?? .workingTree
+            )
           }
         }
       } else {
