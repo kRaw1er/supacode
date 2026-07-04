@@ -130,4 +130,8 @@ nonisolated enum DiffError: Error, Equatable, Sendable {
   case indexLocked
   case notARepository
   case libgit2(code: Int32, message: String)
+  /// The `.baseBranch` ref did not resolve to any git object (no candidate
+  /// revparse succeeded). Not an error the user should see — the reducer treats
+  /// it as "hide the base-branch section" rather than surfacing a failure.
+  case baseRefUnresolved
 }

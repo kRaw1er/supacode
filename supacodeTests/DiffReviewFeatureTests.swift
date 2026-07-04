@@ -67,7 +67,7 @@ struct DiffReviewFeatureTests {
       DiffReviewFeature()
     } withDependencies: {
       $0.continuousClock = TestClock()
-      $0.diffClient.changedFiles = { _ in WorktreeDiff(files: files, isUnbornHead: false, operation: .none) }
+      $0.diffClient.changedFiles = { _, _ in WorktreeDiff(files: files, isUnbornHead: false, operation: .none) }
     }
 
     await store.send(.worktreeSelected(worktree)) {
@@ -90,7 +90,7 @@ struct DiffReviewFeatureTests {
       DiffReviewFeature()
     } withDependencies: {
       $0.continuousClock = TestClock()
-      $0.diffClient.changedFiles = { _ in WorktreeDiff(files: files, isUnbornHead: false, operation: .rebase) }
+      $0.diffClient.changedFiles = { _, _ in WorktreeDiff(files: files, isUnbornHead: false, operation: .rebase) }
     }
 
     await store.send(.worktreeSelected(worktree)) {
@@ -126,7 +126,7 @@ struct DiffReviewFeatureTests {
       $0.continuousClock = TestClock()
       // Suspend forever so the gen-1 load never resolves on its own; the nil
       // selection cancels it. We then deliver a gen-1 `.loaded` by hand.
-      $0.diffClient.changedFiles = { _ in try await Task.never() }
+      $0.diffClient.changedFiles = { _, _ in try await Task.never() }
     }
     // The cancelled suspend may throw and enqueue a discarded `.failed`; keep the
     // assertion focused on the generation guard by relaxing exhaustivity.
@@ -158,7 +158,7 @@ struct DiffReviewFeatureTests {
       DiffReviewFeature()
     } withDependencies: {
       $0.continuousClock = TestClock()
-      $0.diffClient.changedFiles = { _ in
+      $0.diffClient.changedFiles = { _, _ in
         callCount.withValue { $0 += 1 }
         return WorktreeDiff(files: [], isUnbornHead: false, operation: .none)
       }
@@ -181,7 +181,7 @@ struct DiffReviewFeatureTests {
       DiffReviewFeature()
     } withDependencies: {
       $0.continuousClock = TestClock()
-      $0.diffClient.changedFiles = { _ in
+      $0.diffClient.changedFiles = { _, _ in
         callCount.withValue { $0 += 1 }
         return WorktreeDiff(files: [], isUnbornHead: false, operation: .none)
       }
@@ -203,7 +203,7 @@ struct DiffReviewFeatureTests {
       DiffReviewFeature()
     } withDependencies: {
       $0.continuousClock = TestClock()
-      $0.diffClient.changedFiles = { _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) }
+      $0.diffClient.changedFiles = { _, _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) }
     }
 
     await store.send(.worktreeSelected(worktree)) {
@@ -226,7 +226,7 @@ struct DiffReviewFeatureTests {
       DiffReviewFeature()
     } withDependencies: {
       $0.continuousClock = TestClock()
-      $0.diffClient.changedFiles = { _ in
+      $0.diffClient.changedFiles = { _, _ in
         let attempt = callCount.withValue { count -> Int in
           count += 1
           return count
@@ -267,7 +267,7 @@ struct DiffReviewFeatureTests {
       DiffReviewFeature()
     } withDependencies: {
       $0.continuousClock = clock
-      $0.diffClient.changedFiles = { _ in WorktreeDiff(files: files, isUnbornHead: false, operation: .none) }
+      $0.diffClient.changedFiles = { _, _ in WorktreeDiff(files: files, isUnbornHead: false, operation: .none) }
     }
 
     await store.send(.worktreeSelected(worktree)) {
@@ -345,7 +345,7 @@ struct DiffReviewFeatureTests {
     } withDependencies: {
       $0.continuousClock = TestClock()
       $0.terminalClient.send = { _ in }
-      $0.diffClient.diff = { _, _, _ in hunks }
+      $0.diffClient.diff = { _, _, _, _ in hunks }
     }
 
     await store.send(.openFile(path: "a.swift")) {
@@ -406,7 +406,7 @@ struct DiffReviewFeatureTests {
       DiffReviewFeature()
     } withDependencies: {
       $0.continuousClock = TestClock()
-      $0.diffClient.changedFiles = { _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) }
+      $0.diffClient.changedFiles = { _, _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) }
     }
 
     await store.send(.load) { $0.generation = 1 }
@@ -437,7 +437,7 @@ struct DiffReviewFeatureTests {
       DiffReviewFeature()
     } withDependencies: {
       $0.continuousClock = TestClock()
-      $0.diffClient.diff = { _, _, requestedContext in
+      $0.diffClient.diff = { _, _, requestedContext, _ in
         context.setValue(requestedContext)
         return [fullHunk]
       }

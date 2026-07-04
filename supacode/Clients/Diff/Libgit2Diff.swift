@@ -93,6 +93,91 @@ nonisolated enum Libgit2Diff {
     return []
   }
 
+  // MARK: - Base-branch (three-dot) entry points
+
+  /// Cheap changed-file list for the branch's committed changes vs `baseRef`
+  /// (three-dot `merge-base(base, HEAD)..HEAD`). Mirrors `changedFiles` but
+  /// diffs merge-base tree ↔ HEAD tree instead of tree ↔ workdir. Reuses the
+  /// same `findSimilar` / `fileDiffResult` / `makeFileChange` materialization.
+  static func baseChangedFiles(at worktreeURL: URL, baseRef: String, caps: Caps) throws -> WorktreeDiff {
+    let repo = try openRepository(at: worktreeURL)
+    defer { git_repository_free(repo) }
+
+    let operation = repositoryOperation(repo)
+    // Unborn HEAD → nothing committed yet, so there is no base diff.
+    if git_repository_head_unborn(repo) == 1 {
+      return WorktreeDiff(files: [], isUnbornHead: true, operation: operation)
+    }
+
+    let handles = try makeBaseDiff(repo: repo, baseRef: baseRef)
+    defer {
+      git_diff_free(handles.diff)
+      git_tree_free(handles.newTree)
+      git_tree_free(handles.oldTree)
+    }
+    try findSimilar(handles.diff)
+
+    var files: [FileChange] = []
+    let count = git_diff_num_deltas(handles.diff)
+    var idx = 0
+    while idx < count {
+      defer { idx += 1 }
+      guard let deltaPtr = git_diff_get_delta(handles.diff, idx) else { continue }
+      let delta = deltaPtr.pointee
+      let result = fileDiffResult(delta: delta, diff: handles.diff, idx: idx, caps: caps, wantHunks: false)
+      files.append(makeFileChange(delta: delta, result: result))
+    }
+    return WorktreeDiff(files: files, isUnbornHead: false, operation: operation)
+  }
+
+  /// The full hunks/lines for one file in the base-branch (three-dot) diff,
+  /// fetched on demand. Mirrors `hunks` but against `merge-base..HEAD`.
+  static func baseHunks(
+    for file: FileChange,
+    at worktreeURL: URL,
+    baseRef: String,
+    caps: Caps,
+    contextLines: UInt32 = 3
+  ) throws -> [DiffHunk] {
+    let repo = try openRepository(at: worktreeURL)
+    defer { git_repository_free(repo) }
+
+    // Unborn HEAD → no committed history to diff against the base.
+    if git_repository_head_unborn(repo) == 1 {
+      return []
+    }
+
+    let handles = try makeBaseDiff(repo: repo, baseRef: baseRef, contextLines: contextLines)
+    defer {
+      git_diff_free(handles.diff)
+      git_tree_free(handles.newTree)
+      git_tree_free(handles.oldTree)
+    }
+    try findSimilar(handles.diff)
+
+    let count = git_diff_num_deltas(handles.diff)
+    var idx = 0
+    while idx < count {
+      defer { idx += 1 }
+      guard let deltaPtr = git_diff_get_delta(handles.diff, idx) else { continue }
+      let delta = deltaPtr.pointee
+      guard deltaMatches(delta, file: file) else { continue }
+      let result = fileDiffResult(delta: delta, diff: handles.diff, idx: idx, caps: caps, wantHunks: true)
+      if result.isBinary || result.isLargeFileCapped {
+        return []
+      }
+      return result.hunks
+    }
+    return []
+  }
+
+  /// Ordered revparse candidates for a base ref. A bare branch name prefers its
+  /// remote-tracking ref (`origin/<name>`) over a local ref of the same name; a
+  /// ref that already contains a `/` is used verbatim.
+  static func candidates(for ref: String) -> [String] {
+    ref.contains("/") ? [ref] : ["origin/\(ref)", ref]
+  }
+
   // MARK: - Repository / diff construction
 
   private static func openRepository(at url: URL) throws -> OpaquePointer {
@@ -146,6 +231,111 @@ nonisolated enum Libgit2Diff {
       throw lastError(returnCode)
     }
     return (diff, tree)
+  }
+
+  /// The owned handles a base (tree↔tree) diff must keep alive until the diff
+  /// and all its patches are freed. The caller frees all three in reverse
+  /// acquisition order inside a `defer`.
+  private struct BaseDiffHandles {
+    var diff: OpaquePointer
+    var oldTree: OpaquePointer
+    var newTree: OpaquePointer
+  }
+
+  /// Builds the three-dot `merge-base(base, HEAD)..HEAD` diff. Resolves
+  /// `baseRef` in-process (revparse candidate order), computes the merge base,
+  /// and diffs the merge-base tree ↔ HEAD tree. Every intermediate handle
+  /// (revparse object, peeled commit, merge-base commit) is freed inside this
+  /// call; only the diff + the two trees escape (freed by the caller).
+  ///
+  /// Edge cases: an unresolvable ref throws `.baseRefUnresolved`; unrelated
+  /// histories (`git_merge_base` → `GIT_ENOTFOUND`) fall back to a two-dot diff
+  /// against the base commit's own tree.
+  private static func makeBaseDiff(
+    repo: OpaquePointer,
+    baseRef: String,
+    contextLines: UInt32 = 3
+  ) throws -> BaseDiffHandles {
+    // 1. Resolve the base object: first successful revparse candidate wins.
+    var resolved: OpaquePointer?
+    for candidate in candidates(for: baseRef) {
+      var obj: OpaquePointer?
+      let code = candidate.withCString { git_revparse_single(&obj, repo, $0) }
+      if code == 0, let obj {
+        resolved = obj
+        break
+      }
+    }
+    guard let baseObj = resolved else { throw DiffError.baseRefUnresolved }
+    defer { git_object_free(baseObj) }
+
+    // Peel to a commit and read its oid.
+    var peeled: OpaquePointer?
+    var returnCode = git_object_peel(&peeled, baseObj, GIT_OBJECT_COMMIT)
+    guard returnCode == 0, let baseCommit = peeled else { throw lastError(returnCode) }
+    defer { git_object_free(baseCommit) }
+    guard let baseOidPtr = git_object_id(baseCommit) else { throw DiffError.baseRefUnresolved }
+    var baseOid = baseOidPtr.pointee
+
+    // 2. HEAD commit oid (caller guarantees HEAD is born).
+    var headOid = git_oid()
+    returnCode = "HEAD".withCString { git_reference_name_to_id(&headOid, repo, $0) }
+    guard returnCode == 0 else { throw lastError(returnCode) }
+
+    // 3. Merge base → old tree (with a two-dot fallback for unrelated history).
+    let oldTree: OpaquePointer
+    var mergeBaseOid = git_oid()
+    let mergeBaseCode = git_merge_base(&mergeBaseOid, repo, &baseOid, &headOid)
+    if mergeBaseCode == 0 {
+      var mbCommit: OpaquePointer?
+      let lookupCode = git_commit_lookup(&mbCommit, repo, &mergeBaseOid)
+      guard lookupCode == 0, let mbCommit else { throw lastError(lookupCode) }
+      defer { git_commit_free(mbCommit) }
+      var tree: OpaquePointer?
+      let treeCode = git_commit_tree(&tree, mbCommit)
+      guard treeCode == 0, let tree else { throw lastError(treeCode) }
+      oldTree = tree
+    } else if mergeBaseCode == GIT_ENOTFOUND.rawValue {
+      // Unrelated histories: no common ancestor → diff against the base tip
+      // itself (documented two-dot fallback for this rare case).
+      var tree: OpaquePointer?
+      let treeCode = git_commit_tree(&tree, baseCommit)
+      guard treeCode == 0, let tree else { throw lastError(treeCode) }
+      oldTree = tree
+    } else {
+      throw lastError(mergeBaseCode)
+    }
+
+    // 4. HEAD tree (reused peel helper). Free `oldTree` on any later failure.
+    let newTree: OpaquePointer
+    do {
+      newTree = try headTree(repo: repo)
+    } catch {
+      git_tree_free(oldTree)
+      throw error
+    }
+
+    // 5. Options: no workdir here, so drop the untracked flags; keep typechange
+    // + patience to match the working-tree diff's readability.
+    var opts = git_diff_options()
+    returnCode = git_diff_options_init(&opts, UInt32(GIT_DIFF_OPTIONS_VERSION))
+    guard returnCode == 0 else {
+      git_tree_free(newTree)
+      git_tree_free(oldTree)
+      throw lastError(returnCode)
+    }
+    opts.context_lines = contextLines
+    opts.flags = GIT_DIFF_INCLUDE_TYPECHANGE.rawValue | GIT_DIFF_PATIENCE.rawValue
+
+    // 6. Diff merge-base tree ↔ HEAD tree.
+    var diff: OpaquePointer?
+    returnCode = git_diff_tree_to_tree(&diff, repo, oldTree, newTree, &opts)
+    guard returnCode == 0, let diff else {
+      git_tree_free(newTree)
+      git_tree_free(oldTree)
+      throw lastError(returnCode)
+    }
+    return BaseDiffHandles(diff: diff, oldTree: oldTree, newTree: newTree)
   }
 
   private static func headTree(repo: OpaquePointer) throws -> OpaquePointer {

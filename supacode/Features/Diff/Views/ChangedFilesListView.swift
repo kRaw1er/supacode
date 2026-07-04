@@ -75,6 +75,7 @@ struct ChangedFilesListView: View {
     switch error {
     case .notARepository: "This directory is not a git repository."
     case .indexLocked: "Git is busy. Retrying…"
+    case .baseRefUnresolved: "The base branch could not be resolved."
     case .libgit2: "An error occurred while reading the diff."
     }
   }

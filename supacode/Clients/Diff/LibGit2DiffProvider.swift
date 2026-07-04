@@ -27,14 +27,29 @@ actor LibGit2DiffProvider: DiffProvider {
     Libgit2Diff.Caps(byteCap: Self.byteCap, lineCap: Self.lineCap, longLineCap: Self.longLineCap)
   }
 
-  func changedFiles(at worktreeURL: URL) async throws -> WorktreeDiff {
+  func changedFiles(source: DiffSource = .workingTree, at worktreeURL: URL) async throws -> WorktreeDiff {
     try await ensureIndexUnlocked(worktreeURL)
-    return try Libgit2Diff.changedFiles(at: worktreeURL, caps: caps)
+    switch source {
+    case .workingTree:
+      return try Libgit2Diff.changedFiles(at: worktreeURL, caps: caps)
+    case .baseBranch(let ref):
+      return try Libgit2Diff.baseChangedFiles(at: worktreeURL, baseRef: ref, caps: caps)
+    }
   }
 
-  func diff(for file: FileChange, at worktreeURL: URL, contextLines: UInt32 = 3) async throws -> [DiffHunk] {
+  func diff(
+    for file: FileChange,
+    at worktreeURL: URL,
+    contextLines: UInt32 = 3,
+    source: DiffSource = .workingTree
+  ) async throws -> [DiffHunk] {
     try await ensureIndexUnlocked(worktreeURL)
-    return try Libgit2Diff.hunks(for: file, at: worktreeURL, caps: caps, contextLines: contextLines)
+    switch source {
+    case .workingTree:
+      return try Libgit2Diff.hunks(for: file, at: worktreeURL, caps: caps, contextLines: contextLines)
+    case .baseBranch(let ref):
+      return try Libgit2Diff.baseHunks(for: file, at: worktreeURL, baseRef: ref, caps: caps, contextLines: contextLines)
+    }
   }
 
   /// Replicates `GitClient.lineChanges`'s `.git/index.lock` guard verbatim —

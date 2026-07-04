@@ -42,6 +42,15 @@ private enum GitFixture {
 
   static func stage(_ paths: String..., in root: URL) throws { try run(["add"] + paths, in: root) }
   static func commit(_ msg: String, in root: URL) throws { try run(["commit", "-q", "-m", msg], in: root) }
+  static func checkout(_ branch: String, create: Bool = false, in root: URL) throws {
+    try run(create ? ["checkout", "-q", "-b", branch] : ["checkout", "-q", branch], in: root)
+  }
+  static func updateRef(_ ref: String, to revision: String, in root: URL) throws {
+    try run(["update-ref", ref, revision], in: root)
+  }
+  static func head(in root: URL) throws -> String {
+    try run(["rev-parse", "HEAD"], in: root).trimmingCharacters(in: .whitespacesAndNewlines)
+  }
   static func rename(_ from: String, _ destination: String, in root: URL) throws {
     try run(["mv", from, destination], in: root)
   }
@@ -294,5 +303,148 @@ struct DiffClientTests {
     #expect(change.isBinary)
     let hunks = try await provider.diff(for: change, at: root)
     #expect(hunks.isEmpty)
+  }
+
+  // MARK: - Base-branch (three-dot) source
+
+  /// A committed branch change appears in the base diff; an uncommitted edit
+  /// appears only in the working-tree diff. The two sources are independent.
+  @Test func baseDiffSeparatesCommittedFromUncommitted() async throws {
+    let root = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(root) }
+    try GitFixture.write("base\n", to: "base.txt", in: root)
+    try GitFixture.stage("base.txt", in: root)
+    try GitFixture.commit("init", in: root)
+
+    try GitFixture.checkout("feature", create: true, in: root)
+    try GitFixture.write("feat\n", to: "committed.txt", in: root)
+    try GitFixture.stage("committed.txt", in: root)
+    try GitFixture.commit("add committed", in: root)
+    // An uncommitted change on top — only the working-tree diff should see it.
+    try GitFixture.write("dirty\n", to: "dirty.txt", in: root)
+
+    let provider = LibGit2DiffProvider()
+    let base = try await provider.changedFiles(source: .baseBranch(ref: "main"), at: root)
+    #expect(fileChange(base, id: "committed.txt")?.status == .added)
+    #expect(fileChange(base, id: "dirty.txt") == nil)
+
+    let working = try await provider.changedFiles(source: .workingTree, at: root)
+    #expect(fileChange(working, id: "dirty.txt")?.status == .untracked)
+  }
+
+  /// Load-bearing three-dot assertion: a commit that lands on `main` after the
+  /// branch diverged is NOT part of the base diff (merge-base, not `main` tip).
+  @Test func baseDiffUsesMergeBaseNotBaseTip() async throws {
+    let root = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(root) }
+    try GitFixture.write("base\n", to: "base.txt", in: root)
+    try GitFixture.stage("base.txt", in: root)
+    try GitFixture.commit("init", in: root)
+
+    try GitFixture.checkout("feature", create: true, in: root)
+    try GitFixture.write("feat\n", to: "feature.txt", in: root)
+    try GitFixture.stage("feature.txt", in: root)
+    try GitFixture.commit("add feature", in: root)
+
+    // A commit that exists only on `main`, after the branch point.
+    try GitFixture.checkout("main", in: root)
+    try GitFixture.write("main-only\n", to: "main-only.txt", in: root)
+    try GitFixture.stage("main-only.txt", in: root)
+    try GitFixture.commit("main advances", in: root)
+    try GitFixture.checkout("feature", in: root)
+
+    let base = try await LibGit2DiffProvider().changedFiles(source: .baseBranch(ref: "main"), at: root)
+    #expect(fileChange(base, id: "feature.txt")?.status == .added)
+    // Three-dot: `main`'s new-only file must NOT appear in the branch's changes.
+    #expect(fileChange(base, id: "main-only.txt") == nil)
+  }
+
+  /// Branch with no commits ahead of base → merge-base == HEAD → zero deltas.
+  @Test func baseDiffIsEmptyWhenBranchHasNoCommitsAhead() async throws {
+    let root = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(root) }
+    try GitFixture.write("base\n", to: "base.txt", in: root)
+    try GitFixture.stage("base.txt", in: root)
+    try GitFixture.commit("init", in: root)
+    try GitFixture.checkout("feature", create: true, in: root)
+
+    let base = try await LibGit2DiffProvider().changedFiles(source: .baseBranch(ref: "main"), at: root)
+    #expect(base.files.isEmpty)
+  }
+
+  /// An unresolvable base ref throws `.baseRefUnresolved` (not a crash / libgit2
+  /// error) so the reducer can hide the section.
+  @Test func baseDiffThrowsWhenRefUnresolvable() async throws {
+    let root = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(root) }
+    try GitFixture.write("base\n", to: "base.txt", in: root)
+    try GitFixture.stage("base.txt", in: root)
+    try GitFixture.commit("init", in: root)
+
+    await #expect(throws: DiffError.baseRefUnresolved) {
+      _ = try await LibGit2DiffProvider().changedFiles(source: .baseBranch(ref: "nope/nope"), at: root)
+    }
+  }
+
+  /// A bare branch name prefers its remote-tracking ref: `origin/main` (older
+  /// tip) is chosen over the local `main`, so the base diff spans back to the
+  /// remote tip and includes the local-only commit.
+  @Test func baseDiffPrefersOriginCandidate() async throws {
+    let root = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(root) }
+    try GitFixture.write("base\n", to: "base.txt", in: root)
+    try GitFixture.stage("base.txt", in: root)
+    try GitFixture.commit("c0", in: root)
+    // Pin origin/main at the first commit (the "remote" tip).
+    let remoteTip = try GitFixture.head(in: root)
+    try GitFixture.updateRef("refs/remotes/origin/main", to: remoteTip, in: root)
+
+    // Advance local main with a commit the remote tip does not have.
+    try GitFixture.write("local\n", to: "only-local.txt", in: root)
+    try GitFixture.stage("only-local.txt", in: root)
+    try GitFixture.commit("c1 local only", in: root)
+
+    try GitFixture.checkout("feature", create: true, in: root)
+    try GitFixture.write("feat\n", to: "feature.txt", in: root)
+    try GitFixture.stage("feature.txt", in: root)
+    try GitFixture.commit("c2 feature", in: root)
+
+    let base = try await LibGit2DiffProvider().changedFiles(source: .baseBranch(ref: "main"), at: root)
+    #expect(fileChange(base, id: "feature.txt")?.status == .added)
+    // Present only because the base resolved to origin/main (older tip), not the
+    // local main which already contains only-local.txt.
+    #expect(fileChange(base, id: "only-local.txt")?.status == .added)
+  }
+
+  /// Unborn HEAD → nothing committed → empty base diff, no crash.
+  @Test func baseDiffOnUnbornHeadIsEmpty() async throws {
+    let root = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(root) }
+
+    let base = try await LibGit2DiffProvider().changedFiles(source: .baseBranch(ref: "main"), at: root)
+    #expect(base.isUnbornHead)
+    #expect(base.files.isEmpty)
+  }
+
+  /// A committed rename between merge-base and HEAD is detected as `.renamed`
+  /// (proves `find_similar` runs on the base path too).
+  @Test func baseDiffDetectsCommittedRename() async throws {
+    let root = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(root) }
+    let content = (1...20).map { "line \($0)\n" }.joined()
+    try GitFixture.write(content, to: "a.txt", in: root)
+    try GitFixture.stage("a.txt", in: root)
+    try GitFixture.commit("init", in: root)
+
+    try GitFixture.checkout("feature", create: true, in: root)
+    // `git mv` stages the rename itself, so no separate `git add` is needed.
+    try GitFixture.rename("a.txt", "b.txt", in: root)
+    try GitFixture.commit("rename", in: root)
+
+    let base = try await LibGit2DiffProvider().changedFiles(source: .baseBranch(ref: "main"), at: root)
+    let change = try #require(fileChange(base, id: "b.txt"))
+    #expect(change.status == .renamed)
+    #expect(change.oldPath == "a.txt")
+    #expect(change.newPath == "b.txt")
   }
 }

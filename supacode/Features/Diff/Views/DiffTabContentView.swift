@@ -155,6 +155,7 @@ struct DiffTabContentView: View {
     switch error {
     case .notARepository: "This directory is not a git repository."
     case .indexLocked: "Git is busy. Retry in a moment."
+    case .baseRefUnresolved: "The base branch could not be resolved."
     case .libgit2: "An error occurred while reading the diff."
     }
   }

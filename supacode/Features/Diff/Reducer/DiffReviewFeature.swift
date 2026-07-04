@@ -450,7 +450,7 @@ struct DiffReviewFeature {
       do {
         // Phase 1 returns `WorktreeDiff`; the row list consumes `.files` and the
         // mid-operation banner consumes `.operation`.
-        let diff = try await diffClient.changedFiles(worktree.workingDirectory)
+        let diff = try await diffClient.changedFiles(.workingTree, worktree.workingDirectory)
         await send(.loaded(diff.files, operation: diff.operation, generation: generation))
       } catch let error as DiffError {
         await send(.failed(error, generation: generation))
@@ -529,7 +529,12 @@ struct DiffReviewFeature {
   private static func diffEffect(_ request: DiffRequest, diffClient: DiffClient) -> Effect<Action> {
     .run { send in
       do {
-        let hunks = try await diffClient.diff(request.file, request.worktree.workingDirectory, request.contextLines)
+        let hunks = try await diffClient.diff(
+          request.file,
+          request.worktree.workingDirectory,
+          request.contextLines,
+          .workingTree
+        )
         await send(.diffLoaded(path: request.path, hunks: hunks, token: request.token))
       } catch let error as DiffError {
         await send(.diffFailed(path: request.path, error, token: request.token))

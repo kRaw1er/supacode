@@ -12,11 +12,16 @@ import Foundation
 /// cancelled. Baking a token into this C-facing API would only duplicate that.
 struct DiffClient: Sendable {
   /// Cheap changed-file list (status + counts + caps) for one worktree.
-  var changedFiles: @Sendable (_ worktreeURL: URL) async throws -> WorktreeDiff
+  /// `source` selects the uncommitted working-tree diff or the base-branch
+  /// (three-dot) diff.
+  var changedFiles: @Sendable (_ source: DiffSource, _ worktreeURL: URL) async throws -> WorktreeDiff
   /// Full hunks/lines for one file, on demand. Empty when binary / capped.
   /// `contextLines` sets libgit2's `context_lines` (default 3); the viewer
-  /// raises it to materialize an expanded inter-hunk gap.
-  var diff: @Sendable (_ file: FileChange, _ worktreeURL: URL, _ contextLines: UInt32) async throws -> [DiffHunk]
+  /// raises it to materialize an expanded inter-hunk gap. `source` selects the
+  /// working-tree or base-branch diff.
+  var diff:
+    @Sendable (_ file: FileChange, _ worktreeURL: URL, _ contextLines: UInt32, _ source: DiffSource) async throws ->
+      [DiffHunk]
 }
 
 extension DiffClient: DependencyKey {
@@ -25,8 +30,8 @@ extension DiffClient: DependencyKey {
     // libgit2 (`GIT_THREADS=1`) stays single-threaded per repo.
     let provider = LibGit2DiffProvider()
     return DiffClient(
-      changedFiles: { try await provider.changedFiles(at: $0) },
-      diff: { try await provider.diff(for: $0, at: $1, contextLines: $2) }
+      changedFiles: { try await provider.changedFiles(source: $0, at: $1) },
+      diff: { try await provider.diff(for: $0, at: $1, contextLines: $2, source: $3) }
     )
   }()
 
@@ -35,8 +40,8 @@ extension DiffClient: DependencyKey {
   /// fixture-backed stubs; `DiffClientTests` exercises the actor directly.
   static var testValue: DiffClient {
     DiffClient(
-      changedFiles: { _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) },
-      diff: { _, _, _ in [] }
+      changedFiles: { _, _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) },
+      diff: { _, _, _, _ in [] }
     )
   }
 }

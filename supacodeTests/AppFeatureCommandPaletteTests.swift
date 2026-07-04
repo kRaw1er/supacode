@@ -387,7 +387,7 @@ struct AppFeatureCommandPaletteTests {
         sidebarStatCalled.setValue(true)
         return (added: 4, removed: 2)
       }
-      $0.diffClient.changedFiles = { _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) }
+      $0.diffClient.changedFiles = { _, _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) }
     }
     store.exhaustivity = .off
 
