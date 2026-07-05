@@ -24,7 +24,9 @@ src_root="${build_root}/src"
 obj_root="${build_root}/obj"
 headers_dir="${build_root}/Headers"
 xcframework_path="${build_root}/TreeSitterGrammars.xcframework"
+fat_lib="${build_root}/libTreeSitterGrammars.a"
 fingerprint_path="${build_root}/fingerprint"
+provenance_path="${build_root}/provenance"
 queries_dir="${srcroot}/supacode/Resources/TreeSitterQueries"
 
 deployment_target="26.0"
@@ -43,6 +45,57 @@ if [ "${1:-}" = "--print-fingerprint" ]; then
   exit 0
 fi
 
+# --- Read the lock into parallel arrays (bash 3.2: no associative arrays). -------
+# Parsed up front (before the short-circuit) so the provenance stamp and the
+# artifact validation can key off the locked symbol/query set.
+keys=(); repos=(); shas=(); subdirs=(); symbols=()
+while IFS=$'\t' read -r key repo sha subdir symbol || [ -n "${key}" ]; do
+  case "${key}" in ""|\#*) continue ;; esac
+  keys+=("${key}"); repos+=("${repo}"); shas+=("${sha}"); subdirs+=("${subdir}"); symbols+=("${symbol}")
+done < "${lock_path}"
+count="${#keys[@]}"
+
+# Provenance stamp: the full contract the built artifact must satisfy — the grammar
+# count, a hash of the lock's DATA rows only (comments/blank excluded, so the value
+# is stable when committed back into this lock's header comment), and the sorted
+# exported symbols. Written next to the artifact after a successful build and
+# re-checked by the short-circuit, so a partial/stale `.build/treesitter` (some
+# grammars missing) can never be treated as up to date.
+compute_provenance() {
+  local data_sha sorted_symbols
+  data_sha="$(grep -vE '^[[:space:]]*(#|$)' "${lock_path}" | LC_ALL=C sort | shasum -a 256 | awk '{print $1}')"
+  sorted_symbols="$(printf '%s\n' "${symbols[@]}" | LC_ALL=C sort | paste -sd, -)"
+  printf 'grammars=%s data=%s symbols=%s\n' "${count}" "${data_sha}" "${sorted_symbols}"
+}
+
+# CI/tooling hook: print the expected provenance so a stale gitignored artifact can
+# be diffed against the value committed in the lock header comment.
+if [ "${1:-}" = "--print-provenance" ]; then
+  compute_provenance
+  exit 0
+fi
+
+# Fail loudly (non-zero, offending grammar named) if the built fat lib is missing
+# any locked symbol or any locked grammar's bundled highlights.scm. Shared by the
+# post-build step and the short-circuit, so neither the build nor the up-to-date
+# fast path can mask a partial artifact that would degrade a diff to plain text.
+validate_artifact() {
+  local i sym key exported
+  [ -f "${fat_lib}" ] || { echo "error: missing ${fat_lib}" >&2; return 1; }
+  exported="$(nm -gU "${fat_lib}" 2>/dev/null || true)"
+  for ((i = 0; i < count; i++)); do
+    sym="${symbols[$i]}"; key="${keys[$i]}"
+    if ! printf '%s\n' "${exported}" | grep -q "_tree_sitter_${sym}$"; then
+      echo "error: ${key}: fat lib does not export _tree_sitter_${sym} (stale/partial grammars build)" >&2
+      return 1
+    fi
+    if [ ! -f "${queries_dir}/${key}/highlights.scm" ]; then
+      echo "error: ${key}: missing ${queries_dir}/${key}/highlights.scm (query not copied)" >&2
+      return 1
+    fi
+  done
+}
+
 # Pin a stable Xcode for `clang`/`libtool`/`xcodebuild` (matches the ghostty build's
 # selector so both binaries agree on the toolchain / SDK).
 if [ -x "${script_dir}/select-developer-dir.sh" ]; then
@@ -51,19 +104,16 @@ if [ -x "${script_dir}/select-developer-dir.sh" ]; then
 fi
 
 fingerprint="$(print_fingerprint)"
+provenance="$(compute_provenance)"
 if [ -f "${fingerprint_path}" ] &&
   [ -d "${xcframework_path}" ] &&
   [ -d "${queries_dir}" ] &&
-  [ "$(cat "${fingerprint_path}")" = "${fingerprint}" ]; then
+  [ -f "${provenance_path}" ] &&
+  [ "$(cat "${fingerprint_path}")" = "${fingerprint}" ] &&
+  [ "$(cat "${provenance_path}")" = "${provenance}" ] &&
+  validate_artifact; then
   exit 0
 fi
-
-# --- Read the lock into parallel arrays (bash 3.2: no associative arrays). -------
-keys=(); repos=(); shas=(); subdirs=(); symbols=()
-while IFS=$'\t' read -r key repo sha subdir symbol || [ -n "${key}" ]; do
-  case "${key}" in ""|\#*) continue ;; esac
-  keys+=("${key}"); repos+=("${repo}"); shas+=("${sha}"); subdirs+=("${subdir}"); symbols+=("${symbol}")
-done < "${lock_path}"
 
 fetch_grammar() { # key repo sha
   local key="$1" repo="$2" sha="$3" dest="${src_root}/$1"
@@ -133,7 +183,6 @@ rm -rf "${obj_root}" "${headers_dir}" "${xcframework_path}"
 mkdir -p "${obj_root}" "${headers_dir}" "${queries_dir}"
 
 # --- Fetch + compile every grammar for every arch. -------------------------------
-count="${#keys[@]}"
 for ((i = 0; i < count; i++)); do
   fetch_grammar "${keys[$i]}" "${repos[$i]}" "${shas[$i]}"
   for arch in "${archs[@]}"; do
@@ -148,8 +197,13 @@ for arch in "${archs[@]}"; do
   libtool -static -o "${build_root}/libTreeSitterGrammars-${arch}.a" "${obj_root}/${arch}"/*.o
   lib_args+=("${build_root}/libTreeSitterGrammars-${arch}.a")
 done
-fat_lib="${build_root}/libTreeSitterGrammars.a"
 lipo -create "${lib_args[@]}" -output "${fat_lib}"
+
+# Build-time validation (fail loudly, never mask a partial artifact): every locked
+# symbol must be exported by the fat lib and every locked grammar must have copied
+# its highlights.scm — the two ways a stale/partial build silently degrades a diff
+# to plain text (root cause of "highlighting doesn't work").
+validate_artifact
 
 # --- Module header (forward-declared opaque TSLanguage) + modulemap. -------------
 # Nested under a module-named subdir so the packaged headers copy to
@@ -189,3 +243,4 @@ xcodebuild -create-xcframework \
   -output "${xcframework_path}"
 
 printf '%s\n' "${fingerprint}" > "${fingerprint_path}"
+compute_provenance > "${provenance_path}"

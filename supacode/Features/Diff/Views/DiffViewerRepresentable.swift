@@ -1,4 +1,5 @@
 import AppKit
+import SupacodeSettingsShared
 import SwiftUI
 
 /// SwiftUI bridge to the AppKit `DiffTableController`. Mirrors the
@@ -83,6 +84,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
 
   @MainActor
   final class Coordinator {
+    private static let logger = SupaLogger("DiffViewer")
     let controller = DiffTableController()
     var onExpandGap: (Int) -> Void = { _ in }
     var onVisibleRangeChanged: (Range<Int>) -> Void = { _ in }
@@ -124,11 +126,15 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     /// there is no bundled grammar / no working directory / nothing visible.
     func scheduleHighlight() {
       highlightTask?.cancel()
-      guard
-        let workingDirectory,
-        let grammar = GrammarRegistry.grammar(forPath: filePath),
-        let visibleLines = controller.visibleNewLineRange()
-      else {
+      // No working directory or nothing visible yet is a legitimate plain render —
+      // stay silent. Likewise a path with no bundled grammar (a plain-text
+      // extension) is expected plain text, not a defect: clear and return quietly.
+      // Only a *resolved* grammar that then yields zero highlights is surfaced.
+      guard let workingDirectory, let visibleLines = controller.visibleNewLineRange() else {
+        controller.clearSyntax()
+        return
+      }
+      guard let grammar = GrammarRegistry.grammar(forPath: filePath) else {
         controller.clearSyntax()
         return
       }
@@ -166,6 +172,16 @@ struct DiffViewerRepresentable: NSViewRepresentable {
           )
         )
         if Task.isCancelled { return }
+        // A grammar was resolved for this path yet the engine returned nothing for
+        // the visible window: surface it (missing query, out-of-range grammar ABI,
+        // or the wrong-blob defect Phase 4 fixes) instead of silently rendering plain.
+        if lineHighlights.isEmpty {
+          Self.logger.error(
+            "resolved grammar '\(queryName)' produced no highlights for '\(fileKey)' over lines "
+              + "\(visibleLines.lowerBound)..<\(visibleLines.upperBound) — plain-text fallback "
+              + "(missing query, grammar ABI out of range, or stale TreeSitterGrammars build?)"
+          )
+        }
         var byLine: [Int: [SyntaxHighlighter.HighlightSpan]] = [:]
         for lineHighlight in lineHighlights {
           byLine[lineHighlight.line] = lineHighlight.spans

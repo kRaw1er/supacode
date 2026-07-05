@@ -6,6 +6,9 @@
 #   subdir — path from the checkout root to the grammar dir that contains `src/` (`.` == root).
 #   symbol — the exported `tree_sitter_<symbol>()` function name.
 # This file is a fingerprint input to the .foreignBuild target (Project.swift); editing it rebuilds.
+# Provenance stamp (build-treesitter-grammars.sh --print-provenance) — the contract every build's
+# artifact must satisfy; committed so CI can diff it against a (gitignored) stale/partial build:
+# provenance: grammars=24 data=56ff437c4e7998f58416482b0465ebe97ca4cb7cb3f208e6be1c4ec6f4c59bab symbols=bash,c,c_sharp,cpp,css,dockerfile,go,html,java,javascript,json,kotlin,make,markdown,php,python,ruby,rust,swift,toml,tsx,typescript,yaml,zig
 swift	https://github.com/alex-pinkus/tree-sitter-swift	31d17fe7e818a2048c808b5c6fdc2dc792f4f5b5	.	swift
 javascript	https://github.com/tree-sitter/tree-sitter-javascript	3a837b6f3658ca3618f2022f8707e29739c91364	.	javascript
 typescript	https://github.com/tree-sitter/tree-sitter-typescript	f975a621f4e7f532fe322e13c4f79495e0a7b2e7	typescript	typescript

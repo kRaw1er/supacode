@@ -69,6 +69,9 @@ let appDependencies: [TargetDependency] = [
   .external(name: "Sharing"),
   .external(name: "Sparkle"),
   .external(name: "SwiftTreeSitter"),
+  // neon adoption (Phase 0). The `Neon` product transitively links its `TreeSitterClient`
+  // / `RangeState` / `Rearrange` targets and the `SwiftTreeSitterLayer` product.
+  .external(name: "Neon"),
 ]
 
 let testDependencies: [TargetDependency] = [
@@ -88,6 +91,13 @@ let testDependencies: [TargetDependency] = [
   .external(name: "OrderedCollections"),
   .external(name: "Sharing"),
   .external(name: "SwiftTreeSitter"),
+  // neon smoke test (NeonSmokeTests) imports `Neon`, `SwiftTreeSitterLayer`, and the
+  // `TreeSitterClient` module. Only SPM *products* are valid `.external(name:)`
+  // entries in Tuist — `TreeSitterClient` is a package *target* (not a product), so
+  // it can't be named here; the test reaches it as a transitive module through the
+  // `Neon` product (which links it), importable in the Xcode build graph.
+  .external(name: "Neon"),
+  .external(name: "SwiftTreeSitterLayer"),
 ]
 
 let embedGhosttyResourcesInputPaths: [FileListGlob] = [

@@ -200,15 +200,45 @@ actor SyntaxHighlighter {
     return parsed
   }
 
-  private func query(for queryName: String, language: @Sendable () -> OpaquePointer) -> Query? {
-    if let cached = queryCache[queryName] { return cached }
+  /// Result of locating a *resolved* grammar's bundled `highlights.scm`. A missing
+  /// file here means `GrammarRegistry` already matched the file to `queryName` yet
+  /// the query resource is absent — a stale/partial `TreeSitterGrammars` build, NOT
+  /// a legitimate plain-text file — so the caller logs loudly instead of failing
+  /// silently to plain text (the root cause of "highlighting doesn't work").
+  enum QueryResource: Equatable {
+    case available(URL)
+    case missing(queryName: String)
+  }
+
+  /// Locates the bundled `highlights.scm` for a resolved grammar. Pure and
+  /// `bundle`-injectable so the loud-vs-silent decision is unit-testable without a
+  /// running actor. Mirrors the lookup the query loader uses at runtime.
+  static func queryResource(for queryName: String, in bundle: Bundle = .main) -> QueryResource {
     guard
-      let url = Bundle.main.url(
+      let url = bundle.url(
         forResource: "highlights",
         withExtension: "scm",
         subdirectory: "TreeSitterQueries/\(queryName)"
       )
-    else { return nil }
+    else { return .missing(queryName: queryName) }
+    return .available(url)
+  }
+
+  private func query(for queryName: String, language: @Sendable () -> OpaquePointer) -> Query? {
+    if let cached = queryCache[queryName] { return cached }
+    let url: URL
+    switch Self.queryResource(for: queryName) {
+    case .available(let resolvedURL):
+      url = resolvedURL
+    case .missing:
+      // A grammar the registry resolved but whose query never made it into the
+      // bundle: surface it loudly rather than degrading to plain text in silence.
+      Self.logger.error(
+        "missing bundled highlights.scm for resolved grammar '\(queryName)' — plain-text fallback "
+          + "(stale/partial TreeSitterGrammars build?)"
+      )
+      return nil
+    }
     do {
       let data = try Data(contentsOf: url)
       let query = try Query(language: Language(language()), data: data)

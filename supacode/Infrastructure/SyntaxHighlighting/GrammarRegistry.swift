@@ -88,6 +88,18 @@ enum GrammarRegistry {
 
   // MARK: - API
 
+  /// Every distinct bundled grammar, deduplicated by `queryName` (aliases like
+  /// `js`/`mjs`/`jsx` collapse to one `javascript` entry). One entry per
+  /// `treesitter-grammars.lock` line — the canonical set a build/ABI audit must
+  /// touch exactly once. Sorted by `queryName` for deterministic iteration.
+  static var allGrammars: [Grammar] {
+    var byQueryName: [String: Grammar] = [:]
+    for grammar in Array(byExtension.values) + Array(byFilename.values) {
+      byQueryName[grammar.queryName] = grammar
+    }
+    return byQueryName.values.sorted { $0.queryName < $1.queryName }
+  }
+
   /// Resolves a path to a grammar: exact filename special first, then extension.
   /// `nil` ⇒ no bundled grammar (caller renders plain text).
   static func grammar(forPath path: String) -> Grammar? {
