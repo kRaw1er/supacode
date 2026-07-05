@@ -1,0 +1,13 @@
+0 fileHeader old=- new=- class=widget y=0.0 h=44.0
+1 expander old=- new=- class=widget y=44.0 h=28.0
+2 hunkHeader old=- new=- class=widget y=72.0 h=32.0
+3 line old=10 new=10 class=context y=104.0 h=20.0
+4 line old=11 new=- class=change y=124.0 h=20.0
+5 line old=- new=11 class=change y=144.0 h=20.0
+6 line old=- new=12 class=change y=164.0 h=20.0
+7 line old=12 new=13 class=context y=184.0 h=20.0
+8 expander old=- new=- class=widget y=204.0 h=28.0
+9 hunkHeader old=- new=- class=widget y=232.0 h=32.0
+10 line old=60 new=62 class=context y=264.0 h=20.0
+11 line old=61 new=- class=change y=284.0 h=20.0
+12 marker old=61 new=- class=change y=304.0 h=20.0

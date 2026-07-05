@@ -57,8 +57,9 @@ enum RowID: Hashable, Sendable {
 }
 
 /// A whole-file placeholder shown in place of a line list when there is no
-/// textual diff to render.
-enum FilePlaceholder: Hashable, Sendable {
+/// textual diff to render. `nonisolated` so it can be embedded in the pure
+/// (off-main) chunk-tree value types alongside `DiffLineOrigin` / `FileStatus`.
+nonisolated enum FilePlaceholder: Hashable, Sendable {
   case binaryFile
   case deletedFile
   case addedEmpty
