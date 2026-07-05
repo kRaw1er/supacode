@@ -60,6 +60,10 @@ let appDependencies: [TargetDependency] = [
   .external(name: "ComposableArchitecture"),
   .external(name: "CustomDump"),
   .external(name: "Dependencies"),
+  // `Deque` backs the Phase-2 diff viewport `ViewReuseQueue` (CodeEditTextView
+  // `Utils/ViewReuseQueue.swift` port). Same swift-collections package as the
+  // already-linked `OrderedCollections` product, just its `DequeModule` product.
+  .external(name: "DequeModule"),
   .external(name: "IdentifiedCollections"),
   .external(name: "Kingfisher"),
   .external(name: "libgit2"),
