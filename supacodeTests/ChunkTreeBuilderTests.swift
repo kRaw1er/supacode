@@ -202,6 +202,26 @@ struct ChunkTreeBuilderTests {
     #expect(single(DiffFixture.file(status: .modified)) == .noChanges)
   }
 
+  /// Phase 13 (C 15.10) — a rename-pure file (similarity 100, zero content hunks)
+  /// emits exactly ONE file-header widget and ZERO `.line` (line-segment) chunks:
+  /// the header shows `old → new`, there is nothing to diff in the body.
+  @Test func renamePureZeroBodyChunks() {
+    let renamed = FileChange(
+      oldPath: "old/name.swift", newPath: "new/name.swift", status: .renamed,
+      addedLines: 0, removedLines: 0, isBinary: false, isLargeFileCapped: false,
+      hasLongLines: false, similarity: 100)
+    // Default options ⇒ the file-header widget IS emitted (not disabled).
+    let chunks = ChunkTreeBuilder.classify(file: renamed, hunks: [], expanded: [])
+    let fileHeaders = chunks.filter { chunk in
+      if case .widget(let widget) = chunk, case .fileHeader = widget.key { return true }
+      return false
+    }
+    #expect(fileHeaders.count == 1)  // exactly one header widget
+    #expect(segments(chunks).isEmpty)  // ZERO body (line-segment) chunks
+    // The header model renders the rename arrow (`old → new`).
+    #expect(FileHeaderWidget.Model.make(from: renamed).path == "old/name.swift → new/name.swift")
+  }
+
   @Test func largeFileCapEmitsPlainFallbackLeaves() {
     let hunk = DiffFixture.hunk([
       DiffFixture.line(.context, old: 1, new: 1, "a"),

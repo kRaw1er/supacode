@@ -60,6 +60,46 @@ struct CTLineCacheTests {
     #expect(builds == 4)  // miss after clear
   }
 
+  /// Phase 13 (C 15.3) — `noteScrolledOff` demotes recycled keys to the LRU head so
+  /// they drop FIRST when the count cap next trips (evict on scroll-off), WITHOUT
+  /// eager eviction; the byte ceiling still holds under a scroll simulation; and
+  /// `invalidateStyle` empties.
+  @Test func noteScrolledOffDemotesRecycledKeysForEviction() {
+    let cache = CTLineCache(countLimit: 3, widthQuantum: 4)
+    let build: () -> LineTypesetter.Wrapped = { self.stub() }
+    let keys = (0..<3).map { cache.key(contentHash: $0, styleGeneration: 0, width: 100) }
+    for key in keys { _ = cache.wrapped(key, build: build) }
+    #expect(cache.count == 3)
+
+    // Rows 1 & 2 scrolled off (recycled) — demote them; still within cap, no eviction.
+    cache.noteScrolledOff([keys[1], keys[2]])
+    #expect(cache.count == 3)
+
+    // A fresh line over cap evicts the demoted head first (key[1]), not key[0].
+    let fresh = cache.key(contentHash: 99, styleGeneration: 0, width: 100)
+    _ = cache.wrapped(fresh, build: build)
+    #expect(cache.count == 3)
+    #expect(!cache.contains(keys[1]))  // demoted → evicted first
+    #expect(cache.contains(keys[0]))
+    #expect(cache.contains(fresh))
+
+    cache.invalidateStyle()
+    #expect(cache.count == 0)
+  }
+
+  /// The byte ceiling holds under a scroll simulation: inserting many wrapped lines
+  /// past the byte cap keeps `approxBytes` bounded and drops stale keys.
+  @Test func byteCeilingHoldsUnderScroll() {
+    // One stub ≈ 512 bytes; cap ~2KB ⇒ ~4 entries max regardless of count limit.
+    let cache = CTLineCache(countLimit: 10_000, byteLimit: 2_048, widthQuantum: 4)
+    for content in 0..<200 {
+      let key = cache.key(contentHash: content, styleGeneration: 0, width: 100)
+      _ = cache.wrapped(key, build: { self.stub() })
+      #expect(cache.approxBytes <= 2_048)
+    }
+    #expect(cache.count <= 4)
+  }
+
   @Test func widthBucketQuantizesAcrossQuantumBoundary() {
     let cache = CTLineCache(widthQuantum: 4)
     // 100 and 103 round to bucket 25/26 respectively (100/4=25.0→25; 103/4=25.75→26).

@@ -59,6 +59,10 @@ struct DiffDocument: Equatable, Sendable {
   /// `+`/`-` tint). The render path reads this so `WordDiff` is never invoked for a
   /// massively-changed file — the "gate lives upstream" contract.
   var wordDiffDisabled: Bool = false
+  /// The fully-changed-huge-file header affordance (`LargeFileRenderPolicy`), or
+  /// `nil` when the file renders fully. Surfaced in the diff-tab header so a dropped
+  /// render feature (highlight / word-diff) is never a silent drop.
+  var renderBannerKey: LargeFileRenderPolicy.BannerKey?
   /// `line → runs` for the OLD side of the visible window (both sides highlighted —
   /// fixes bug #2, the old path forced the old side `[]`).
   var oldStyleRuns: [Int: [StyleRun]] = [:]
@@ -659,13 +663,30 @@ struct DiffReviewFeature {
         let (oldBlob, newBlob) = DiffHighlightDriver.blobInputs(for: batch)
         document.oldBlob = oldBlob
         document.newBlob = newBlob
-        document.highlightingDisabled = diffHighlight.isPlain(
-          batch.file.removedLines, batch.file.addedLines, oldBlob?.utf16.count ?? 0, newBlob?.utf16.count ?? 0)
-        // Word-diff gate (upstream, Phase 5): a file whose changed lines exceed the
-        // per-side cap gets no intra-line word-diff — the render path never invokes
-        // `WordDiff` for it. Evaluated on the same per-side counts as the size gate.
-        document.wordDiffDisabled = WordDiffPolicy.isDisabled(
-          oldChangedLines: batch.file.removedLines, newChangedLines: batch.file.addedLines)
+        // Fully-changed-huge-file gate (Phase 13 `LargeFileRenderPolicy`) — the
+        // unified decision over the same per-side counts + the longest rendered line
+        // (protects the CTLine byte ceiling from a 2MB minified line). Produces the
+        // header affordance so a dropped feature is never silent.
+        let changedLines = max(batch.file.removedLines, batch.file.addedLines)
+        let longestLine = batch.hunks.reduce(0) { partial, hunk in
+          hunk.lines.reduce(partial) { max($0, $1.content.utf16.count) }
+        }
+        let renderDecision = LargeFileRenderPolicy.decide(
+          file: batch.file, changedLines: changedLines, maxLineLength: longestLine)
+        // Highlight off when the policy says plain OR the absolute blob-size gate
+        // trips (the ≈2.5M-UTF16-unit ceiling `LargeFileRenderPolicy` leaves to the
+        // size gate, which reads the decoded blob lengths).
+        document.highlightingDisabled =
+          !renderDecision.highlight
+          || diffHighlight.isPlain(
+            batch.file.removedLines, batch.file.addedLines, oldBlob?.utf16.count ?? 0, newBlob?.utf16.count ?? 0)
+        // Word-diff gate: the render path never invokes `WordDiff` for a
+        // massively-changed / long-lined file (only the row-level `+`/`-` tint).
+        document.wordDiffDisabled = !renderDecision.wordDiff
+        document.renderBannerKey = renderDecision.bannerKey
+        if let banner = renderDecision.bannerKey {
+          Self.logger.info("large-file render gate for \(key.path): \(String(describing: banner))")
+        }
         document.oldStyleRuns = [:]
         document.newStyleRuns = [:]
         // A re-diff re-materializes revealed slices; the declarative `expansion`

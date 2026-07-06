@@ -26,6 +26,10 @@ struct DiffTabContentView: View {
         staleBanner
         Divider()
       }
+      if let banner = document?.renderBannerKey {
+        renderBanner(banner)
+        Divider()
+      }
       body(document: document)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -97,6 +101,18 @@ struct DiffTabContentView: View {
 
   private var staleBanner: some View {
     Label("No longer changed", systemImage: "clock.arrow.circlepath")
+      .font(.caption)
+      .foregroundStyle(.secondary)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.horizontal, 12)
+      .padding(.vertical, 4)
+      .background(.quaternary.opacity(0.4))
+  }
+
+  /// The fully-changed-huge-file affordance — never a silent drop of highlighting /
+  /// word-diff (`LargeFileRenderPolicy`).
+  private func renderBanner(_ banner: LargeFileRenderPolicy.BannerKey) -> some View {
+    Label(banner.headerText, systemImage: "gauge.with.dots.needle.33percent")
       .font(.caption)
       .foregroundStyle(.secondary)
       .frame(maxWidth: .infinity, alignment: .leading)
