@@ -294,6 +294,11 @@ struct SupacodeApp: App {
       // test clock when the app shell happens to launch inside an XCTest
       // process. Tests that take a TestStore for AppFeature inject their
       // own clock and still override this.
+      //
+      // Note: `usageClient` needs no such override — under XCTest it already
+      // resolves to `UsageClient.testValue` (a benign `.stale()` that never
+      // reads the Keychain or hits the network), so the app-shell boot's
+      // `.appLaunched` → `.usage(.task)` loop is inert during tests.
       values.continuousClock = ContinuousClock()
     }
   }

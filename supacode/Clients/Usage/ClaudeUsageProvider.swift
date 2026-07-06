@@ -75,7 +75,7 @@ nonisolated struct ClaudeUsageProvider: Sendable {
     case .interactionNotAllowed:
       return .failure(.credentialsProblem(denied: false))
     case .failure(let status):
-      usageLogger.warning("Keychain read failed (OSStatus \(status)).")
+      usageLogger.warning("Keychain read via /usr/bin/security failed (exit \(status)).")
       return .failure(.credentialsProblem(denied: false))
     case .data(let data):
       guard let parsed = Self.parseCredentials(data) else {
