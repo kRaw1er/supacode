@@ -86,6 +86,36 @@ enum GrammarRegistry {
     "Rakefile": ruby,
   ]
 
+  /// Injected-language name → grammar. tree-sitter injection queries name the
+  /// embedded language via `@injection.language` / `(#set! injection.language …)`
+  /// (`QueryDefinitions.swift:87-108`); neon's `LanguageProvider` hands that name
+  /// here to resolve the sublayer's config (e.g. `<script>` in HTML → `javascript`,
+  /// `<style>` → `css`). Lowercased keys; only names whose target grammar is bundled
+  /// resolve — an unbundled injection target returns `nil` (embedded region plain).
+  private static let byInjectionName: [String: Grammar] = [
+    "javascript": javascript, "js": javascript, "jsx": javascript,
+    "typescript": typescript, "ts": typescript,
+    "tsx": tsx,
+    "css": css,
+    "html": html,
+    "python": python, "py": python,
+    "go": goLang,
+    "rust": rust, "rs": rust,
+    "c": cLang,
+    "cpp": cpp, "c++": cpp,
+    "csharp": csharp, "c_sharp": csharp, "cs": csharp,
+    "java": java,
+    "ruby": ruby, "rb": ruby,
+    "bash": bash, "sh": bash, "shell": bash, "zsh": bash,
+    "json": json,
+    "php": php,
+    "yaml": yaml, "yml": yaml,
+    "toml": toml,
+    "markdown": markdown, "md": markdown,
+    "zig": zig,
+    "kotlin": kotlin, "kt": kotlin,
+  ]
+
   // MARK: - API
 
   /// Every distinct bundled grammar, deduplicated by `queryName` (aliases like
@@ -108,6 +138,14 @@ enum GrammarRegistry {
     let ext = (name as NSString).pathExtension.lowercased()
     guard !ext.isEmpty else { return nil }
     return byExtension[ext]
+  }
+
+  /// Resolves an injected-language name (from an `injections.scm` query) to its
+  /// bundled grammar — the `LanguageProvider` lookup neon calls to highlight an
+  /// embedded region. `nil` ⇒ the target grammar isn't bundled (embedded region
+  /// renders plain; the engine logs it, never silently pretends to highlight).
+  static func grammar(forInjectionName name: String) -> Grammar? {
+    byInjectionName[name.lowercased()]
   }
 
   /// The plain-text fallback gate: no bundled grammar, over the byte cap, or a

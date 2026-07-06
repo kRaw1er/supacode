@@ -1,14 +1,15 @@
 import Foundation
+import SwiftTreeSitter
 
 @testable import supacode
 
 /// I1 — the shared diff-fixture DSL. Promotes the `DiffRowBuilderTests:11-52`
 /// helpers (`line` / `file` / `hunk`) into reusable, pure builders so every later
-/// phase constructs `FileChange` / `DiffHunk` / `DiffLine` the same way. Kept PURE
-/// (Foundation only) so it runs in every test tier.
+/// phase constructs `FileChange` / `DiffHunk` / `DiffLine` the same way.
 ///
 /// `store` / `batch` / `namedRange` land with their consuming phases (the UTF-16
-/// store is Phase 3, the streaming batch Phase 9) — this file owns the model DSL.
+/// store is Phase 3, the streaming batch Phase 9, the `NamedRange` bucketer builder
+/// is Phase 4) — this file owns the model DSL.
 enum DiffFixture {
   /// A single diff line with defaulted numbers/content (the `DiffRowBuilderTests`
   /// `line(_:old:new:_:noNewline:)` helper).
@@ -67,5 +68,14 @@ enum DiffFixture {
   /// here so I1 owns the primitive).
   static func blob(_ text: String) -> [UInt16] {
     Array(text.utf16)
+  }
+
+  /// A `NamedRange` for the Phase-4 highlight bucketer, from a capture name and a
+  /// **UTF-16** `NSRange`. `NamedRange(name:range:)` stores `range.byteRange`
+  /// (`×2`) and reads back `tsRange.bytes.range` (`÷2`), so `.range` round-trips to
+  /// the SAME UTF-16 range — which the bucketer consumes directly (C10: NO second
+  /// `/2`, unlike the shipping `SyntaxHighlighter.swift:109-110`).
+  static func namedRange(_ name: String, _ range: NSRange) -> NamedRange {
+    NamedRange(name: name, range: range)
   }
 }

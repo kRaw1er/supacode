@@ -23,14 +23,25 @@ enum HighlightTheme {
     "function": .systemTeal,
     "type": .systemTeal,
     "constructor": .systemTeal,
+    "variable": .labelColor,
     "variable.builtin": .systemPurple,
+    // Function params, distinct from locals (0.25 grammars emit this; without an
+    // explicit entry `variable.parameter` resolved to the default `labelColor`).
+    "variable.parameter": .systemTeal,
     "property": .labelColor,
     "attribute": .systemGreen,
     "tag": .systemGreen,
     "operator": .labelColor,
     "punctuation": .secondaryLabelColor,
+    "punctuation.bracket": .secondaryLabelColor,
+    "punctuation.delimiter": .secondaryLabelColor,
     "label": .systemOrange,
     "escape": .systemOrange,
+    // Markdown / injection markup, and the `@none` suppression capture (0.25).
+    "markup": .labelColor,
+    "none": .labelColor,
+    // Capture names carry NO leading "@" — `QueryDefinitions.swift:54-55` joins
+    // `nameComponents` with ".", so `@embedded` arrives as `"embedded"`.
     "embedded": .labelColor,
   ]
 

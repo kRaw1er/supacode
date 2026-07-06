@@ -27,6 +27,30 @@ struct DiffDocument: Equatable, Sendable {
   /// returning `.diffLoaded/.diffFailed` whose token no longer matches is dropped.
   var generation: Int = 0
 
+  // MARK: Phase 4 — neon syntax highlighting
+
+  /// The old-side blob to highlight (HEAD / three-dot merge-base, per `source`), or
+  /// `nil` on an added file / working-tree new side. Populated from the Phase-9
+  /// `FileDiffBatch` — the correct blob per `DiffSource` (fixes bug #1, no disk read).
+  var oldBlob: HighlightBlobInput?
+  /// The new-side blob (branch tip for a base diff), or `nil` on a deleted file /
+  /// the working-tree new side (workdir, not decoded).
+  var newBlob: HighlightBlobInput?
+  /// The last visible rendered-line range the highlighter was asked about.
+  var visibleLines: Range<Int> = 0..<0
+  /// Set once by the size gate at load; short-circuits the highlight driver so a
+  /// 200k-line / >2.5M-unit file renders plain with a header affordance, no stall.
+  var highlightingDisabled: Bool = false
+  /// `line → runs` for the OLD side of the visible window (both sides highlighted —
+  /// fixes bug #2, the old path forced the old side `[]`).
+  var oldStyleRuns: [Int: [StyleRun]] = [:]
+  /// `line → runs` for the NEW side of the visible window.
+  var newStyleRuns: [Int: [StyleRun]] = [:]
+  /// Monotonic guard for the in-flight highlight query. Bumped on every
+  /// visible-range change; a returning `.highlightsReady` whose token no longer
+  /// matches is dropped (pierre `isCurrentRequest`).
+  var highlightGeneration: Int = 0
+
   enum LoadState: Equatable, Sendable {
     case loading
     case loaded
@@ -163,6 +187,14 @@ struct DiffReviewFeature {
     case diffModeChanged(DiffViewMode)  // unified/split toggle → rebuild all open docs
     case expandGap(path: String, source: DiffSource, anchor: Int)  // expander tap → re-diff with raised context
 
+    // MARK: Phase 4 — neon syntax highlighting driver
+    /// Viewport scrolled/resized → (re)issue a windowed highlight for `range`,
+    /// debounced with the injected clock, superseding any in-flight pass.
+    case highlightVisibleRangeChanged(key: DiffDocumentKey, range: Range<Int>)
+    /// Both sides' windowed runs came back; applied when `generation` is still live.
+    case highlightsReady(
+      key: DiffDocumentKey, old: [Int: [StyleRun]], new: [Int: [StyleRun]], generation: Int)
+
     // MARK: Phase 5 — comments + send-to-agent
     /// Gutter "+"/drag resolved a range. Opens the composer (edit mode if a
     /// comment already covers the identical `(filePath, side, range)`).
@@ -196,6 +228,7 @@ struct DiffReviewFeature {
     case baseLoad, baseResolve
     case diff(DiffDocumentKey)
     case stream(DiffDocumentKey)
+    case highlight(DiffDocumentKey)
   }
 
   /// libgit2 `context_lines` used to materialize an expanded gap. High enough to
@@ -208,6 +241,7 @@ struct DiffReviewFeature {
       @Dependency(DiffClient.self) var diffClient
       @Dependency(DiffStreamConsumerClient.self) var diffStreamConsumer
       @Dependency(DiffStreamingEnabledKey.self) var diffStreamingEnabled
+      @Dependency(DiffHighlightClient.self) var diffHighlight
       @Dependency(TerminalClient.self) var terminalClient
       @Dependency(GitClientDependency.self) var gitClient
       @Dependency(\.continuousClock) var clock
@@ -444,6 +478,17 @@ struct DiffReviewFeature {
         document.hunks = batch.hunks
         document.loadState = .loaded
         document.isStale = false
+        // Phase 4: capture the correct blob per side (fixes bug #1 — no on-disk read)
+        // and evaluate the size gate ONCE on counts, so a deep hunk in a huge file
+        // never triggers a contiguous parse. A re-diff changes blobs → drop stale
+        // runs; the next `.highlightVisibleRangeChanged` re-queries the fresh blobs.
+        let (oldBlob, newBlob) = DiffHighlightDriver.blobInputs(for: batch)
+        document.oldBlob = oldBlob
+        document.newBlob = newBlob
+        document.highlightingDisabled = diffHighlight.isPlain(
+          batch.file.removedLines, batch.file.addedLines, oldBlob?.utf16.count ?? 0, newBlob?.utf16.count ?? 0)
+        document.oldStyleRuns = [:]
+        document.newStyleRuns = [:]
         Self.relocateComments(&state, key: key, lines: batch.hunks.flatMap(\.lines))
         document.rows = Self.buildRows(
           document: document, mode: mode, comments: state.comments(forPath: key.path, source: key.source))
@@ -491,6 +536,42 @@ struct DiffReviewFeature {
           ),
           diffClient: diffClient
         )
+
+      // MARK: Phase 4 — neon syntax highlighting driver
+
+      case .highlightVisibleRangeChanged(let key, let range):
+        guard var document = state.openDiffs[key] else { return .none }
+        document.visibleLines = range
+        // The size gate (set at load) short-circuits before any client is built or
+        // any parse runs — a 200k-line / oversized file renders plain, no stall.
+        guard !document.highlightingDisabled else {
+          state.openDiffs[key] = document
+          return .none
+        }
+        document.highlightGeneration &+= 1
+        let generation = document.highlightGeneration
+        let old = document.oldBlob
+        let new = document.newBlob
+        state.openDiffs[key] = document
+        // Nothing to highlight on either side (plain-text file / no bundled grammar):
+        // still clear any stale runs, but skip the effect.
+        guard old != nil || new != nil else { return .none }
+        return .run { send in
+          try await clock.sleep(for: .milliseconds(16))  // coalesce scroll bursts (no Task.sleep)
+          let oldRuns = old == nil ? [:] : await diffHighlight.styleRuns(old!, range)
+          let newRuns = new == nil ? [:] : await diffHighlight.styleRuns(new!, range)
+          await send(.highlightsReady(key: key, old: oldRuns, new: newRuns, generation: generation))
+        }
+        .cancellable(id: CancelID.highlight(key), cancelInFlight: true)
+
+      case .highlightsReady(let key, let old, let new, let generation):
+        // Drop a stale/superseded result (pierre isCurrentRequest) — a re-diff or a
+        // newer visible range already bumped `highlightGeneration`.
+        guard var document = state.openDiffs[key], generation == document.highlightGeneration else { return .none }
+        document.oldStyleRuns = old
+        document.newStyleRuns = new
+        state.openDiffs[key] = document
+        return .none
 
       // MARK: Phase 5 — comments
 

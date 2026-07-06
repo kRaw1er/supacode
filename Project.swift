@@ -76,6 +76,10 @@ let appDependencies: [TargetDependency] = [
   // neon adoption (Phase 0). The `Neon` product transitively links its `TreeSitterClient`
   // / `RangeState` / `Rearrange` targets and the `SwiftTreeSitterLayer` product.
   .external(name: "Neon"),
+  // Phase 4 `DiffHighlightEngine` imports `SwiftTreeSitterLayer` (LanguageLayer /
+  // ContentSnapshot / LanguageProvider) directly, so name its product explicitly
+  // rather than leaning on the transitive `Neon` link.
+  .external(name: "SwiftTreeSitterLayer"),
 ]
 
 let testDependencies: [TargetDependency] = [

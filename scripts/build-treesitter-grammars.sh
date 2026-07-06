@@ -177,6 +177,17 @@ copy_queries() { # key subdir
   [ -n "${scm}" ] || return 0
   mkdir -p "${queries_dir}/${key}"
   cp "${scm}" "${queries_dir}/${key}/highlights.scm"
+
+  # Optional injections.scm (language injection — e.g. JS/CSS inside HTML). Absent
+  # for most grammars; when a grammar ships one, the Phase-4 neon engine loads it as
+  # its `.injections` query so the `LanguageProvider` can highlight embedded regions.
+  local inj=""
+  for candidate in "${gram}/queries/injections.scm" "${checkout}/queries/injections.scm"; do
+    if [ -f "${candidate}" ]; then inj="${candidate}"; break; fi
+  done
+  if [ -n "${inj}" ]; then
+    cp "${inj}" "${queries_dir}/${key}/injections.scm"
+  fi
 }
 
 rm -rf "${obj_root}" "${headers_dir}" "${xcframework_path}"
