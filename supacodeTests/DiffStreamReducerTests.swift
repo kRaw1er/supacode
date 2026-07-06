@@ -239,7 +239,7 @@ struct DiffStreamReducerTests {
       filePath: "a.swift", source: .workingTree, side: .new, startLine: 9, endLine: 9,
       anchorSnippet: "gone-forever", contextBefore: "", createdAt: Date(timeIntervalSince1970: 2))
     var document = DiffDocument(file: file, loadState: .loaded, generation: 1)
-    document.expanded = [1]  // a GapKey(1) expansion in effect
+    document.expansion = .regions([1: HunkExpansionRegion(fromStart: 20)])  // a GapKey(1) expansion in effect
     var initialState = DiffReviewFeature.State()
     initialState.selectedWorktree = StreamFixture.worktree()
     initialState.openDiffs = [key: document]
@@ -268,7 +268,9 @@ struct DiffStreamReducerTests {
     #expect(store.state.comments[id: tracked.id]?.orphaned == false)
     #expect(store.state.comments[id: vanishing.id]?.orphaned == true)  // orphaned, NEVER dropped
     #expect(store.state.comments[id: vanishing.id] != nil)
-    #expect(store.state.openDiffs[key]?.expanded == [1])  // GapKey(1) survives the line shift
+    // GapKey(1) survives the line shift — hunk-INDEX keying (a line-number `Set<Int>`
+    // would have drifted when "target" moved 3 → 5).
+    #expect(store.state.openDiffs[key]?.expansion == .regions([1: HunkExpansionRegion(fromStart: 20)]))
   }
 
   // MARK: - 🔴 RED until Phase 13 flips the seam (retires `buildRows`)

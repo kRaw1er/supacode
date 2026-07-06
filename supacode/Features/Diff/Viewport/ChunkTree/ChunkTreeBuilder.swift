@@ -67,22 +67,25 @@ enum ChunkTreeBuilder {
   ) -> ChunkTree {
     let tree = ChunkTree(metrics: options.metrics)
     tree.diagnostics.buildRowsCallCount += 1
-    appendFile(into: tree, file: file, hunks: hunks, expanded: expanded, options: options)
+    appendFile(into: tree, file: file, hunks: hunks, expanded: expanded, options: options, comments: comments)
     insertComments(into: tree, comments: comments, options: options)
     return tree
   }
 
   /// Append one file's classified chunks (fileHeader → hunks) to an existing tree
-  /// in document order — the multi-file assembly primitive.
+  /// in document order — the multi-file assembly primitive. `comments` pins any
+  /// commented line visible: a context run covering one is never folded into an
+  /// expander (Phase 7 collapse guard).
   static func appendFile(
     into tree: ChunkTree,
     file: FileChange,
     hunks: [DiffHunk],
     expanded: Set<Int>,
-    options: Options = Options()
+    options: Options = Options(),
+    comments: [ReviewComment] = []
   ) {
     var after: ChunkID? = tree.inorderNodes().last?.id
-    for chunk in classify(file: file, hunks: hunks, expanded: expanded, options: options) {
+    for chunk in classify(file: file, hunks: hunks, expanded: expanded, options: options, comments: comments) {
       after = tree.insert(chunk, after: after)
     }
   }
@@ -92,7 +95,8 @@ enum ChunkTreeBuilder {
     file: FileChange,
     hunks: [DiffHunk],
     expanded: Set<Int>,
-    options: Options = Options()
+    options: Options = Options(),
+    comments: [ReviewComment] = []
   ) -> [Chunk] {
     let fileID = file.id
     var chunks: [Chunk] = []
@@ -115,7 +119,10 @@ enum ChunkTreeBuilder {
       chunks.append(placeholderWidget(emptyPlaceholder(for: file.status), fileID, options))
       return chunks
     }
-    appendHunks(&chunks, hunks: hunks, context: BuildContext(fileID: fileID, expanded: expanded, options: options))
+    appendHunks(
+      &chunks, hunks: hunks,
+      context: BuildContext(
+        fileID: fileID, expanded: expanded, options: options, commented: CommentedLines.from(comments)))
     return chunks
   }
 
@@ -125,6 +132,36 @@ enum ChunkTreeBuilder {
     let fileID: FileID
     let expanded: Set<Int>
     let options: Options
+    let commented: CommentedLines
+  }
+
+  /// The set of line numbers (per side) covered by a comment — the collapse guard
+  /// consults it so a commented line is never folded into an expander (pinned
+  /// visible; Phase 7, coordinating with Phase 6's `comments` source of truth).
+  struct CommentedLines: Equatable, Sendable {
+    var old: Set<Int> = []
+    var new: Set<Int> = []
+
+    var isEmpty: Bool { old.isEmpty && new.isEmpty }
+
+    /// Whether `line` carries a comment on either side.
+    func covers(_ line: DiffLine) -> Bool {
+      (line.newLineNumber.map(new.contains) ?? false) || (line.oldLineNumber.map(old.contains) ?? false)
+    }
+
+    static func from(_ comments: [ReviewComment]) -> CommentedLines {
+      var result = CommentedLines()
+      for comment in comments {
+        let lower = min(comment.startLine, comment.endLine)
+        let upper = max(comment.startLine, comment.endLine)
+        guard lower <= upper else { continue }
+        switch comment.side {
+        case .old: result.old.formUnion(lower...upper)
+        case .new: result.new.formUnion(lower...upper)
+        }
+      }
+      return result
+    }
   }
 
   // MARK: - Hunk walk
@@ -199,7 +236,11 @@ enum ChunkTreeBuilder {
     let edge = context.options.edgeContext
     let anchorIndex = edge < buffer.count ? edge : 0
     let anchor = buffer[anchorIndex].newLineNumber ?? buffer[0].newLineNumber
-    let wouldCollapse = buffer.count > context.options.collapseThreshold && !context.options.expandUnchanged
+    // AND-in `!hasComment(in: run)` (Phase 7): a context run covering a commented
+    // line is rendered in full so the commented line is never hidden by a collapse.
+    let coversComment = !context.commented.isEmpty && buffer.contains(where: context.commented.covers)
+    let wouldCollapse =
+      buffer.count > context.options.collapseThreshold && !context.options.expandUnchanged && !coversComment
     guard wouldCollapse, let anchor else {
       appendSegments(&chunks, lines: buffer, hunkID: hunkID, classification: .context)
       return

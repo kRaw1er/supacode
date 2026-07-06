@@ -129,7 +129,10 @@ struct DiffTabContentView: View {
           rows: document.rows,
           mode: store.diffViewMode,
           revision: document.revision,
-          onExpandGap: { anchor in store.send(.expandGap(path: filePath, source: source, anchor: anchor)) },
+          // Incremental collapse/expand is declarative `ExpansionState` consumed by
+          // the ChunkTree viewport (Phase 7); the legacy flat viewer cannot reveal an
+          // inter-hunk gap without the deleted 1M-context re-diff, so its expander is
+          // inert here until the Phase-13 viewport seam flip retires this view.
           onOpenComposer: { side, start, end, snippet, context in
             store.send(
               .openCommentComposer(

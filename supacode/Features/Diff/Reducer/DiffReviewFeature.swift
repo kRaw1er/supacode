@@ -1,6 +1,7 @@
 import ComposableArchitecture
 import Foundation
 import Sharing
+import SupacodeSettingsShared
 
 /// Canonical (owned by Phase 2). Unified vs split viewer preference. Phase 3 consumes this exact
 /// type + key — it must NOT define a parallel `DiffMode` / `"diffMode"`.
@@ -10,8 +11,9 @@ enum DiffViewMode: String, Codable, Sendable, Equatable, CaseIterable { case uni
 /// keyed by file path. Owns everything the center diff tab renders: the file
 /// metadata, the raw hunks (kept so a mode toggle rebuilds rows without I/O),
 /// the flat `[DiffRow]` for the viewer, the load state, the "no longer changed"
-/// stale flag, the set of user-expanded gap anchors, and a monotonic `revision`
-/// the viewer watches to re-apply while preserving scroll.
+/// stale flag, the **declarative expansion state** (Phase 7), a viewport handoff
+/// cache of revealed blob slices, and a monotonic `revision` the viewer watches
+/// to re-apply while preserving scroll.
 struct DiffDocument: Equatable, Sendable {
   var file: FileChange
   /// Which diff this document renders. Part of its `DiffDocumentKey` identity so
@@ -21,7 +23,18 @@ struct DiffDocument: Equatable, Sendable {
   var rows: [DiffRow] = []
   var loadState: LoadState = .loading
   var isStale: Bool = false
-  var expanded: Set<Int> = []
+  /// Declarative, document-level collapse/expand (Phase 7). Keyed by gap INDEX
+  /// (`GapKey.hunkIndex`) so it survives a re-diff — the incremental replacement
+  /// for the deleted 1M-context re-diff (`expanded: Set<Int>` was line-number keyed
+  /// and did NOT survive an edit above the gap). The ChunkTree viewport is a
+  /// projection of this; THIS is the source of truth.
+  var expansion: ExpansionState = .collapsed
+  /// Viewport handoff cache: per-gap blob-sliced context lines the reducer read for
+  /// the current `expansion` (gap index → sorted-by-new-line context `DiffLine`s).
+  /// The viewport reads it to `tree.insert(after: expanderChunk, …)` O(log n). Reset
+  /// on a re-diff (the materialized slices are re-sliced against the fresh geometry);
+  /// the declarative `expansion` persists.
+  var revealed: [Int: [DiffLine]] = [:]
   var revision: Int = 0
   /// Generation guard for this document's in-flight `diff` request (8.1). A
   /// returning `.diffLoaded/.diffFailed` whose token no longer matches is dropped.
@@ -69,6 +82,86 @@ struct DiffDocument: Equatable, Sendable {
 nonisolated struct DiffDocumentKey: Hashable, Sendable {
   var path: String
   var source: DiffSource
+}
+
+// MARK: - Gap geometry (Phase 7 — bounding-hunk math, mirrored from the builder)
+
+extension DiffDocument {
+  /// A gap index is TRAILING (after the last hunk) when it equals `hunks.count`
+  /// (matches `virtualDiffLayout.ts:197` / `ChunkTreeBuilder.appendHunks`).
+  func isTrailingGap(_ gap: Int) -> Bool { gap == hunks.count }
+
+  /// The first hidden NEW-side line number of gap `gap` — the line just below the
+  /// hunk ABOVE the gap. The leading gap (index 0) starts at new line 1.
+  func gapNewLineStart(_ gap: Int) -> Int {
+    guard gap >= 1, gap - 1 < hunks.count else { return 1 }
+    let above = hunks[gap - 1]
+    return above.newStart + above.newCount
+  }
+
+  /// The gap's hidden-line count (`rangeSize`), from the bounding hunks — the
+  /// current `DiffRowBuilder`/`ChunkTreeBuilder` gap math. Returns `0` for a gap
+  /// index that no longer maps to a real gap after a re-diff (degrade to collapsed,
+  /// never a crash). The trailing gap is EOF-unbounded, so `Int.max` — the reducer
+  /// caps the eager slice and the `BlobSliceProvider` clamps at EOF.
+  func gapRangeSize(_ gap: Int) -> Int {
+    guard let first = hunks.first else { return 0 }
+    if gap <= 0 { return max(first.newStart - 1, 0) }  // leading gap
+    if gap >= hunks.count { return .max }  // trailing gap — unbounded to EOF
+    let above = hunks[gap - 1]
+    let below = hunks[gap]
+    return max(below.newStart - (above.newStart + above.newCount), 0)
+  }
+
+  /// The new→old delta inside gap `gap`'s unchanged run (`old = new + delta`).
+  /// Unchanged gap lines advance old/new in lockstep, so a single delta is exact.
+  /// Derived from the hunk ABOVE the gap (`DiffModels.swift:42-45`); the leading
+  /// gap ⇒ delta `0`; the trailing gap ⇒ delta of the final hunk.
+  func gapOldLineDelta(_ gap: Int) -> Int {
+    guard gap >= 1, gap - 1 < hunks.count else { return 0 }
+    let above = hunks[gap - 1]
+    return (above.oldStart + above.oldCount) - (above.newStart + above.newCount)
+  }
+
+  /// The newly-revealed NEW-side sub-ranges when gap `gap`'s region grows from
+  /// `before` → `after`. The top portion grows downward from the gap start
+  /// (`fromStart`); the bottom portion grows upward from the gap end (`fromEnd`,
+  /// never for a trailing gap). Bounded to `cap` total lines so a whole-file expand
+  /// eager-slices only the first window; the viewport windows the rest on scroll.
+  func newlyRevealedRanges(
+    gap: Int,
+    before: ExpansionState.ResolvedRegion,
+    after: ExpansionState.ResolvedRegion,
+    cap: Int
+  ) -> [Range<Int>] {
+    guard cap > 0 else { return [] }
+    let start = gapNewLineStart(gap)
+    var remaining = cap
+    var ranges: [Range<Int>] = []
+    // Top: reveal `[start + before.fromStart, start + after.fromStart)`, capped.
+    let topRevealed = after.fromStart - before.fromStart
+    if topRevealed > 0 {
+      let (lower, overflow) = start.addingReportingOverflow(before.fromStart)
+      if !overflow {
+        let take = min(topRevealed, remaining)
+        ranges.append(lower..<(lower + take))
+        remaining -= take
+      }
+    }
+    // Bottom: only for a bounded (non-trailing, finite-size) gap.
+    let size = gapRangeSize(gap)
+    if remaining > 0, !isTrailingGap(gap), size != .max {
+      let bottomRevealed = after.fromEnd - before.fromEnd
+      if bottomRevealed > 0 {
+        let end = start + size  // one past the gap's last new line
+        let take = min(bottomRevealed, remaining)
+        let lower = end - after.fromEnd  // the newly-revealed bottom span starts here
+        ranges.append(lower..<(lower + take))
+        remaining -= take
+      }
+    }
+    return ranges
+  }
 }
 
 @Reducer
@@ -190,7 +283,16 @@ struct DiffReviewFeature {
     case streamFileReady(key: DiffDocumentKey, batch: FileDiffBatch, token: Int)  // `.fileReady` → feed + build rows
     case streamFinished(key: DiffDocumentKey, token: Int)  // `.finished` → mark loaded, bump revision
     case diffModeChanged(DiffViewMode)  // unified/split toggle → rebuild all open docs
-    case expandGap(path: String, source: DiffSource, anchor: Int)  // expander tap → re-diff with raised context
+    // MARK: Phase 7 — incremental collapse / expand (blob-slice, NO re-diff)
+    /// Expander tap → mutate `ExpansionState` (pure) + fire a blob-slice effect for
+    /// ONLY the newly-revealed delta range (one gap, incremental). Never re-diffs.
+    case expandGap(key: DiffDocumentKey, gap: Int, step: ExpansionState.Step, direction: ExpansionState.Direction)
+    /// Re-hide a gap → drop its region + revealed slices, cancel any in-flight slice.
+    case collapseGap(key: DiffDocumentKey, gap: Int)
+    /// A blob slice came back → stash it in `revealed[gap]` for the viewport.
+    case gapSliceLoaded(key: DiffDocumentKey, gap: Int, lines: [DiffLine], token: Int)
+    /// A blob slice failed (non-fatal) → the gap stays collapsed.
+    case gapSliceFailed(key: DiffDocumentKey, gap: Int, DiffError, token: Int)
 
     // MARK: Phase 4 — neon syntax highlighting driver
     /// Viewport scrolled/resized → (re)issue a windowed highlight for `range`,
@@ -236,16 +338,20 @@ struct DiffReviewFeature {
     case diff(DiffDocumentKey)
     case stream(DiffDocumentKey)
     case highlight(DiffDocumentKey)
+    case slice(DiffDocumentKey, Int)  // per (document, gap) blob-slice request
   }
 
-  /// libgit2 `context_lines` used to materialize an expanded gap. High enough to
-  /// pull the full unchanged region into the hunk; the builder then shows the
-  /// whole file (the expander is a "reveal everything" affordance in v1).
-  private static let expandedContextLines: UInt32 = 1_000_000
+  /// OUR eager-slice cap (NOT a pierre constant): a whole-file / huge-gap expand
+  /// reads at most this many lines up front; the viewport windows the rest on
+  /// scroll, so a `.whole` never resurrects the O(fileLen) decode we deleted.
+  private static let maxEagerSliceLines = 500
+
+  private static let logger = SupaLogger("DiffReview")
 
   var body: some Reducer<State, Action> {
     Reduce { state, action in
       @Dependency(DiffClient.self) var diffClient
+      @Dependency(BlobSliceClient.self) var blobSliceClient
       @Dependency(DiffStreamConsumerClient.self) var diffStreamConsumer
       @Dependency(DiffStreamingEnabledKey.self) var diffStreamingEnabled
       @Dependency(DiffHighlightClient.self) var diffHighlight
@@ -458,6 +564,9 @@ struct DiffReviewFeature {
         document.hunks = hunks
         document.loadState = .loaded
         document.isStale = false
+        // A re-diff re-materializes revealed slices against the fresh geometry; the
+        // declarative `expansion` (gap-index keyed) persists across the re-diff.
+        document.revealed.removeAll()
         // Re-anchor this document's comments against the fresh lines (5.1);
         // orphans are marked, never dropped.
         Self.relocateComments(&state, key: key, lines: hunks.flatMap(\.lines))
@@ -513,6 +622,9 @@ struct DiffReviewFeature {
           oldChangedLines: batch.file.removedLines, newChangedLines: batch.file.addedLines)
         document.oldStyleRuns = [:]
         document.newStyleRuns = [:]
+        // A re-diff re-materializes revealed slices; the declarative `expansion`
+        // (gap-index keyed) survives the line shift (Phase 7).
+        document.revealed.removeAll()
         Self.relocateComments(&state, key: key, lines: batch.hunks.flatMap(\.lines))
         document.rows = Self.buildRows(
           document: document, mode: mode, comments: state.comments(forPath: key.path, source: key.source))
@@ -540,26 +652,60 @@ struct DiffReviewFeature {
         }
         return .none
 
-      case .expandGap(let path, let source, let anchor):
-        let key = DiffDocumentKey(path: path, source: source)
+      // MARK: Phase 7 — incremental collapse / expand (blob-slice, NO re-diff)
+
+      case .expandGap(let key, let gap, let step, let direction):
         guard let worktree = state.selectedWorktree, var document = state.openDiffs[key] else { return .none }
-        document.expanded.insert(anchor)
+        let size = document.gapRangeSize(gap)
+        let isTrailing = document.isTrailingGap(gap)
+        let before = document.expansion.resolve(gap: gap, rangeSize: size, isTrailing: isTrailing)
+        document.expansion.expand(gap: gap, by: step, direction: direction)
+        let after = document.expansion.resolve(gap: gap, rangeSize: size, isTrailing: isTrailing)
         state.diffLoadToken &+= 1
         let token = state.diffLoadToken
         document.generation = token
         state.openDiffs[key] = document
-        // Re-diff with full context so the gap's real lines materialize; the
-        // rebuild (in `.diffLoaded`) then shows the whole file.
-        return Self.diffEffect(
-          DiffRequest(
-            key: key,
-            file: document.file,
-            worktree: worktree,
-            contextLines: Self.expandedContextLines,
-            token: token
-          ),
-          diffClient: diffClient
-        )
+        // Only the NEWLY revealed sub-ranges hit the blob (incremental, one gap
+        // only) — never `DiffClient.diff` at a raised context. Whole-file: bounded
+        // to `maxEagerSliceLines` so it materializes lazily.
+        let ranges = document.newlyRevealedRanges(
+          gap: gap, before: before, after: after, cap: Self.maxEagerSliceLines)
+        guard !ranges.isEmpty else { return .none }
+        return Self.sliceEffect(
+          SliceRequest(
+            key: key, gap: gap, file: document.file, source: key.source, worktree: worktree,
+            ranges: ranges, oldLineDelta: document.gapOldLineDelta(gap), token: token),
+          blobSliceClient: blobSliceClient)
+
+      case .collapseGap(let key, let gap):
+        guard var document = state.openDiffs[key] else { return .none }
+        document.expansion.collapse(gap: gap)
+        document.revealed[gap] = nil
+        state.openDiffs[key] = document
+        // Cancel any in-flight slice for this gap and re-insert the (full) expander.
+        return .cancel(id: CancelID.slice(key, gap))
+
+      case .gapSliceLoaded(let key, let gap, let lines, let token):
+        // Stale drop (mirrors `.diffLoaded`): a superseded expand never appends.
+        guard var document = state.openDiffs[key], document.generation == token else { return .none }
+        var revealed = document.revealed[gap] ?? []
+        var seen = Set(revealed.compactMap(\.newLineNumber))
+        for line in lines {
+          if let number = line.newLineNumber {
+            guard seen.insert(number).inserted else { continue }  // dedup an overlapping re-slice
+          }
+          revealed.append(line)
+        }
+        revealed.sort { ($0.newLineNumber ?? 0) < ($1.newLineNumber ?? 0) }
+        document.revealed[gap] = revealed
+        state.openDiffs[key] = document
+        return .none
+
+      case .gapSliceFailed(let key, let gap, let error, let token):
+        guard state.openDiffs[key]?.generation == token else { return .none }
+        // Non-fatal: the gap stays collapsed (last-good), the user can retry.
+        Self.logger.error("gap slice failed for \(key.path) gap \(gap): \(String(describing: error))")
+        return .none
 
       // MARK: Phase 4 — neon syntax highlighting driver
 
@@ -747,9 +893,10 @@ struct DiffReviewFeature {
     .cancellable(id: CancelID.load, cancelInFlight: true)
   }
 
-  /// Builds the flat row list for a document. When the user has expanded a gap,
-  /// collapsing is disabled (threshold → max) so the full-context re-diff renders
-  /// the whole file.
+  /// Builds the flat (legacy) row list for a document at a constant collapse
+  /// threshold. Incremental collapse/expand is now declarative `ExpansionState`
+  /// consumed by the ChunkTree viewport (Phase 7) — no `collapseThreshold` flip,
+  /// no full-context re-diff. Retired by the Phase-13 viewport seam flip.
   private static func buildRows(
     document: DiffDocument,
     mode: DiffViewMode,
@@ -759,8 +906,8 @@ struct DiffReviewFeature {
       file: document.file,
       hunks: document.hunks,
       mode: mode,
-      expanded: document.expanded,
-      options: DiffRowBuilder.Options(collapseThreshold: document.expanded.isEmpty ? 10 : .max),
+      expanded: [],
+      options: DiffRowBuilder.Options(collapseThreshold: 10),
       comments: comments
     )
   }
@@ -846,6 +993,44 @@ struct DiffReviewFeature {
     .cancellable(id: CancelID.diff(request.key), cancelInFlight: true)
   }
 
+  /// One incremental blob-slice request: the newly-revealed NEW-side sub-ranges of
+  /// a single gap (top + bottom fit in one effect so a two-ended expand does not
+  /// self-cancel under a shared `CancelID`).
+  private struct SliceRequest {
+    let key: DiffDocumentKey
+    let gap: Int
+    let file: FileChange
+    let source: DiffSource
+    let worktree: Worktree
+    let ranges: [Range<Int>]
+    let oldLineDelta: Int
+    let token: Int
+  }
+
+  /// Mirrors `diffEffect` (`:652-669`) for the incremental path: reads the blob for
+  /// only the newly-revealed ranges — NEVER `git_diff_*` — and feeds them back as
+  /// `.gapSliceLoaded` / `.gapSliceFailed`. `.cancellable` per `(key, gap)` so a
+  /// rapid re-expand of the same gap supersedes the in-flight slice.
+  private static func sliceEffect(_ request: SliceRequest, blobSliceClient: BlobSliceClient) -> Effect<Action> {
+    .run { send in
+      do {
+        var lines: [DiffLine] = []
+        for range in request.ranges {
+          lines += try await blobSliceClient.slice(
+            request.file, request.worktree.workingDirectory, request.source, range, request.oldLineDelta)
+        }
+        await send(.gapSliceLoaded(key: request.key, gap: request.gap, lines: lines, token: request.token))
+      } catch let error as DiffError {
+        await send(.gapSliceFailed(key: request.key, gap: request.gap, error, token: request.token))
+      } catch {
+        await send(
+          .gapSliceFailed(
+            key: request.key, gap: request.gap, .libgit2(code: -1, message: "\(error)"), token: request.token))
+      }
+    }
+    .cancellable(id: CancelID.slice(request.key, request.gap), cancelInFlight: true)
+  }
+
   /// The whole-`source` stream request for one open document (Phase 9). The
   /// producer streams every file's batch; the reducer routes THIS document's file
   /// to its rows and feeds every batch to the tree consumer.
@@ -915,11 +1100,11 @@ struct DiffReviewFeature {
       let token = state.diffLoadToken
       document.generation = token
       state.openDiffs[key] = document
-      // Non-expanded docs re-stream (Phase 9 incremental re-diff: unchanged files
-      // reuse their sub-trees, only edited hunks re-splice). An expanded doc still
-      // needs a per-file full-context re-diff, which the whole-`source` stream
-      // can't express, so it stays on `diffEffect`.
-      if streamingEnabled, document.expanded.isEmpty {
+      // Always the git-default context 3 (the render collapse is orthogonal — it
+      // lives in `ExpansionState`, materialized incrementally by the viewport, not
+      // in a raised libgit2 `context_lines`). Streaming re-diffs incrementally
+      // (unchanged files reuse their sub-trees, only edited hunks re-splice).
+      if streamingEnabled {
         effects.append(
           Self.streamEffect(
             StreamRequest(key: key, worktree: worktree, source: key.source, contextLines: 3, token: token),
@@ -927,10 +1112,9 @@ struct DiffReviewFeature {
           )
         )
       } else {
-        let contextLines: UInt32 = document.expanded.isEmpty ? 3 : Self.expandedContextLines
         effects.append(
           Self.diffEffect(
-            DiffRequest(key: key, file: file, worktree: worktree, contextLines: contextLines, token: token),
+            DiffRequest(key: key, file: file, worktree: worktree, contextLines: 3, token: token),
             diffClient: diffClient
           )
         )

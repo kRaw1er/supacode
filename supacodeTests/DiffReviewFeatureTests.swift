@@ -632,39 +632,119 @@ struct DiffReviewFeatureTests {
     #expect(store.state.openDiffs[key]?.rows.isEmpty == false)
   }
 
-  // MARK: - expandGap re-diffs with raised context
+  // MARK: - Phase 7: incremental collapse / expand (blob-slice, NO re-diff)
 
-  @Test(.dependencies) func expandGapReDiffsWithRaisedContext() async {
-    let worktree = gitLocalWorktree()
+  /// A two-hunk file with an inter-hunk gap keyed `GapKey(1)`: hunk 0 covers new
+  /// lines 1…3; hunk 1 starts at new line 40 — the gap is new lines 4…39 (36 lines).
+  /// Old/new advance in lockstep so `oldLineDelta` is 0.
+  private func twoHunkFile() -> (FileChange, [DiffHunk]) {
     let file = makeFile("a.swift")
-    let context = LockIsolated<UInt32>(0)
-    let fullHunk = modifiedHunk()
-    var document = DiffDocument(file: file, loadState: .loaded, generation: 3)
-    document.hunks = [modifiedHunk()]
-    let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
+    let hunk0 = DiffHunk(
+      oldStart: 1, oldCount: 3, newStart: 1, newCount: 3, header: "@@ -1,3 +1,3 @@",
+      lines: [
+        DiffLine(origin: .context, oldLineNumber: 1, newLineNumber: 1, content: "a", noNewlineAtEof: false),
+        DiffLine(origin: .deletion, oldLineNumber: 2, newLineNumber: nil, content: "b-old", noNewlineAtEof: false),
+        DiffLine(origin: .addition, oldLineNumber: nil, newLineNumber: 2, content: "b-new", noNewlineAtEof: false),
+        DiffLine(origin: .context, oldLineNumber: 3, newLineNumber: 3, content: "c", noNewlineAtEof: false),
+      ])
+    let hunk1 = DiffHunk(
+      oldStart: 40, oldCount: 2, newStart: 40, newCount: 2, header: "@@ -40,2 +40,2 @@",
+      lines: [
+        DiffLine(origin: .deletion, oldLineNumber: 40, newLineNumber: nil, content: "z-old", noNewlineAtEof: false),
+        DiffLine(origin: .addition, oldLineNumber: nil, newLineNumber: 40, content: "z-new", noNewlineAtEof: false),
+        DiffLine(origin: .context, oldLineNumber: 41, newLineNumber: 41, content: "tail", noNewlineAtEof: false),
+      ])
+    return (file, [hunk0, hunk1])
+  }
+
+  private func expansionStore(file: FileChange, hunks: [DiffHunk]) -> TestStoreOf<DiffReviewFeature> {
+    let key = DiffDocumentKey(path: file.id, source: .workingTree)
+    var document = DiffDocument(file: file, loadState: .loaded, generation: 1)
+    document.hunks = hunks
     var initialState = DiffReviewFeature.State()
-    initialState.selectedWorktree = worktree
+    initialState.selectedWorktree = gitLocalWorktree()
     initialState.files = [file]
     initialState.openDiffs = [key: document]
-    initialState.diffLoadToken = 3
+    initialState.diffLoadToken = 1
     let store = TestStore(initialState: initialState) {
       DiffReviewFeature()
     } withDependencies: {
       $0.continuousClock = TestClock()
-      $0.diffClient.diff = { _, _, requestedContext, _ in
-        context.setValue(requestedContext)
-        return [fullHunk]
+      // Deterministic fixture slice (BlobSliceClient.testValue) so no filesystem.
+    }
+    store.exhaustivity = .off
+    return store
+  }
+
+  @Test(.dependencies) func expandGapFinePerCoarseWhole() async {
+    let (file, hunks) = twoHunkFile()
+    let key = DiffDocumentKey(path: file.id, source: .workingTree)
+    let store = expansionStore(file: file, hunks: hunks)
+
+    // FINE up: region grows fromStart += 20; a slice fires and appends to revealed.
+    await store.send(.expandGap(key: key, gap: 1, step: .fine, direction: .up))
+    await store.receive(\.gapSliceLoaded)
+    #expect(store.state.openDiffs[key]?.expansion == .regions([1: HunkExpansionRegion(fromStart: 20)]))
+    #expect(store.state.openDiffs[key]?.revealed[1]?.count == 20)  // 20 fine lines revealed
+    #expect(store.state.openDiffs[key]?.revealed[1]?.first?.newLineNumber == 4)  // gap starts at new line 4
+
+    // COARSE up: region grows fromStart += 100 → clamps to the 37-line gap ⇒ renderAll.
+    await store.send(.expandGap(key: key, gap: 1, step: .coarse, direction: .up))
+    await store.receive(\.gapSliceLoaded)
+    #expect(store.state.openDiffs[key]?.expansion == .regions([1: HunkExpansionRegion(fromStart: 120)]))
+    #expect(store.state.openDiffs[key]?.revealed[1]?.count == 36)  // whole gap revealed (lines 4…39)
+
+    // COLLAPSE: region removed, revealed cleared.
+    await store.send(.collapseGap(key: key, gap: 1))
+    #expect(store.state.openDiffs[key]?.expansion == .regions([:]))
+    #expect(store.state.openDiffs[key]?.revealed[1] == nil)
+
+    // WHOLE: promotes past the gap size in one shot ⇒ renderAll, one slice.
+    await store.send(.expandGap(key: key, gap: 1, step: .whole, direction: .both))
+    await store.receive(\.gapSliceLoaded)
+    #expect(store.state.openDiffs[key]?.revealed[1]?.count == 36)
+    await store.finish()
+  }
+
+  @Test(.dependencies) func oneGapOnlyExpands() async {
+    // A three-hunk file → two inter-hunk gaps, GapKey(1) and GapKey(2).
+    let file = makeFile("a.swift")
+    let hunk0 = DiffHunk(
+      oldStart: 1, oldCount: 1, newStart: 1, newCount: 1, header: "@@",
+      lines: [DiffLine(origin: .context, oldLineNumber: 1, newLineNumber: 1, content: "a", noNewlineAtEof: false)])
+    let hunk1 = DiffHunk(
+      oldStart: 20, oldCount: 1, newStart: 20, newCount: 1, header: "@@",
+      lines: [DiffLine(origin: .context, oldLineNumber: 20, newLineNumber: 20, content: "m", noNewlineAtEof: false)])
+    let hunk2 = DiffHunk(
+      oldStart: 60, oldCount: 1, newStart: 60, newCount: 1, header: "@@",
+      lines: [DiffLine(origin: .context, oldLineNumber: 60, newLineNumber: 60, content: "z", noNewlineAtEof: false)])
+    let diffCalls = LockIsolated(0)
+    let key = DiffDocumentKey(path: file.id, source: .workingTree)
+    var document = DiffDocument(file: file, loadState: .loaded, generation: 1)
+    document.hunks = [hunk0, hunk1, hunk2]
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = gitLocalWorktree()
+    initialState.files = [file]
+    initialState.openDiffs = [key: document]
+    initialState.diffLoadToken = 1
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.diffClient.diff = { _, _, _, _ in
+        diffCalls.withValue { $0 += 1 }
+        return []
       }
     }
     store.exhaustivity = .off
 
-    await store.send(.expandGap(path: "a.swift", source: .workingTree, anchor: 5)) {
-      $0.diffLoadToken = 4
-      $0.openDiffs[key]?.expanded = [5]
-      $0.openDiffs[key]?.generation = 4
-    }
-    await store.receive(\.diffLoaded)
-    #expect(context.value > 3)  // raised well above the git default of 3.
+    await store.send(.expandGap(key: key, gap: 1, step: .fine, direction: .up))
+    await store.receive(\.gapSliceLoaded)
+    await store.finish()
+
+    // Gap B (GapKey 2) is untouched, and NO `DiffClient.diff` fired (no re-diff).
+    #expect(store.state.openDiffs[key]?.expansion == .regions([1: HunkExpansionRegion(fromStart: 20)]))
+    #expect(diffCalls.value == 0)
   }
 
   // MARK: - Phase 5: comments + send-to-agent

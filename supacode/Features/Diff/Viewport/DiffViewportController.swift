@@ -55,6 +55,15 @@ final class DiffViewportController: NSObject {
   /// new width). Keyed by `WidgetKey` (per-instance identity), not `ChunkID`.
   private var widgetMeasuredWidth: [WidgetKey: CGFloat] = [:]
 
+  /// Phase 7 — per-gap expansion bookkeeping (mutated by the `applyExpansion` /
+  /// `collapseExpansion` splice in `DiffViewportExpansion.swift`, so not
+  /// `private(set)`). `expansionNodes` holds the ids of the revealed-slice segments +
+  /// shrunken expander currently materialized for a gap (removed + rebuilt on each
+  /// expand, removed on collapse); `originalExpanders` keeps the full expander chunk
+  /// so `collapseExpansion` can restore it.
+  var expansionNodes: [GapKey: [ChunkID]] = [:]
+  var originalExpanders: [GapKey: Chunk] = [:]
+
   // C7 measure↔layout guard (Phase 3 uses it; inert while heights are fixed).
   private(set) var measurePass = 0
   private let maxMeasurePasses = 5

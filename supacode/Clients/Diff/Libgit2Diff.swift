@@ -886,3 +886,57 @@ extension Libgit2Diff {
     return Array(text.utf16)
   }
 }
+
+// MARK: - Blob range read for incremental expansion (Phase 7 — no `git_diff_*`)
+
+extension Libgit2Diff {
+  /// A blob read result: its OID (content identity for the slice cache) and its
+  /// decoded UTF-16 content.
+  nonisolated struct BlobRead: Sendable {
+    var oid: String
+    var utf16: [UInt16]
+  }
+
+  /// HEAD's tree blob for `path`, decoded to UTF-16 — the NEW side of a base-branch
+  /// (three-dot) diff. Reads the blob ONLY (`git_repository_head` → peel to tree →
+  /// `git_tree_entry_bypath` → `git_blob_lookup` → `git_blob_rawcontent`); it never
+  /// builds a `git_diff`. Every handle is freed in a `defer`, matching the file's
+  /// confinement contract. Returns `nil` when the path is absent in HEAD (an added
+  /// file), the blob is over `byteCap`, or the content is non-UTF-8.
+  nonisolated static func headBlobContentUTF16(at worktreeURL: URL, path: String, byteCap: Int) throws -> BlobRead? {
+    let repo = try openRepository(at: worktreeURL)
+    defer { git_repository_free(repo) }
+
+    // Unborn HEAD → nothing committed → no base-side blob.
+    if git_repository_head_unborn(repo) == 1 { return nil }
+
+    var ref: OpaquePointer?
+    guard git_repository_head(&ref, repo) == 0, let ref else { return nil }
+    defer { git_reference_free(ref) }
+
+    var treeObject: OpaquePointer?
+    guard git_reference_peel(&treeObject, ref, GIT_OBJECT_TREE) == 0, let treeObject else { return nil }
+    defer { git_object_free(treeObject) }
+
+    var entry: OpaquePointer?
+    let entryCode = path.withCString { git_tree_entry_bypath(&entry, treeObject, $0) }
+    guard entryCode == 0, let entry else { return nil }  // path absent in HEAD (added file) → nil
+    defer { git_tree_entry_free(entry) }
+
+    guard let oidPtr = git_tree_entry_id(entry) else { return nil }
+    var oid = oidPtr.pointee
+    guard let oidHex = oidString(oid) else { return nil }
+
+    var blob: OpaquePointer?
+    guard git_blob_lookup(&blob, repo, &oid) == 0, let blob else { return nil }
+    defer { git_blob_free(blob) }
+
+    let size = Int(git_blob_rawsize(blob))
+    if size == 0 { return BlobRead(oid: oidHex, utf16: []) }
+    if size > byteCap { return nil }
+    guard let raw = git_blob_rawcontent(blob) else { return nil }
+    let bytes = UnsafeRawBufferPointer(start: raw, count: size)
+    guard let text = String(bytes: bytes, encoding: .utf8) else { return nil }  // non-UTF-8 → nothing to reveal
+    return BlobRead(oid: oidHex, utf16: Array(text.utf16))
+  }
+}
