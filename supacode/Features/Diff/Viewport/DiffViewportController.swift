@@ -405,6 +405,54 @@ final class DiffViewportController: NSObject {
     }
   }
 
+  // MARK: - Mode toggle (Phase 8 — O(log #hunks) dual-mode re-seek, NO reproject)
+
+  /// Toggle unified↔split WITHOUT reprojecting (C6). The dual-mode tree (Phase 1)
+  /// stores `unifiedLineCount` / `splitLineCount` per node, so the toggle never
+  /// touches a row array:
+  /// 1. resolve the top-visible row to a mode-independent `(chunkID, localRow)`
+  ///    anchor via ONE seek in the OLD dimension — O(log n);
+  /// 2. flip the render dimension;
+  /// 3. re-seek that anchor into the NEW dimension — `rowIndex(for:)` is a rank walk
+  ///    (no seek) + one `seek(index:)` for its fresh y — O(log n);
+  /// 4. grow / shrink the document to the new mode's height and re-materialize ONLY
+  ///    the visible window. Heights are mode-keyed ON THE TREE (`ChunkSummary`'s
+  ///    `unified*` / `split*` fields + `LineHeightDelta.unified` / `.split`), so
+  ///    there is nothing stale to invalidate — the split column ≈ half width wraps
+  ///    differently, and the measure guard re-measures the VISIBLE rows lazily on
+  ///    this same pass. No `buildRows`, no O(n) walk.
+  ///
+  /// The reducer `DiffReviewFeature.diffModeChanged` scope-down (deleting its
+  /// `buildRows` loop, leaving flag-persist + `revision` bump) is **Phase 9's** — this
+  /// phase only adds the viewport-side re-seek. `tree.diagnostics.seekCount` /
+  /// `buildRowsCallCount` pin the "no O(n) reproject" invariant to a number.
+  func toggleMode(to newMode: DiffViewMode) {
+    let oldMode = mode
+    guard newMode != oldMode else { return }
+    // (1) Anchor the top-visible row in the OLD dimension (one seek).
+    let anchor = tree.seek(y: visibleRect.minY, mode: oldMode).map { (chunk: $0.id, localRow: $0.localRow) }
+    // (2) Flip the render dimension.
+    mode = newMode
+    // (3) Re-seek the anchor into the NEW dimension: `rowIndex(for:)` is a rank walk
+    //     (no seek); one `seek(index:)` resolves its fresh y.
+    let restoredY: CGFloat? =
+      anchor
+      .flatMap { tree.rowIndex(for: $0, mode: newMode) }
+      .flatMap { tree.seek(index: $0, mode: newMode)?.yOrigin }
+    // (4) Re-fit the document + re-land the anchor row at the viewport top, then
+    //     materialize the new window (one pass — heights are mode-keyed, nothing
+    //     stale to invalidate; visible rows re-measure lazily via the measure guard).
+    measurePass = 0
+    resizeDocument()
+    if let restoredY {
+      let maxY = max(0, documentView.bounds.height - visibleRect.height)
+      setScrollY(min(max(0, restoredY), maxY))
+    }
+    clampScrollOrigin()
+    layoutVisibleChunks()
+    Self.logger.debug("mode toggle \(oldMode) → \(newMode) re-seek (no reproject)")
+  }
+
   // MARK: - Geometry API (Phase 6 gutter + Phase 10 scroll-spy)
 
   /// The document-space rect of a chunk (its top row's `yOrigin` and full

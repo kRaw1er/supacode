@@ -269,7 +269,11 @@ final class DiffCellView: NSView {
 
   private func drawPane(_ rect: NSRect, line: DiffLine?, isOld: Bool) {
     guard let line else {
-      fill(rect, with: NSColor.quaternaryLabelColor.withAlphaComponent(0.06))
+      // Empty split pane → the 45° diagonal hatch buffer (C5), replacing the prior
+      // flat muted fill. `NSGraphicsContext.current` is set during `draw(_:)`.
+      if let ctx = NSGraphicsContext.current?.cgContext {
+        EmptySideHatch.draw(in: rect, into: ctx)
+      }
       return
     }
     fill(rect, with: Self.background(for: line.origin))

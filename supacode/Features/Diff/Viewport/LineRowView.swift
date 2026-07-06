@@ -339,9 +339,8 @@ final class LineRowView: NSView, DiffViewportRecyclable {
   }
 
   private func drawPane(_ pane: PaneRender, gutter: GutterRenderer, scale: CGFloat, in ctx: CGContext) {
-    guard let origin = pane.origin else {  // empty pane (no counterpart) — faint fill, no number / content.
-      NSColor.quaternaryLabelColor.withAlphaComponent(0.06).setFill()
-      pane.paneRect.fill()
+    guard let origin = pane.origin else {  // empty pane (no counterpart) — 45° hatch buffer (C5), no number / content.
+      EmptySideHatch.draw(in: pane.paneRect, into: ctx)
       return
     }
     gutter.draw(row: LineRowGeometry(rowRect: pane.paneRect, barX: pane.barX), origin: origin, in: ctx)

@@ -349,30 +349,4 @@ enum DiffRowBuilder {
     }
     return rows
   }
-
-  /// Derives stable, collision-free `splitLine` pair IDs from line numbers so a
-  /// content-only edit keeps IDs stable (small `CollectionDifference` delta).
-  /// New-side rows encode `new * 2` (even); deletion-only rows encode
-  /// `old * 2 + 1` (odd); markers use a private descending counter so they never
-  /// collide with real line-derived IDs.
-  private struct PairSequencer {
-    private var markerCounter = -1
-
-    func contextID(newLine: Int?, oldLine: Int?) -> Int {
-      if let newLine { return newLine * 2 }
-      if let oldLine { return oldLine * 2 + 1 }
-      return 0
-    }
-
-    func changeID(newLine: Int?, oldLine: Int?) -> Int {
-      if let newLine { return newLine * 2 }
-      if let oldLine { return oldLine * 2 + 1 }
-      return 0
-    }
-
-    mutating func markerID() -> Int {
-      defer { markerCounter -= 1 }
-      return markerCounter
-    }
-  }
 }
