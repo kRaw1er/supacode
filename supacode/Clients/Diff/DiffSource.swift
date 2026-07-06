@@ -15,6 +15,14 @@ nonisolated enum DiffSource: Equatable, Sendable, Hashable {
   case workingTree
   case baseBranch(ref: String)
 
+  /// `true` for the uncommitted working-tree diff, whose NEW side is the workdir
+  /// (a zero OID, not a blob) — so the streaming walk skips decoding the new-side
+  /// blob for it and reuse keys on `oldBlobID`.
+  var isWorkingTree: Bool {
+    if case .workingTree = self { return true }
+    return false
+  }
+
   /// Human-facing label for titles / section headers — `nil` for the
   /// working-tree source; the base ref with a leading `origin/` stripped.
   var displayName: String? {

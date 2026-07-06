@@ -25,4 +25,16 @@ nonisolated protocol DiffProvider: Sendable {
   /// ref does not resolve).
   func diff(for file: FileChange, at worktreeURL: URL, contextLines: UInt32, source: DiffSource) async throws
     -> [DiffHunk]
+
+  /// Streams the whole `source` diff as frozen, generation-stamped
+  /// `FileDiffBatch`es: `.started(fileCount:)` first (a coarse scaffold), then
+  /// one `.fileReady` per delta IN ORDER, then `.finished`. The whole libgit2
+  /// walk runs on the actor's serial executor (satisfying `GIT_THREADS=1`),
+  /// decoupled from the `@MainActor` consumer by the continuation buffer. The
+  /// caller's `generation` is stamped onto every batch so a stale one is dropped
+  /// on arrival; consumer teardown cancels the walk at the next file boundary.
+  /// Errors (`.indexLocked` / `.notARepository` / `.baseRefUnresolved` /
+  /// `.libgit2`) surface via the stream's throw.
+  func stream(source: DiffSource, at worktreeURL: URL, contextLines: UInt32, generation: Int)
+    -> AsyncThrowingStream<DiffStreamEvent, Error>
 }

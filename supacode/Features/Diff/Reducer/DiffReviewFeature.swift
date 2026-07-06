@@ -156,6 +156,10 @@ struct DiffReviewFeature {
     case openFile(path: String, source: DiffSource)  // row tap → open center diff tab
     case diffLoaded(key: DiffDocumentKey, hunks: [DiffHunk], token: Int)  // per-file hunk load success
     case diffFailed(key: DiffDocumentKey, DiffError, token: Int)  // per-file hunk load failure
+    // MARK: Phase 9 — streaming producer↔consumer
+    case streamStarted(key: DiffDocumentKey, fileCount: Int, token: Int)  // `.started` → scaffold the consumer
+    case streamFileReady(key: DiffDocumentKey, batch: FileDiffBatch, token: Int)  // `.fileReady` → feed + build rows
+    case streamFinished(key: DiffDocumentKey, token: Int)  // `.finished` → mark loaded, bump revision
     case diffModeChanged(DiffViewMode)  // unified/split toggle → rebuild all open docs
     case expandGap(path: String, source: DiffSource, anchor: Int)  // expander tap → re-diff with raised context
 
@@ -191,6 +195,7 @@ struct DiffReviewFeature {
     case load, debounce
     case baseLoad, baseResolve
     case diff(DiffDocumentKey)
+    case stream(DiffDocumentKey)
   }
 
   /// libgit2 `context_lines` used to materialize an expanded gap. High enough to
@@ -201,6 +206,8 @@ struct DiffReviewFeature {
   var body: some Reducer<State, Action> {
     Reduce { state, action in
       @Dependency(DiffClient.self) var diffClient
+      @Dependency(DiffStreamConsumerClient.self) var diffStreamConsumer
+      @Dependency(DiffStreamingEnabledKey.self) var diffStreamingEnabled
       @Dependency(TerminalClient.self) var terminalClient
       @Dependency(GitClientDependency.self) var gitClient
       @Dependency(\.continuousClock) var clock
@@ -287,7 +294,8 @@ struct DiffReviewFeature {
         state.loadState = files.isEmpty ? .empty : .loaded
         // Live-update every open working-tree center diff tab: re-diff the ones
         // still changed, flag the vanished ones as stale (tab stays open).
-        return Self.refreshOpenDiffs(&state, scope: .workingTree, diffClient: diffClient)
+        return Self.refreshOpenDiffs(
+          &state, scope: .workingTree, diffClient: diffClient, streamingEnabled: diffStreamingEnabled)
 
       case .failed(let error, let generation):
         guard generation == state.generation else { return .none }  // discard stale (8.1)
@@ -320,7 +328,8 @@ struct DiffReviewFeature {
         state.baseFiles = files
         // `base == HEAD` (no commits ahead) → empty → "up to date with <base>".
         state.baseLoadState = files.isEmpty ? .empty : .loaded
-        return Self.refreshOpenDiffs(&state, scope: .base, diffClient: diffClient)
+        return Self.refreshOpenDiffs(
+          &state, scope: .base, diffClient: diffClient, streamingEnabled: diffStreamingEnabled)
 
       case .baseFailed(let error, let generation):
         guard generation == state.baseGeneration else { return .none }  // discard stale (8.1)
@@ -378,13 +387,18 @@ struct DiffReviewFeature {
         document.loadState = .loading
         document.generation = token
         state.openDiffs[key] = document
-        return .merge(
-          focusEffect,
-          Self.diffEffect(
+        // Streaming path (Phase 9) replaces the single per-file round-trip with a
+        // stream pump feeding the tree consumer; gated OFF until the P13 seam flip
+        // so the live `[DiffRow]` path stays authoritative in production.
+        let loadEffect: Effect<Action> =
+          diffStreamingEnabled
+          ? Self.streamEffect(
+            StreamRequest(key: key, worktree: worktree, source: source, contextLines: 3, token: token),
+            diffClient: diffClient)
+          : Self.diffEffect(
             DiffRequest(key: key, file: file, worktree: worktree, contextLines: 3, token: token),
-            diffClient: diffClient
-          )
-        )
+            diffClient: diffClient)
+        return .merge(focusEffect, loadEffect)
 
       case .diffLoaded(let key, let hunks, let token):
         guard var document = state.openDiffs[key], document.generation == token else { return .none }
@@ -406,6 +420,44 @@ struct DiffReviewFeature {
         document.revision &+= 1
         state.openDiffs[key] = document
         return .none
+
+      // MARK: Phase 9 — streaming producer↔consumer
+
+      case .streamStarted(let key, let fileCount, let token):
+        // Stale drop (8.1): a superseded stream's `.started` never scaffolds.
+        guard let document = state.openDiffs[key], document.generation == token else { return .none }
+        let mode = state.diffViewMode
+        return .run { _ in await diffStreamConsumer.begin(key, fileCount, mode, token) }
+
+      case .streamFileReady(let key, let batch, let token):
+        // Stale drop ON ARRIVAL (mirror of the KEPT reducer guard) — belt-and-
+        // suspenders with the consumer's own generation check.
+        guard var document = state.openDiffs[key], document.generation == token else { return .none }
+        let mode = state.diffViewMode
+        // Feed the tree consumer (zero-I/O, MainActor).
+        let feed: Effect<Action> = .run { _ in await diffStreamConsumer.consume(key, batch, mode) }
+        // The batch for THIS document's file also supplies its hunks/rows so the
+        // live `[DiffRow]` view renders progressively (until the P13 seam flip
+        // retires `rows` for the tree-backed viewport).
+        guard batch.file.id == key.path else { return feed }
+        document.file = batch.file
+        document.hunks = batch.hunks
+        document.loadState = .loaded
+        document.isStale = false
+        Self.relocateComments(&state, key: key, lines: batch.hunks.flatMap(\.lines))
+        document.rows = Self.buildRows(
+          document: document, mode: mode, comments: state.comments(forPath: key.path, source: key.source))
+        document.revision &+= 1
+        state.openDiffs[key] = document
+        return feed
+
+      case .streamFinished(let key, let token):
+        guard var document = state.openDiffs[key], document.generation == token else { return .none }
+        document.loadState = .loaded
+        document.isStale = false
+        document.revision &+= 1
+        state.openDiffs[key] = document
+        return .run { _ in await diffStreamConsumer.finish(key, token) }
 
       case .diffModeChanged(let mode):
         state.$diffViewMode.withLock { $0 = mode }
@@ -668,6 +720,45 @@ struct DiffReviewFeature {
     .cancellable(id: CancelID.diff(request.key), cancelInFlight: true)
   }
 
+  /// The whole-`source` stream request for one open document (Phase 9). The
+  /// producer streams every file's batch; the reducer routes THIS document's file
+  /// to its rows and feeds every batch to the tree consumer.
+  private struct StreamRequest {
+    let key: DiffDocumentKey
+    let worktree: Worktree
+    let source: DiffSource
+    let contextLines: UInt32
+    let token: Int
+  }
+
+  /// Pumps `diffClient.stream` into `.streamStarted` / `.streamFileReady` /
+  /// `.streamFinished`, generation-guarded by `token`. `.cancellable` per key so a
+  /// re-diff cancels the in-flight stream (cooperative cancel at the next file
+  /// boundary). Errors surface as `.diffFailed` (keep last-good, existing path).
+  private static func streamEffect(_ request: StreamRequest, diffClient: DiffClient) -> Effect<Action> {
+    .run { send in
+      do {
+        for try await event in diffClient.stream(
+          request.source, request.worktree.workingDirectory, request.contextLines, request.token)
+        {
+          switch event {
+          case .started(let fileCount, _, _):
+            await send(.streamStarted(key: request.key, fileCount: fileCount, token: request.token))
+          case .fileReady(let batch):
+            await send(.streamFileReady(key: request.key, batch: batch, token: request.token))
+          case .finished:
+            await send(.streamFinished(key: request.key, token: request.token))
+          }
+        }
+      } catch let error as DiffError {
+        await send(.diffFailed(key: request.key, error, token: request.token))
+      } catch {
+        await send(.diffFailed(key: request.key, .libgit2(code: -1, message: "\(error)"), token: request.token))
+      }
+    }
+    .cancellable(id: CancelID.stream(request.key), cancelInFlight: true)
+  }
+
   /// Which open documents `refreshOpenDiffs` touches after a list reload. Keeps
   /// a working-tree `.loaded` from re-diffing base tabs (and vice versa) — each
   /// source's reload only refreshes its own open tabs.
@@ -678,7 +769,7 @@ struct DiffReviewFeature {
   /// while keeping the tab and its last rows (3.2/3.3). Scoped to one `source`
   /// so it looks each document up in the matching file list.
   private static func refreshOpenDiffs(
-    _ state: inout State, scope: RefreshScope, diffClient: DiffClient
+    _ state: inout State, scope: RefreshScope, diffClient: DiffClient, streamingEnabled: Bool
   ) -> Effect<Action> {
     guard let worktree = state.selectedWorktree, !state.openDiffs.isEmpty else { return .none }
     let fileList = scope == .workingTree ? state.files : state.baseFiles
@@ -698,13 +789,26 @@ struct DiffReviewFeature {
       let token = state.diffLoadToken
       document.generation = token
       state.openDiffs[key] = document
-      let contextLines: UInt32 = document.expanded.isEmpty ? 3 : Self.expandedContextLines
-      effects.append(
-        Self.diffEffect(
-          DiffRequest(key: key, file: file, worktree: worktree, contextLines: contextLines, token: token),
-          diffClient: diffClient
+      // Non-expanded docs re-stream (Phase 9 incremental re-diff: unchanged files
+      // reuse their sub-trees, only edited hunks re-splice). An expanded doc still
+      // needs a per-file full-context re-diff, which the whole-`source` stream
+      // can't express, so it stays on `diffEffect`.
+      if streamingEnabled, document.expanded.isEmpty {
+        effects.append(
+          Self.streamEffect(
+            StreamRequest(key: key, worktree: worktree, source: key.source, contextLines: 3, token: token),
+            diffClient: diffClient
+          )
         )
-      )
+      } else {
+        let contextLines: UInt32 = document.expanded.isEmpty ? 3 : Self.expandedContextLines
+        effects.append(
+          Self.diffEffect(
+            DiffRequest(key: key, file: file, worktree: worktree, contextLines: contextLines, token: token),
+            diffClient: diffClient
+          )
+        )
+      }
     }
     return .merge(effects)
   }

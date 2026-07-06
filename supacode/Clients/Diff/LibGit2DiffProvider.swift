@@ -52,6 +52,44 @@ actor LibGit2DiffProvider: DiffProvider {
     }
   }
 
+  /// Streams the whole `source` diff as frozen, generation-stamped batches. The
+  /// actor owns the walk: the whole libgit2 span runs on its serial executor
+  /// (satisfying `GIT_THREADS=1`), decoupled from the MainActor consumer by the
+  /// continuation buffer. `onTermination` cancels the walk at the next file
+  /// boundary when the consumer tears down (pierre `controller.abort`).
+  nonisolated func stream(
+    source: DiffSource, at worktreeURL: URL, contextLines: UInt32, generation: Int
+  ) -> AsyncThrowingStream<DiffStreamEvent, Error> {
+    AsyncThrowingStream { continuation in
+      let task = Task {
+        do {
+          try await self.ensureIndexUnlocked(worktreeURL)  // actor hop BEFORE the walk (last-good guard)
+          try await self.runStream(  // actor-isolated synchronous walk
+            source: source, at: worktreeURL, contextLines: contextLines,
+            generation: generation, continuation: continuation)
+          continuation.finish()
+        } catch {
+          // .indexLocked / .notARepository / .baseRefUnresolved / .libgit2 surface here.
+          continuation.finish(throwing: error)
+        }
+      }
+      continuation.onTermination = { _ in task.cancel() }  // consumer teardown → cancel at next file boundary
+    }
+  }
+
+  /// Actor-isolated, synchronous: no `await` inside, so the C handle never spans
+  /// a suspension point. `Task.isCancelled` is polled at each file boundary by
+  /// the walk; `continuation.yield` does not suspend, so the diff stays valid.
+  private func runStream(
+    source: DiffSource, at worktreeURL: URL, contextLines: UInt32,
+    generation: Int, continuation: AsyncThrowingStream<DiffStreamEvent, Error>.Continuation
+  ) throws {
+    try Libgit2Diff.streamChangedFiles(
+      at: worktreeURL,
+      Libgit2Diff.WalkRequest(source: source, caps: caps, contextLines: contextLines, generation: generation),
+      isCancelled: { Task.isCancelled }, emit: { continuation.yield($0) })
+  }
+
   /// Replicates `GitClient.lineChanges`'s `.git/index.lock` guard verbatim —
   /// resolves the real git dir (linked worktrees + `--separate-git-dir`) via
   /// `GitWorktreeHeadResolver`, then throws `.indexLocked` if the lock exists so

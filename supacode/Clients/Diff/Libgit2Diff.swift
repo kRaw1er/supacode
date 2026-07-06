@@ -195,7 +195,12 @@ nonisolated enum Libgit2Diff {
   /// Returns `(diff, headTree?)`. `headTree` is `nil` for an unborn HEAD, which
   /// makes `git_diff_tree_to_workdir_with_index` diff against the empty tree so
   /// every file surfaces as an addition.
-  private static func makeDiff(repo: OpaquePointer, isUnborn: Bool, contextLines: UInt32 = 3) throws -> (
+  private static func makeDiff(
+    repo: OpaquePointer,
+    isUnborn: Bool,
+    contextLines: UInt32 = 3,
+    ignoreWhitespace: Bool = false
+  ) throws -> (
     OpaquePointer, OpaquePointer?
   ) {
     var tree: OpaquePointer?
@@ -223,6 +228,11 @@ nonisolated enum Libgit2Diff {
       | GIT_DIFF_SHOW_UNTRACKED_CONTENT.rawValue
       | GIT_DIFF_INCLUDE_TYPECHANGE.rawValue
       | GIT_DIFF_PATIENCE.rawValue
+    // Whitespace-insensitive streaming request (git drops whitespace-only hunks);
+    // the counts the `ChunkTreeBuilder` derives stay consistent with the dropped set.
+    if ignoreWhitespace {
+      opts.flags |= GIT_DIFF_IGNORE_WHITESPACE.rawValue
+    }
 
     var diff: OpaquePointer?
     returnCode = git_diff_tree_to_workdir_with_index(&diff, repo, tree, &opts)
@@ -254,7 +264,8 @@ nonisolated enum Libgit2Diff {
   private static func makeBaseDiff(
     repo: OpaquePointer,
     baseRef: String,
-    contextLines: UInt32 = 3
+    contextLines: UInt32 = 3,
+    ignoreWhitespace: Bool = false
   ) throws -> BaseDiffHandles {
     // 1. Resolve the base object: first successful revparse candidate wins.
     var resolved: OpaquePointer?
@@ -326,6 +337,9 @@ nonisolated enum Libgit2Diff {
     }
     opts.context_lines = contextLines
     opts.flags = GIT_DIFF_INCLUDE_TYPECHANGE.rawValue | GIT_DIFF_PATIENCE.rawValue
+    if ignoreWhitespace {
+      opts.flags |= GIT_DIFF_IGNORE_WHITESPACE.rawValue
+    }
 
     // 6. Diff merge-base tree ↔ HEAD tree.
     var diff: OpaquePointer?
@@ -734,4 +748,141 @@ nonisolated enum Libgit2Diff {
   private static let contextEofnlChar = CChar(UInt8(ascii: "="))
   private static let addEofnlChar = CChar(UInt8(ascii: ">"))
   private static let delEofnlChar = CChar(UInt8(ascii: "<"))
+}
+
+// MARK: - Streaming walk (Phase 9)
+
+extension Libgit2Diff {
+  /// `Caps` variant that removes the line cap for streaming (the whole point of
+  /// this phase): a formerly-line-capped file now materializes. `byteCap` stays
+  /// as the binary / huge-blob guard so a 2 MB minified line never hits the
+  /// CTLine cache.
+  nonisolated static func streamingCaps(_ base: Caps) -> Caps {
+    Caps(byteCap: base.byteCap, lineCap: .max, longLineCap: base.longLineCap)
+  }
+
+  /// The grouped inputs of one streaming walk (keeps `streamChangedFiles` within
+  /// the parameter budget; the closures stay out so they are non-escaping).
+  nonisolated struct WalkRequest: Sendable {
+    var source: DiffSource
+    var caps: Caps
+    var contextLines: UInt32
+    var generation: Int
+    var ignoreWhitespace: Bool
+
+    init(source: DiffSource, caps: Caps, contextLines: UInt32, generation: Int, ignoreWhitespace: Bool = false) {
+      self.source = source
+      self.caps = caps
+      self.contextLines = contextLines
+      self.generation = generation
+      self.ignoreWhitespace = ignoreWhitespace
+    }
+  }
+
+  /// Build the diff **once**, then materialize + emit each delta as a frozen
+  /// batch, IN DELTA ORDER. The whole walk is one synchronous span on the
+  /// caller's serial executor — no `OpaquePointer` crosses a suspension point
+  /// (preserves the confinement contract). `isCancelled` is polled at each file
+  /// boundary (cooperative `Task.cancel`); `emit` yields to the caller's
+  /// continuation (yielding does not suspend, so the C handle stays valid).
+  /// Reuses `makeDiff` / `makeBaseDiff` / `findSimilar` / `fileDiffResult` /
+  /// `makeFileChange` unchanged — the streaming path only adds blob decode +
+  /// counts + emit.
+  nonisolated static func streamChangedFiles(
+    at worktreeURL: URL,
+    _ request: WalkRequest,
+    isCancelled: () -> Bool,
+    emit: (DiffStreamEvent) -> Void
+  ) throws {
+    let source = request.source
+    let caps = request.caps
+    let contextLines = request.contextLines
+    let generation = request.generation
+    let ignoreWhitespace = request.ignoreWhitespace
+    let repo = try openRepository(at: worktreeURL)
+    defer { git_repository_free(repo) }
+
+    // Source-select the diff (same builders the batch path uses). Base diffs own
+    // two extra trees the caller must free — mirror the existing `defer` shape.
+    let diff: OpaquePointer
+    let cleanup: () -> Void
+    switch source {
+    case .workingTree:
+      let isUnborn = git_repository_head_unborn(repo) == 1
+      let (built, tree) = try makeDiff(
+        repo: repo, isUnborn: isUnborn, contextLines: contextLines, ignoreWhitespace: ignoreWhitespace)
+      diff = built
+      cleanup = {
+        git_diff_free(built)
+        if let tree { git_tree_free(tree) }
+      }
+    case .baseBranch(let ref):
+      if git_repository_head_unborn(repo) == 1 {  // nothing committed → empty
+        emit(.started(fileCount: 0, operation: repositoryOperation(repo), generation: generation))
+        emit(.finished(generation: generation))
+        return
+      }
+      let handles = try makeBaseDiff(
+        repo: repo, baseRef: ref, contextLines: contextLines, ignoreWhitespace: ignoreWhitespace)
+      diff = handles.diff
+      cleanup = {
+        git_diff_free(handles.diff)
+        git_tree_free(handles.newTree)
+        git_tree_free(handles.oldTree)
+      }
+    }
+    defer { cleanup() }
+    try findSimilar(diff)
+
+    let count = git_diff_num_deltas(diff)
+    emit(.started(fileCount: count, operation: repositoryOperation(repo), generation: generation))
+    let streamCaps = Self.streamingCaps(caps)
+    var idx = 0
+    while idx < count {
+      defer { idx += 1 }
+      if isCancelled() { return }  // cooperative cancel, file boundary
+      guard let deltaPtr = git_diff_get_delta(diff, idx) else { continue }
+      let delta = deltaPtr.pointee
+      let result = fileDiffResult(delta: delta, diff: diff, idx: idx, caps: streamCaps, wantHunks: true)
+      let file = makeFileChange(delta: delta, result: result)
+      emit(
+        .fileReady(
+          FileDiffBatch(
+            file: file,
+            hunks: result.hunks,
+            unifiedLineCount: result.hunks.reduce(0) { $0 + $1.lines.count },
+            splitLineCount: result.hunks.reduce(0) { $0 + max($1.oldCount, $1.newCount) },
+            oldBlobID: oidString(delta.old_file.id),
+            newBlobID: oidString(delta.new_file.id),
+            oldBlobUTF16: blobUTF16(repo: repo, oid: delta.old_file.id, caps: streamCaps),
+            newBlobUTF16: source.isWorkingTree ? nil : blobUTF16(repo: repo, oid: delta.new_file.id, caps: streamCaps),
+            generation: generation)))
+    }
+    emit(.finished(generation: generation))
+  }
+
+  /// Blob OID → hex content-identity, or `nil` for a zero OID (add / delete side).
+  private nonisolated static func oidString(_ oid: git_oid) -> String? {
+    var oid = oid
+    if git_oid_is_zero(&oid) == 1 { return nil }
+    guard let cString = git_oid_tostr_s(&oid) else { return nil }
+    return String(cString: cString)
+  }
+
+  /// Decode a blob to Sendable UTF-16 (value copy). `nil` for a zero OID, a
+  /// byte-capped blob (protects the CTLine cache), or a non-UTF-8 side.
+  private nonisolated static func blobUTF16(repo: OpaquePointer, oid: git_oid, caps: Caps) -> [UInt16]? {
+    var oid = oid
+    if git_oid_is_zero(&oid) == 1 { return nil }
+    var blob: OpaquePointer?
+    guard git_blob_lookup(&blob, repo, &oid) == 0, let blob else { return nil }
+    defer { git_blob_free(blob) }
+    let size = Int(git_blob_rawsize(blob))
+    if size == 0 { return [] }
+    if size > caps.byteCap { return nil }
+    guard let raw = git_blob_rawcontent(blob) else { return nil }
+    let bytes = UnsafeRawBufferPointer(start: raw, count: size)
+    guard let text = String(bytes: bytes, encoding: .utf8) else { return nil }  // non-UTF-8 → highlighter skips
+    return Array(text.utf16)
+  }
 }

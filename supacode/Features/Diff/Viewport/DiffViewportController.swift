@@ -423,4 +423,20 @@ final class DiffViewportController: NSObject {
   var totalUsedViewCount: Int {
     pools.values.reduce(0) { $0 + $1.usedCount }
   }
+
+  /// The bottom of the visible viewport in document space — the streaming
+  /// consumer's below-fold-vs-intersecting decision (`insertY > visibleMaxY +
+  /// overscan` ⇒ append fast path).
+  var visibleMaxY: CGFloat { visibleRect.maxY }
+
+  /// Below-fold append fast path (pierre `appendItemsInternal(…, false)` /
+  /// `tryAppendItems`): the tree already grew below the fold, so grow the document
+  /// frame and re-materialize the window WITHOUT capturing / restoring a scroll
+  /// anchor. The anchored top does not move because everything that changed is
+  /// off-screen; the scrollbar simply lengthens as files stream in.
+  func appendBelowFold() {
+    measurePass = 0
+    resizeDocument()
+    layoutVisibleChunks()
+  }
 }
