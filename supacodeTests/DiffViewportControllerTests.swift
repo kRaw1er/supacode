@@ -318,6 +318,163 @@ struct DiffViewportControllerTests {
     }
   }
 
+  // MARK: - B §15 — a comment widget anchors to (lineNumber, side); below in
+  //          unified, spanning both columns in split
+
+  @Test func widgetAnchorsToOwnerLineSide() {
+    for mode in [DiffViewMode.unified, .split] {
+      let controller = ViewportTestSupport.controller()
+      controller.apply(tree: ViewportTestSupport.contextLeaves(Array(1...10)), mode: mode, scrollPreserving: false)
+      let ownerBottom = controller.lineRect(line: 5, side: .new)?.maxY
+      let nextID = controller.lineLocation(line: 6, side: .new)?.chunkID
+      let nextBefore = nextID.flatMap { controller.frame(forChunk: $0)?.minY }
+
+      let anchorID = UUID()
+      let widgetID = controller.insertCommentWidget(
+        side: .new, startLine: 5, endLine: 5, anchorID: anchorID, estimatedHeight: 60)
+      #expect(widgetID != nil)
+
+      // Anchored BELOW the owner line: the widget's top == the owner line's bottom.
+      #expect(controller.frame(forChunk: widgetID!)?.minY == ownerBottom)
+      // Line 6 is pushed down by the widget; the owner line (5) is unaffected.
+      let nextAfter = nextID.flatMap { controller.frame(forChunk: $0)?.minY }
+      #expect(nextAfter == (nextBefore ?? 0) + 60)
+
+      // Spans BOTH columns: a widget is ONE full-width row in either mode (in split
+      // it crosses the mid divider covering the old AND new panes, not two rows).
+      #expect(controller.tree.widgetNode(for: .commentThread(anchorID: anchorID))?.summary.count(mode) == 1)
+      #expect(controller.frame(forChunk: widgetID!)?.width == controller.documentView.bounds.width)
+      let placed = controller.pools[.widget(.commentThread)]?.getView(forKey: widgetID!)
+      #expect(placed?.frame.minX == 0)
+      #expect(placed?.frame.width == controller.documentView.bounds.width)
+    }
+  }
+
+  // MARK: - B §15 — both-sides-same-line: 1 element / 2 slots unified vs separate
+  //          cells in split
+
+  @Test func unifiedCollapseSplitSeparateAnnotation() {
+    // A context line carrying BOTH an old and a new number (old == new == 4) — the
+    // "both-sides-same-line" case a comment can anchor to from either side.
+    let controller = ViewportTestSupport.controller()
+    let rowYForLine4 = CGFloat(4 - 1) * 20 + 10
+
+    // UNIFIED: one rendered row holds both number slots. The old and new gutter
+    // bands are adjacent within the SAME content row (one element, two slots): both
+    // hits resolve to line 4 on the SAME chunk.
+    controller.apply(tree: ViewportTestSupport.contextLeaves(Array(1...8)), mode: .unified, scrollPreserving: false)
+    let uWidth = controller.documentView.bounds.width
+    let uBands = DiffHitTest.bands(mode: .unified, width: uWidth, gutterW: controller.gutterWidth)
+    let uOld = uBands.first { $0.column == .gutter(.old) }!.range
+    let uNew = uBands.first { $0.column == .gutter(.new) }!.range
+    let uOldHit = controller.hitTest(CGPoint(x: uOld.lowerBound + 1, y: rowYForLine4))
+    let uNewHit = controller.hitTest(CGPoint(x: uNew.lowerBound + 1, y: rowYForLine4))
+    #expect(uOldHit?.lineNumber == 4)  // old slot
+    #expect(uNewHit?.lineNumber == 4)  // new slot
+    #expect(uOldHit?.chunkID == uNewHit?.chunkID)  // one element (same row/leaf)
+
+    // SPLIT: the same line is projected into two SEPARATE panes divided at mid — the
+    // old-side gutter lives entirely in the left pane, the new-side gutter entirely
+    // in the right (separate cells, one slot each side).
+    controller.apply(tree: ViewportTestSupport.contextLeaves(Array(1...8)), mode: .split, scrollPreserving: false)
+    let sWidth = controller.documentView.bounds.width
+    let mid = (sWidth / 2).rounded()
+    let sBands = DiffHitTest.bands(mode: .split, width: sWidth, gutterW: controller.gutterWidth)
+    let sOld = sBands.first { $0.column == .gutter(.old) }!.range
+    let sNew = sBands.first { $0.column == .gutter(.new) }!.range
+    #expect(sOld.upperBound <= mid)  // old number cell entirely in the left pane
+    #expect(sNew.lowerBound >= mid)  // new number cell entirely in the right pane
+    #expect(controller.hitTest(CGPoint(x: sOld.lowerBound + 1, y: rowYForLine4))?.side == .old)
+    #expect(controller.hitTest(CGPoint(x: sNew.lowerBound + 1, y: rowYForLine4))?.side == .new)
+  }
+
+  // MARK: - B §15/§17, A §11/§12 — the file-scoped widget renders once, above the
+  //          leading separator, only in the top chunk (no dup)
+
+  @Test func fileLevelWidgetAboveFirstHunk() {
+    let hunk1 = DiffFixture.hunk(
+      [DiffFixture.line(.context, old: 1, new: 1, "a"), DiffFixture.line(.addition, new: 2, "b")],
+      oldStart: 1, newStart: 1)
+    let hunk2 = DiffFixture.hunk(
+      [DiffFixture.line(.context, old: 40, new: 41, "c"), DiffFixture.line(.addition, new: 42, "d")],
+      oldStart: 40, newStart: 41)
+    let chunks = ChunkTreeBuilder.classify(file: DiffFixture.file(), hunks: [hunk1, hunk2], expanded: [])
+
+    // The file-scoped widget (file header) is the FIRST chunk, above the leading
+    // separator (the first hunk-header widget).
+    let fileHeaderIndex = chunks.firstIndex { $0.widget?.reuseKind == .fileHeader }
+    let firstSeparator = chunks.firstIndex { $0.widget?.reuseKind == .hunkHeader }
+    #expect(fileHeaderIndex == 0)
+    #expect(firstSeparator != nil)
+    #expect(fileHeaderIndex! < firstSeparator!)  // above the leading separator
+    // Only in the top chunk — exactly one file-scoped widget across the whole file
+    // (no per-hunk / per-window duplication), one separator per hunk.
+    #expect(chunks.filter { $0.widget?.reuseKind == .fileHeader }.count == 1)
+    #expect(chunks.filter { $0.widget?.reuseKind == .hunkHeader }.count == 2)
+  }
+
+  // MARK: - B §15, A §7 — the owner line re-indexed by an expand ⇒ the widget follows
+
+  @Test func widgetFollowsExpandedLineReIndex() {
+    let tree = ChunkTree(metrics: .production)
+    var after: ChunkID?
+    var ownerID: ChunkID!
+    for line in 10...20 {
+      let id = tree.insert(contextLeaf(line), after: after)
+      if line == 15 { ownerID = id }
+      after = id
+    }
+    // A comment widget anchored immediately below the owner line (15).
+    let anchorID = UUID()
+    let widget = Widget(
+      key: .commentThread(anchorID: anchorID), estimatedHeight: 50, payload: .commentThread(anchorID: anchorID))
+    let widgetID = tree.insert(.widget(widget), after: ownerID)
+
+    let ownerRowBefore = tree.rowIndex(for: (chunk: ownerID, localRow: 0), mode: .unified)!
+    #expect(tree.seek(index: ownerRowBefore + 1, mode: .unified)?.id == widgetID)  // widget right below owner
+
+    // "Expand" nine hidden context lines ABOVE the owner (prepend 1…9) — the owner
+    // line's rendered-row index shifts down by nine.
+    for line in stride(from: 9, through: 1, by: -1) {
+      _ = tree.insert(contextLeaf(line), after: nil)  // nil prepends as the new first row
+    }
+    let ownerRowAfter = tree.rowIndex(for: (chunk: ownerID, localRow: 0), mode: .unified)!
+    #expect(ownerRowAfter == ownerRowBefore + 9)  // re-indexed by the expand
+    // The widget FOLLOWS its owner by identity (in-order position), not a fixed
+    // absolute row index — still the owner line's immediate successor.
+    #expect(tree.seek(index: ownerRowAfter + 1, mode: .unified)?.id == widgetID)
+  }
+
+  // MARK: - A §5/§7 — an off-screen file-level annotation is not reserved until measured
+
+  @Test func fileLevelAnnotationNotReservedUntilMeasured() {
+    let controller = ViewportTestSupport.controller()
+    let tree = ChunkTree(metrics: .production)
+    let lineHeight = ChunkLayoutMetrics.production.lineHeight
+    // A file-level annotation (comment widget) with a ZERO estimate above a large
+    // source region: pierre reserves NO height until it is measured (offscreen
+    // scrollbar correctness). CM6's "estimate required" is the per-widget default;
+    // an unknown-height file-level annotation starts at 0 and reserves on measure.
+    let anchorID = UUID()
+    let widgetID = tree.insert(WidgetTreeFixture.commentWidget(id: anchorID, estimatedHeight: 0), after: nil)
+    var after: ChunkID? = widgetID
+    for line in 1...400 { after = tree.insert(WidgetTreeFixture.contextLeaf(line), after: after) }
+    controller.apply(tree: tree, mode: .unified, scrollPreserving: false)
+
+    // Not reserved: total height is exactly the 400 source rows and no measured
+    // height is recorded yet (`getLinePosition`-undefined analog).
+    #expect(tree.totalHeight(.unified) == 400 * lineHeight)
+    #expect(controller.measuredHeight(forWidget: .commentThread(anchorID: anchorID)) == nil)
+
+    // Once measured (the LayoutCoalescer write-back), it reserves its height and the
+    // scrollbar (document height) grows to match.
+    controller.setMeasuredHeight(
+      .commentThread(anchorID: anchorID), width: controller.documentView.bounds.width, height: 120)
+    controller.restoreScrollAnchor(controller.captureScrollAnchor())
+    #expect(tree.totalHeight(.unified) == 400 * lineHeight + 120)
+    #expect(abs(controller.documentView.frame.height - tree.totalHeight(.unified)) < 0.5)
+  }
+
   // MARK: - Fixtures & oracles
 
   private func contextLeaf(_ line: Int) -> Chunk {

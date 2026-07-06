@@ -42,6 +42,10 @@ final class CommentThreadWidget: DiffWidget {
   /// `.editing` when the reducer has an open composer for this anchor.
   var isEditing: Bool { composerStore != nil }
 
+  /// A live editor is an app-owned subview, so a host mounting one stays bound to
+  /// this chunk until drained (B §3) — the harness never hands it to another chunk.
+  var occupiesHostExclusively: Bool { isEditing }
+
   var estimatedHeight: CGFloat { ChunkLayoutMetrics.production.commentThreadHeight }
 
   /// The expanded-content height cap; beyond it the thread scrolls internally.

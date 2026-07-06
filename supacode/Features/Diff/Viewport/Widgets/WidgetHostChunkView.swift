@@ -16,6 +16,9 @@ final class WidgetHostChunkView: NSView, DiffViewportRecyclable {
   /// The identity currently mounted — proves a recycled host resolves the RIGHT
   /// model after a pool reuse (keyed by `WidgetKey`, not `ChunkID`).
   private(set) var mountedKey: WidgetKey?
+  /// Whether the mounted widget owns an app-managed subview (a live comment
+  /// editor) — while set, this host refuses recycle to another chunk (B §3).
+  private(set) var isOccupied = false
   private var coalescer: LayoutCoalescer?
 
   override init(frame frameRect: NSRect) {
@@ -38,6 +41,7 @@ final class WidgetHostChunkView: NSView, DiffViewportRecyclable {
     addSubview(host)
     hosted = host
     mountedKey = key
+    isOccupied = widget.occupiesHostExclusively
     frame.size.height = widget.estimatedHeight
   }
 
@@ -45,10 +49,14 @@ final class WidgetHostChunkView: NSView, DiffViewportRecyclable {
   /// the widget accepted the identity swap; `false` ⇒ the harness must
   /// `prepareForReuse` + `mount` a fresh host.
   func reuse(_ widget: some DiffWidget, key: WidgetKey, width: CGFloat) -> Bool {
+    // An occupied host (a live comment editor) is not eligible for recycle until
+    // it is drained — never handed to another chunk (B §3).
+    guard !isOccupied else { return false }
     guard let hosted, mountedKey?.reuseKind == key.reuseKind else { return false }
     guard widget.update(hostView: hosted, width: width) else { return false }
     hosted.frame.size.width = width
     mountedKey = key
+    isOccupied = widget.occupiesHostExclusively
     return true
   }
 
@@ -59,6 +67,7 @@ final class WidgetHostChunkView: NSView, DiffViewportRecyclable {
     hosted?.removeFromSuperview()
     hosted = nil
     mountedKey = nil
+    isOccupied = false
     coalescer = nil
   }
 }

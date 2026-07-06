@@ -77,4 +77,55 @@ struct DiffWidgetHostTests {
     #expect(abs((before - controller.visibleRect.minY) - 160) < 1.5)
     #expect(tree.widgetNode(for: .commentThread(anchorID: id))?.summary.height(.unified) == 40)  // reaggregated
   }
+
+  // MARK: - B §3/§20 — an occupied (.editing) host is not handed to another chunk;
+  //          the autoscroller's display link stops on unmount
+
+  @Test func occupiedWidgetHostNotRecycled() {
+    let host = FakeWidgetLayoutHost()
+    let coalescer = LayoutCoalescer(host: host)
+
+    // Mount an EDITING comment composer — the host now owns an app-managed subview.
+    let idA = UUID()
+    let composerStore = Store(initialState: CommentComposer.State(draft: comment(idA), isEditing: true)) {
+      CommentComposer()
+    }
+    let editing = CommentThreadWidget(
+      key: .commentThread(anchorID: idA),
+      model: CommentThreadModel(anchorID: idA, comments: [comment(idA)]),
+      coalescer: coalescer,
+      composerStore: composerStore
+    )
+    let hostView = WidgetHostChunkView()
+    hostView.mount(editing, key: .commentThread(anchorID: idA), width: 400, coalescer: coalescer)
+    #expect(hostView.isOccupied)
+
+    // A DIFFERENT chunk (a display thread) asks to reuse the occupied host — REFUSED
+    // (B §3: not eligible for recycle until drained), even though a display thread
+    // would otherwise accept an identity swap. The host stays bound to A.
+    let idB = UUID()
+    let other = CommentThreadWidget(
+      key: .commentThread(anchorID: idB),
+      model: CommentThreadModel(anchorID: idB, comments: [comment(idB)]),
+      coalescer: coalescer
+    )
+    #expect(hostView.reuse(other, key: .commentThread(anchorID: idB), width: 400) == false)
+    #expect(hostView.mountedKey == .commentThread(anchorID: idA))  // NOT handed off
+
+    // Only after the host is drained can it host another chunk.
+    hostView.prepareForReuse()
+    #expect(hostView.mountedKey == nil)
+    #expect(hostView.isOccupied == false)
+    hostView.mount(other, key: .commentThread(anchorID: idB), width: 400, coalescer: coalescer)
+    #expect(hostView.mountedKey == .commentThread(anchorID: idB))
+    #expect(hostView.isOccupied == false)  // a display thread does not occupy the host
+
+    // The edge autoscroller's display link STOPS on unmount (B §20 lifecycle).
+    let autoscroller = EdgeAutoscroller(view: NSView()) { _ in }
+    #expect(autoscroller.isActive)
+    autoscroller.stop()
+    #expect(autoscroller.isActive == false)  // link invalidated on unmount
+    autoscroller.stop()  // idempotent
+    #expect(autoscroller.isActive == false)
+  }
 }

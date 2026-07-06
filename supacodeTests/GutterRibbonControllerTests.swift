@@ -168,4 +168,55 @@ struct GutterRibbonControllerTests {
     #expect(current.lineNumber > 3)  // the end line advanced as the viewport scrolled
     #expect(controller.visibleRect.minY > 0)  // the viewport actually scrolled down
   }
+
+  // MARK: - B §2 — hover cross-links the content row AND its gutter number
+
+  @Test func hoverHighlightsBothColumns() {
+    let (controller, gutter) = makeSetup()
+    gutter.updateHover(atDocument: CGPoint(x: oldNumX(controller), y: rowY(4)))
+    guard let highlight = gutter.hoverHighlight else {
+      Issue.record("expected a hover cross-highlight over the number column")
+      return
+    }
+    #expect(highlight.line == SelectionPoint(lineNumber: 4, side: .old))
+    // The content-row half spans the FULL row width — both columns are cross-lit
+    // (pierre `lineHoverHighlight: 'both'`), and matches the owner line's rect.
+    #expect(highlight.contentRow == controller.lineRect(line: 4, side: .old))
+    #expect(highlight.contentRow.minX == 0)
+    #expect(highlight.contentRow.width == controller.documentView.bounds.width)
+    // The gutter-number half is the hovered side's number cell only (a sub-band of
+    // the row), so the cross-link lights BOTH the row and its number, not just one.
+    #expect(highlight.gutterNumber.minX == DiffHitTest.changeBarWidth)  // old number band starts after the bar
+    #expect(highlight.gutterNumber.width == controller.gutterWidth)
+    #expect(highlight.gutterNumber.height == highlight.contentRow.height)
+    #expect(highlight.gutterNumber.width < highlight.contentRow.width)  // number cell ⊊ content row
+
+    // Moving off any number column clears the cross-highlight entirely.
+    gutter.updateHover(atDocument: CGPoint(x: contentX(controller), y: rowY(4)))
+    #expect(gutter.hoverHighlight == nil)
+  }
+
+  // MARK: - B §2 — the overlay re-reads the live controller each mouseMoved
+
+  @Test func optionsReapplyToLiveRows() {
+    let (controller, gutter) = makeSetup(lines: 20)
+    gutter.updateHover(atDocument: CGPoint(x: oldNumX(controller), y: rowY(5)))
+    #expect(gutter.hoverHighlight?.line == SelectionPoint(lineNumber: 5, side: .old))
+
+    // Re-apply a DIFFERENT tree to the SAME controller + overlay (rows already on
+    // screen). The gutter reads the controller live each mouseMoved — no cached
+    // per-row closure, no re-creation — so hover now resolves against the new tree.
+    controller.apply(
+      tree: ViewportTestSupport.contextLeaves(Array(100...119)), mode: .unified, scrollPreserving: false)
+    gutter.updateHover(atDocument: CGPoint(x: oldNumX(controller), y: rowY(5)))
+    #expect(gutter.hoverHighlight?.line == SelectionPoint(lineNumber: 104, side: .old))  // row 5 → line 104 now
+
+    // A fresh selection also reflects the live tree (config, not a stale snapshot).
+    #expect(gutter.beginSelection(atDocument: CGPoint(x: oldNumX(controller), y: rowY(1))))
+    #expect(
+      gutter.session
+        == .gutterSelecting(
+          anchor: SelectionPoint(lineNumber: 100, side: .old),
+          current: SelectionPoint(lineNumber: 100, side: .old)))
+  }
 }

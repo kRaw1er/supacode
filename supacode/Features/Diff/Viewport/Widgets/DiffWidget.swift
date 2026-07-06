@@ -35,4 +35,15 @@ protocol DiffWidget: AnyObject {
   /// `NSHostingView` `rootView` swap over a live `TextEditor` loses the cursor /
   /// selection, so a comment editor returns `false` while `.editing`.
   func update(hostView: NSView, width: CGFloat) -> Bool
+
+  /// Whether the mounted host owns an app-managed, non-swappable subview (a live
+  /// comment editor). While `true`, a recycled host still holding it must NOT be
+  /// handed to another chunk until drained — pierre B §3 "a shell with outstanding
+  /// externally-owned slot children is not eligible for recycle until drained".
+  /// Default `false`; a `.editing` comment thread returns `true`.
+  var occupiesHostExclusively: Bool { get }
+}
+
+extension DiffWidget {
+  var occupiesHostExclusively: Bool { false }
 }

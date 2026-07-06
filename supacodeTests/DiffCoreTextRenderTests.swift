@@ -124,6 +124,57 @@ struct DiffCoreTextRenderTests {
     #expect(plain.fills.isEmpty)
   }
 
+  // MARK: - B §3 — a palette swap invalidates recycled views (no stale glyph cache)
+
+  @Test func paletteSwapInvalidatesRecycledViews() {
+    let cache = CTLineCache()
+    let segment = LineSegment(
+      hunkID: HunkID(fileID: "f", index: 0),
+      lines: [
+        DiffLine(
+          origin: .context, oldLineNumber: 1, newLineNumber: 1, content: "let recycled = true", noNewlineAtEof: false)
+      ],
+      window: 0..<1,
+      classification: .context
+    )
+    func recycleContext(styleGeneration: Int) -> LineRowRenderContext {
+      LineRowRenderContext(
+        metrics: CoreTextHarness.metrics,
+        rowHeight: CoreTextHarness.lineHeight,
+        mode: .unified,
+        width: 800,
+        cache: cache,  // the shared glyph cache the recycle pool reads through
+        palette: .shared,
+        styleGeneration: styleGeneration
+      )
+    }
+
+    let gen0 = DiffPalette.shared.styleGeneration
+    let view = LineRowView()  // the recyclable shell reused across palettes
+    view.configure(segment: segment, chunkID: ChunkID(raw: 1), context: recycleContext(styleGeneration: gen0))
+    #expect(cache.count == 1)  // typeset one wrapped line under the current generation
+
+    // A palette / theme swap: bump the generation and drop the shared glyph cache
+    // — exactly `DiffViewportController.styleDidChange`.
+    DiffPalette.shared.styleDidChange()
+    cache.invalidateStyle()
+    let gen1 = DiffPalette.shared.styleGeneration
+    #expect(gen1 == gen0 + 1)
+    #expect(cache.count == 0)  // the pre-swap glyphs are gone — no stale cache survives
+
+    // Recycle the SAME shell under the new generation → it re-typesets fresh (a
+    // cache miss, one new entry), never a stale hit; the row shows re-rendered text.
+    view.configure(segment: segment, chunkID: ChunkID(raw: 1), context: recycleContext(styleGeneration: gen1))
+    #expect(cache.count == 1)
+    #expect(view.firstRowText == "let recycled = true")
+
+    // The generation is part of the cache key, so a pre-swap render can never serve
+    // post-swap glyphs: re-rendering at the OLD generation mints a DISTINCT entry.
+    let stale = LineRowView()
+    stale.configure(segment: segment, chunkID: ChunkID(raw: 2), context: recycleContext(styleGeneration: gen0))
+    #expect(cache.count == 2)  // gen0 and gen1 occupy separate cache namespaces
+  }
+
   /// Run a row view's `draw(_:)` into an offscreen bitmap context (no window).
   private func drawHeadless(_ view: LineRowView, height: CGFloat) {
     let bitmap = CoreTextHarness.context(width: 800, height: height, scale: 2)

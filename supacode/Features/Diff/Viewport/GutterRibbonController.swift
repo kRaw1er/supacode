@@ -26,6 +26,18 @@ nonisolated struct SelectionCommit: Equatable {
   let contextBefore: String
 }
 
+/// The cross-linked hover regions for the pierre `lineHoverHighlight: 'both'`
+/// behavior (B §2): a hovered gutter number highlights BOTH its own number cell
+/// AND the paired content row. Document-space rects.
+nonisolated struct HoverHighlight: Equatable {
+  /// The hovered gutter line.
+  let line: SelectionPoint
+  /// The paired content row — full width, so it spans BOTH columns in split.
+  let contentRow: NSRect
+  /// The hovered side's line-number gutter cell.
+  let gutterNumber: NSRect
+}
+
 /// A transparent overlay over the diff viewport that owns the comment-gutter
 /// interaction only. It reveals a "+" glyph on the hovered line's gutter and
 /// supports a click (single line) or a drag (inclusive range), reporting the
@@ -144,6 +156,36 @@ final class GutterRibbonController: NSView {
     setNeedsDisplay(bounds)
   }
 
+  /// The cross-linked hover highlight (pierre `lineHoverHighlight: 'both'`, B §2):
+  /// a hovered gutter number highlights BOTH its own number cell AND the paired
+  /// content row across every column. `nil` when nothing is hovered. Derived LIVE
+  /// from the controller each read, so it re-arms on already-rendered rows and a
+  /// re-applied tree resolves against the current geometry (B §2), never a cached
+  /// per-row value. Exposed so a headless test asserts the cross-link (there is no
+  /// window to sample pixels).
+  var hoverHighlight: HoverHighlight? {
+    guard let hover, let controller,
+      let row = controller.lineRect(line: hover.lineNumber, side: hover.side)
+    else { return nil }
+    return HoverHighlight(
+      line: hover,
+      contentRow: row,
+      gutterNumber: Self.gutterNumberRect(
+        for: hover, row: row, mode: controller.mode, gutterWidth: controller.gutterWidth)
+    )
+  }
+
+  /// The hovered side's line-number gutter cell (document space), mode-correct via
+  /// `DiffHitTest.bands` — the "gutter number" half of the pierre `both` cross-link.
+  private static func gutterNumberRect(
+    for point: SelectionPoint, row: NSRect, mode: DiffViewMode, gutterWidth: CGFloat
+  ) -> NSRect {
+    let bands = DiffHitTest.bands(mode: mode, width: row.width, gutterW: gutterWidth)
+    guard let band = bands.first(where: { $0.column == .gutter(point.side) }) else { return .zero }
+    return NSRect(
+      x: band.range.lowerBound, y: row.minY, width: band.range.upperBound - band.range.lowerBound, height: row.height)
+  }
+
   // MARK: - Edge autoscroll (OUR ADDITION — C8)
 
   /// Update the autoscroll intent from the drag pointer's LOCAL y. Past the top
@@ -257,9 +299,23 @@ final class GutterRibbonController: NSView {
     guard let controller else { return }
     if case .gutterSelecting(let anchor, let current) = session {
       drawDragBand(anchor: anchor, current: current, controller: controller)
-    } else if let hover {
-      drawPlusGlyph(for: hover, controller: controller)
+    } else if let highlight = hoverHighlight {
+      drawHoverHighlight(highlight)
+      drawPlusGlyph(for: highlight.line, controller: controller)
     }
+  }
+
+  /// Paint the pierre `both` cross-link (B §2): a subtle full-width wash on the
+  /// hovered content row (both columns) plus a stronger highlight on the hovered
+  /// side's gutter number cell.
+  private func drawHoverHighlight(_ highlight: HoverHighlight) {
+    let rowLocal = localRect(fromDocument: highlight.contentRow)
+    guard !rowLocal.isEmpty else { return }
+    NSColor.controlAccentColor.withAlphaComponent(0.06).setFill()
+    rowLocal.fill()
+    let numberLocal = localRect(fromDocument: highlight.gutterNumber)
+    NSColor.controlAccentColor.withAlphaComponent(0.16).setFill()
+    numberLocal.fill()
   }
 
   private func drawPlusGlyph(for target: SelectionPoint, controller: DiffViewportController) {
@@ -304,6 +360,10 @@ final class EdgeAutoscroller {
   /// Peak scroll speed (px/s).
   static let vmax: CGFloat = 900
 
+  /// Whether the display link is live. Flips `false` on `stop()` so a test can
+  /// assert the link stopped on unmount (B §20).
+  private(set) var isActive = false
+
   private var link: CADisplayLink?
   private let onFrame: (_ deltaTime: CFTimeInterval) -> Void
 
@@ -312,6 +372,7 @@ final class EdgeAutoscroller {
     let link = view.displayLink(target: self, selector: #selector(tick))
     link.add(to: .main, forMode: .common)
     self.link = link
+    isActive = true
   }
 
   deinit { link?.invalidate() }
@@ -328,6 +389,7 @@ final class EdgeAutoscroller {
   func stop() {
     link?.invalidate()
     link = nil
+    isActive = false
   }
 
   @objc private func tick(_ link: CADisplayLink) {
