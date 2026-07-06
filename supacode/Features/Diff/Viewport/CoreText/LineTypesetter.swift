@@ -28,11 +28,15 @@ enum LineTypesetter {
     return style
   }
 
-  /// Plain foreground pass. Phase 4 / 5 layer syntax fg + word-diff bg onto the
-  /// SAME string over UTF-16 ranges. Ligatures OFF (`.ligature = 0`) ⇒ offset↔x
-  /// stays exact (brainstorm §Round-3).
-  static func attributed(_ content: NSString, font: NSFont, style: NSParagraphStyle) -> NSAttributedString {
-    NSAttributedString(
+  /// Foreground pass. `syntax` layers per-token syntax colors (Phase 4) onto the
+  /// SAME string over line-relative UTF-16 ranges, resolved through `HighlightTheme`;
+  /// word-diff bg (Phase 5) is a separate hand-filled rect since `CTLineDraw` ignores
+  /// background. Ligatures OFF (`.ligature = 0`) ⇒ offset↔x stays exact (brainstorm
+  /// §Round-3). Ranges are clamped to the string so a stale run can never crash.
+  static func attributed(
+    _ content: NSString, font: NSFont, style: NSParagraphStyle, syntax: [StyleRun] = []
+  ) -> NSAttributedString {
+    let attributed = NSMutableAttributedString(
       string: content as String,
       attributes: [
         .font: font,
@@ -41,6 +45,17 @@ enum LineTypesetter {
         .ligature: 0,
       ]
     )
+    guard !syntax.isEmpty else { return attributed }
+    let length = attributed.length
+    for run in syntax {
+      let lower = max(0, min(run.range.lowerBound, length))
+      let upper = max(lower, min(run.range.upperBound, length))
+      guard upper > lower else { continue }
+      attributed.addAttribute(
+        .foregroundColor, value: HighlightTheme.color(for: run.capture),
+        range: NSRange(location: lower, length: upper - lower))
+    }
+    return attributed
   }
 
   /// Soft-wrap at content-column `width`. `CTTypesetterSuggestLineBreak` returns a

@@ -46,10 +46,18 @@ final class CTLineCache {
     )
   }
 
+  /// Instrumentation (mirrors `ChunkTree.diagnostics`): counts cache MISSES, i.e.
+  /// actual CoreText line-typesets. A scroll of already-materialized content must
+  /// leave this flat, and an initial layout must grow it by ~O(visible window),
+  /// NOT O(segment) — the load-bearing "re-layout on scroll is O(viewport), not
+  /// O(file)" perf assertion keys off its per-frame delta.
+  private(set) var buildCount = 0
+
   /// Cache-through: return the hit (touching it), else `build()` and insert with
   /// its approximate backing-store cost, evicting LRU entries past either bound.
   func wrapped(_ key: Key, build: () -> LineTypesetter.Wrapped) -> LineTypesetter.Wrapped {
     if let hit = lru.value(forKey: key) { return hit }
+    buildCount += 1
     let built = build()
     lru.insert(built, forKey: key, cost: Self.estimateBytes(built))
     return built

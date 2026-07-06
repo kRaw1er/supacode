@@ -31,6 +31,31 @@ final class DiffViewportController: NSObject {
   /// content identity, not position). Dropped wholesale on a style flip.
   let ctLineCache = CTLineCache()
 
+  /// Perf instrumentation (parallel-safe, per controller — mirrors
+  /// `ChunkTree.diagnostics` / `CTLineCache.buildCount`): total line-rows pushed
+  /// through `LineRowView.configure` across all layout passes. A pure scroll of
+  /// already-materialized chunks must not grow this once the configure early-out
+  /// lands; it is the counter behind the "no O(segment) re-project per frame" test.
+  private(set) var lineRowsConfigured = 0
+
+  /// Per-line syntax runs (Phase-4 seam), pushed in from the reducer's
+  /// `DiffDocument.old/newStyleRuns`. `setSyntax` re-typesets the visible window so a
+  /// windowed highlight arrival paints WITHOUT a tree rebuild; `syntaxVersion` folds
+  /// into the render context so the configure early-out never skips a colour change.
+  private(set) var oldStyleRuns: [Int: [StyleRun]] = [:]
+  private(set) var newStyleRuns: [Int: [StyleRun]] = [:]
+  private(set) var syntaxVersion = 0
+
+  /// Adopt freshly-resolved syntax runs and repaint the visible window. Content is
+  /// untouched (no `apply`, no tree rebuild) — only the materialized rows re-typeset,
+  /// and only the ones whose runs actually changed miss the `CTLineCache`.
+  func setSyntax(old: [Int: [StyleRun]], new: [Int: [StyleRun]]) {
+    oldStyleRuns = old
+    newStyleRuns = new
+    syntaxVersion &+= 1
+    layoutVisibleChunks()
+  }
+
   /// Resolves a `.widget` leaf's scalar payload into the concrete `DiffWidget`
   /// model the Phase-6 harness hosts. The seam (`DiffViewerRepresentable`) injects
   /// a context-rich resolver (`FileChange` / comments / callbacks); the default
@@ -230,20 +255,26 @@ final class DiffViewportController: NSObject {
   private func configure(_ view: NSView, for chunk: Chunk, id: ChunkID, width: CGFloat) {
     switch chunk {
     case .lineSegment(let segment):
-      (view as? LineRowView)?.configure(
-        segment: segment,
-        chunkID: id,
-        context: LineRowRenderContext(
-          metrics: metrics,
-          rowHeight: tree.metrics.lineHeight,
-          mode: mode,
-          width: width,
-          cache: ctLineCache,
-          palette: .shared,
-          styleGeneration: DiffPalette.shared.styleGeneration,
-          wordDiffEnabled: wordDiffEnabled
+      if let lineView = view as? LineRowView {
+        let reprojected = lineView.configure(
+          segment: segment,
+          chunkID: id,
+          context: LineRowRenderContext(
+            metrics: metrics,
+            rowHeight: tree.metrics.lineHeight,
+            mode: mode,
+            width: width,
+            cache: ctLineCache,
+            palette: .shared,
+            styleGeneration: DiffPalette.shared.styleGeneration,
+            wordDiffEnabled: wordDiffEnabled,
+            syntaxVersion: syntaxVersion,
+            oldStyleRuns: oldStyleRuns,
+            newStyleRuns: newStyleRuns
+          )
         )
-      )
+        if reprojected { lineRowsConfigured += lineView.renderedRowCount }
+      }
     case .widget(let widget):
       configureWidget(view, widget: widget, width: width)
     }

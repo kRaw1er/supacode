@@ -29,6 +29,13 @@ struct LineRowRenderContext {
   /// `CTLineDraw` ignores background, a word-diff arrival recomposites + redraws the
   /// row's rects but must NOT re-typeset the glyphs (⚠️ Deepening note 4).
   var wordDiffVersion: Int = 0
+  /// Resolved syntax-highlight runs per SOURCE line, keyed by 1-based line number and
+  /// split by blob side. Applied as foreground `NSColor` (via `HighlightTheme`) over
+  /// each run's line-relative UTF-16 range when the row is typeset (Phase-4 seam:
+  /// `DiffDocument.old/newStyleRuns` → here → `CTLine`). Empty ⇒ plain foreground
+  /// (unbundled grammar / over-cap file / not-yet-highlighted range).
+  var oldStyleRuns: [Int: [StyleRun]] = [:]
+  var newStyleRuns: [Int: [StyleRun]] = [:]
 }
 
 /// Renders one `.line` **chunk** (a dense leaf) as real wrapped code via CoreText
@@ -77,8 +84,27 @@ final class LineRowView: NSView, DiffViewportRecyclable {
   private var context = LineRowView.defaultContext()
   private var totalHeight: CGFloat = 0
 
+  /// Rendered-row count of the currently configured segment (O(1)). The viewport
+  /// accumulates this per layout as its parallel-safe "rows (re)configured this
+  /// frame" perf counter — a pure scroll of already-materialized chunks must not
+  /// grow it once the configure early-out lands.
+  var renderedRowCount: Int { rows.count }
+
   /// The chunk currently configured onto this view — recycle diagnostics only.
   private(set) var configuredChunkID: ChunkID?
+
+  /// Everything about the current configuration that, if unchanged, means a re-place
+  /// is a pure scroll and no re-project / re-typeset is needed. Any field that alters
+  /// the typeset output (width→wrap, mode, syntax runs, appearance, word-diff) is here.
+  private struct ConfigKey: Equatable {
+    var chunkID: ChunkID
+    var width: CGFloat
+    var mode: DiffViewMode
+    var syntaxVersion: Int
+    var styleGeneration: Int
+    var wordDiffEnabled: Bool
+  }
+  private var configuredKey: ConfigKey?
 
   override var isFlipped: Bool { true }
   override var wantsDefaultClipping: Bool { true }
@@ -102,6 +128,11 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     guard let first = rows.first else { return nil }
     return (first.content ?? first.oldContent ?? first.newContent ?? first.markerText) as String?
   }
+
+  /// Test probe: the wrapped `CTLine`s of the first rendered row's unified content
+  /// column (nil for a marker / split-only row). Lets a headless render test assert
+  /// the syntax foreground actually baked into the CoreText runs the viewport draws.
+  var firstRowCTLines: [CTLine]? { rows.first?.wrapped?.ctLines }
 
   /// The measured height of each rendered row (each an integer multiple of the
   /// tree's row height). The viewport's C7 measure guard writes any per-row delta
@@ -136,15 +167,29 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     )
   }
 
-  /// The rich entry the viewport uses. Typesets every rendered row up front so the
-  /// measure guard has heights before any draw.
-  func configure(segment: LineSegment, chunkID: ChunkID, context: LineRowRenderContext) {
+  /// The rich entry the viewport uses. Re-projects + typesets the leaf's rendered
+  /// rows only when the configuration actually changed; a pure scroll that re-places
+  /// the SAME leaf at the same width / mode / syntax / appearance early-outs (the
+  /// line-segment analog of the widget host's `mountedKey == key` guard). Returns
+  /// `true` iff it did the re-project work, so the viewport's perf counter only
+  /// counts real re-typesetting, not free scroll re-placements.
+  @discardableResult
+  func configure(segment: LineSegment, chunkID: ChunkID, context: LineRowRenderContext) -> Bool {
+    let key = ConfigKey(
+      chunkID: chunkID, width: context.width, mode: context.mode, syntaxVersion: context.syntaxVersion,
+      styleGeneration: context.styleGeneration, wordDiffEnabled: context.wordDiffEnabled)
+    if configuredKey == key, !rows.isEmpty {
+      self.context = context  // keep the fresh palette / word-diff generation for redraw
+      return false
+    }
     self.context = context
     self.configuredChunkID = chunkID
+    self.configuredKey = key
     self.rows = Self.project(segment: segment, mode: context.mode, wordDiffEnabled: context.wordDiffEnabled)
     typesetRows()
     isHidden = false
     needsDisplay = true
+    return true
   }
 
   /// Unmount hook — clears stale content so the next borrower of this recycled
@@ -152,6 +197,7 @@ final class LineRowView: NSView, DiffViewportRecyclable {
   override func prepareForReuse() {
     rows = []
     configuredChunkID = nil
+    configuredKey = nil
     totalHeight = 0
     needsDisplay = true
   }
@@ -173,18 +219,23 @@ final class LineRowView: NSView, DiffViewportRecyclable {
       switch context.mode {
       case .unified:
         let content = rows[index].content ?? ""
-        let wrapped = wrap(content, width: geo.unifiedContentWidth, style: style, rowHeight: rowHeight)
+        let isOldSide = rows[index].unifiedOrigin == .deletion  // a deletion row shows the OLD line
+        let runs = syntaxRuns(
+          oldNumber: rows[index].oldNumber, newNumber: rows[index].newNumber, isOldSide: isOldSide)
+        let wrapped = wrap(content, width: geo.unifiedContentWidth, style: style, rowHeight: rowHeight, syntax: runs)
         rows[index].wrapped = wrapped
         rows[index].height = wrapped.height
       case .split:
         var height = rowHeight
         if let old = rows[index].oldContent {
-          let wrapped = wrap(old, width: geo.oldContentWidth, style: style, rowHeight: rowHeight)
+          let runs = syntaxRuns(oldNumber: rows[index].oldNumber, newNumber: nil, isOldSide: true)
+          let wrapped = wrap(old, width: geo.oldContentWidth, style: style, rowHeight: rowHeight, syntax: runs)
           rows[index].oldWrapped = wrapped
           height = max(height, wrapped.height)
         }
         if let new = rows[index].newContent {
-          let wrapped = wrap(new, width: geo.newContentWidth, style: style, rowHeight: rowHeight)
+          let runs = syntaxRuns(oldNumber: nil, newNumber: rows[index].newNumber, isOldSide: false)
+          let wrapped = wrap(new, width: geo.newContentWidth, style: style, rowHeight: rowHeight, syntax: runs)
           rows[index].newWrapped = wrapped
           height = max(height, wrapped.height)
         }
@@ -196,16 +247,35 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     totalHeight = top
   }
 
-  /// Cache-through typeset of one content string at a content width.
+  /// Cache-through typeset of one content string at a content width. The syntax runs
+  /// are folded into the cache key (their resolved fg is baked into the glyphs), so a
+  /// highlight arrival re-typesets the row while an unchanged line stays a cache hit;
+  /// `styleGeneration` (in the key) re-typesets on an appearance flip so the resolved
+  /// `HighlightTheme` colors track light/dark.
   private func wrap(
-    _ content: NSString, width: CGFloat, style: NSParagraphStyle, rowHeight: CGFloat
+    _ content: NSString, width: CGFloat, style: NSParagraphStyle, rowHeight: CGFloat, syntax: [StyleRun]
   ) -> LineTypesetter.Wrapped {
+    var hasher = Hasher()
+    hasher.combine(content.hash)
+    hasher.combine(syntax)
     let key = context.cache.key(
-      contentHash: content.hash, styleGeneration: context.styleGeneration, width: width)
+      contentHash: hasher.finalize(), styleGeneration: context.styleGeneration, width: width)
     return context.cache.wrapped(key) {
-      let attributed = LineTypesetter.attributed(content, font: context.metrics.font, style: style)
+      let attributed = LineTypesetter.attributed(content, font: context.metrics.font, style: style, syntax: syntax)
       return LineTypesetter.wrap(attributed, width: width, lineHeight: rowHeight)
     }
+  }
+
+  /// The syntax runs for a rendered row's content column: old-blob runs for a
+  /// deletion (the row shows the old line), new-blob runs otherwise. Empty unless a
+  /// highlight pass has populated the context for that line number.
+  private func syntaxRuns(oldNumber: Int?, newNumber: Int?, isOldSide: Bool) -> [StyleRun] {
+    if isOldSide {
+      guard let oldNumber else { return [] }
+      return context.oldStyleRuns[oldNumber] ?? []
+    }
+    guard let newNumber else { return [] }
+    return context.newStyleRuns[newNumber] ?? []
   }
 
   // MARK: - Geometry (matches `DiffHitTest.bands` so render + hit-test agree)

@@ -13,8 +13,9 @@ import SwiftUI
 /// Interaction is wired through the widget harness callbacks (expander taps → the
 /// reducer's `expandGap`; comment-thread edit → `editComment`), not a per-row closure
 /// on this view. Gated follow-ups (documented in the PR body): incremental blob-slice
-/// reveal spliced into the live tree, gutter-drag comment CREATION, syntax-run
-/// compositing into `LineRowView`, and the a11y provider wiring.
+/// reveal spliced into the live tree, gutter-drag comment CREATION, and the a11y
+/// provider wiring. (Syntax-run compositing into `LineRowView` is now wired — the
+/// reducer's `old/newStyleRuns` flow through `setSyntax`.)
 struct DiffViewerRepresentable: NSViewRepresentable {
   let file: FileChange
   let hunks: [DiffHunk]
@@ -25,6 +26,14 @@ struct DiffViewerRepresentable: NSViewRepresentable {
   /// `WordDiffPolicy` gate (`DiffDocument.wordDiffDisabled`): off ⇒ `WordDiff` is
   /// never invoked on the render path (only the row-level `+`/`-` tint).
   var wordDiffEnabled: Bool = true
+
+  /// Resolved syntax runs from the reducer (`DiffDocument.old/newStyleRuns`), keyed
+  /// by 1-based line number per blob side. `syntaxVersion` (== the document's
+  /// `highlightGeneration`) bumps on each windowed highlight arrival so `updateNSView`
+  /// repaints the visible rows without a tree rebuild.
+  var oldStyleRuns: [Int: [StyleRun]] = [:]
+  var newStyleRuns: [Int: [StyleRun]] = [:]
+  var syntaxVersion: Int = 0
 
   /// Viewport scrolled/resized → windowed highlight (re)issue (Phase 4 driver).
   var onVisibleRangeChanged: (Range<Int>) -> Void = { _ in }
@@ -48,8 +57,10 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     controller.widgetResolver = makeResolver(coordinator)
     let tree = buildTree()
     controller.apply(tree: tree, mode: mode, scrollPreserving: false)
+    controller.setSyntax(old: oldStyleRuns, new: newStyleRuns)
     coordinator.lastSignature = signature
     coordinator.lastMode = mode
+    coordinator.lastSyntaxVersion = syntaxVersion
     return controller.scrollView
   }
 
@@ -60,7 +71,8 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     controller.wordDiffEnabled = wordDiffEnabled
     controller.widgetResolver = makeResolver(coordinator)
 
-    if coordinator.lastSignature != signature {
+    let contentChanged = coordinator.lastSignature != signature
+    if contentChanged {
       // Content changed (re-diff / comment insert-remove): re-project the tree,
       // scroll-preserving by line identity, in the current render mode.
       controller.apply(tree: buildTree(), mode: mode, scrollPreserving: true)
@@ -70,6 +82,14 @@ struct DiffViewerRepresentable: NSViewRepresentable {
       // Only the unified↔split preference flipped: O(log #hunks) re-seek, no rebuild.
       controller.toggleMode(to: mode)
       coordinator.lastMode = mode
+    }
+
+    // Windowed syntax arrival (or a content change that reset the tree): push the
+    // latest runs and repaint the visible rows — no tree rebuild, cache-hit on rows
+    // whose runs are unchanged.
+    if contentChanged || coordinator.lastSyntaxVersion != syntaxVersion {
+      controller.setSyntax(old: oldStyleRuns, new: newStyleRuns)
+      coordinator.lastSyntaxVersion = syntaxVersion
     }
   }
 
@@ -121,6 +141,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     var onEditComment: (UUID) -> Void = { _ in }
     var lastSignature: Signature?
     var lastMode: DiffViewMode = .unified
+    var lastSyntaxVersion: Int = -1
 
     struct Signature: Equatable {
       var generation: Int

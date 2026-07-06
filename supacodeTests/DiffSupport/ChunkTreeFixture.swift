@@ -24,7 +24,9 @@ enum ChunkTreeFixture {
 
   /// A tree of `rows` uniform context lines, one segment per `maxLeafSpan`. Node
   /// count == `ceil(rows / maxLeafSpan)` — the "node count ≪ line count" fixture.
-  static func uniform(rows: Int, metrics: ChunkLayoutMetrics = .production) -> ChunkTree {
+  static func uniform(
+    rows: Int, metrics: ChunkLayoutMetrics = .production, content: (Int) -> String = { _ in "x" }
+  ) -> ChunkTree {
     let tree = ChunkTree(metrics: metrics)
     guard rows > 0 else { return tree }
     let span = ChunkLayoutMetrics.maxLeafSpan
@@ -37,7 +39,7 @@ enum ChunkTreeFixture {
           origin: .context,
           oldLineNumber: index + 1,
           newLineNumber: index + 1,
-          content: "x",
+          content: content(index),
           noNewlineAtEof: false
         )
       )
@@ -51,6 +53,14 @@ enum ChunkTreeFixture {
       low = high
     }
     return tree
+  }
+
+  /// Like `uniform` but every line has DISTINCT content, so each row mints a
+  /// unique `CTLineCache` key: `buildCount` then equals the number of REAL CoreText
+  /// typesets. (The all-identical `uniform` content collapses to one cache entry and
+  /// would hide the per-row typeset cost the perf assertions measure.)
+  static func largeDistinct(rows: Int, metrics: ChunkLayoutMetrics = .production) -> ChunkTree {
+    uniform(rows: rows, metrics: metrics) { "let value\($0) = compute(\($0)) + offset" }
   }
 
   /// A multi-file tree assembled through the real `ChunkTreeBuilder`.

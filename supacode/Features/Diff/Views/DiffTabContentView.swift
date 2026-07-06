@@ -149,6 +149,9 @@ struct DiffTabContentView: View {
           mode: store.diffViewMode,
           generation: document.generation,
           wordDiffEnabled: !document.wordDiffDisabled,
+          oldStyleRuns: document.oldStyleRuns,
+          newStyleRuns: document.newStyleRuns,
+          syntaxVersion: document.highlightGeneration,
           onVisibleRangeChanged: { range in
             store.send(.highlightVisibleRangeChanged(key: key, range: range))
           },

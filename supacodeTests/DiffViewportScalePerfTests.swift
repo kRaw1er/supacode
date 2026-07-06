@@ -1,0 +1,118 @@
+import AppKit
+import Testing
+
+@testable import supacode
+
+/// PERF-REGRESSION (NSVIEW-HEADLESS) — the suite that was MISSING and let a
+/// scroll-lagging viewer ship "green". A world-class diff viewer must be
+/// virtualized: the work per layout / scroll frame is bounded by the VISIBLE
+/// WINDOW (+overscan), never by the file size or the leaf-segment span.
+///
+/// These are ALGORITHMIC assertions (spy counters), NOT wall-clock — scale
+/// invariance is machine-independent and stable in CI. Two per-instance counters
+/// carry them (parallel-safe, mirror `ChunkTree.diagnostics`):
+///   • `CTLineCache.buildCount`      — real CoreText typesets (cache misses).
+///   • `DiffViewportController.lineRowsConfigured` — rows pushed through
+///     `LineRowView.configure` across layout passes (re-project cost).
+///
+/// Root causes these pin (all confirmed in the render layer):
+///   1. `maxLeafSpan == 5_000` + `LineRowView` typesets the WHOLE segment up front
+///      ⇒ opening a 100k file typesets ~5_000 rows for a ~80-row window.
+///   2. `DiffViewportController.configure` has NO early-out for line segments
+///      (widgets do) ⇒ every scroll frame re-projects the whole visible segment.
+///
+/// The headless controller is 800×600 (30 visible rows); with the ~1000px
+/// overscan the ideal window is ~80 rows. Thresholds are generous multiples of
+/// that so the FIX target is unambiguous and the failure is loud.
+@MainActor
+struct DiffViewportScalePerfTests {
+  /// Rows a correct virtualized viewport may touch on one layout: visible window
+  /// (600px / 20px = 30) + overscan both sides, with generous headroom.
+  static let windowBudget = 400
+
+  // MARK: - Bug 1 — initial layout must not typeset the whole 5_000-row segment
+
+  @Test func initialLayoutTypesetsVisibleWindowNotWholeSegment_100k() {
+    let tree = ChunkTreeFixture.largeDistinct(rows: 100_000)
+    let controller = ViewportTestSupport.controller()  // 800×600, ~80-row window
+    controller.apply(tree: tree, mode: .unified, scrollPreserving: false)
+
+    let typeset = controller.ctLineCache.buildCount
+    // KNOWN ISSUE (tracked): the FIRST layout still typesets the whole 5_000-row leaf.
+    // pierre renders only the visible lines in hunk-sized batches and keeps the large
+    // LAYOUT_CHECKPOINT_INTERVAL for the height index — so the fix is a windowed
+    // LineRowView typeset (estimate off-screen heights, reconcile after), NOT shrinking
+    // maxLeafSpan. This flips to a hard pass (and the wrapper must be removed) once the
+    // render layer windows its typeset. The scroll case (early-out) is already fixed.
+    withKnownIssue("initial layout typesets the whole leaf; windowed render pending") {
+      #expect(
+        typeset <= Self.windowBudget,
+        """
+        Opening a 100k-line file typeset \(typeset) lines on the FIRST layout — the visible \
+        window is ~80 rows. The viewport is materializing the whole \(ChunkLayoutMetrics.maxLeafSpan)-row \
+        leaf segment instead of just the visible sub-window (LineRowView.configure typesets every \
+        rendered row up front). Typeset work must be O(viewport), not O(segment).
+        """
+      )
+    }
+  }
+
+  // MARK: - Bug 1 — layout cost must be independent of FILE SIZE (scale invariance)
+
+  @Test func layoutTypesetWorkIsScaleInvariant_1k_vs_100k() {
+    func typesetsForInitialLayout(_ rows: Int) -> Int {
+      let controller = ViewportTestSupport.controller()
+      controller.apply(tree: ChunkTreeFixture.largeDistinct(rows: rows), mode: .unified, scrollPreserving: false)
+      return controller.ctLineCache.buildCount
+    }
+    let small = typesetsForInitialLayout(1_000)
+    let huge = typesetsForInitialLayout(100_000)
+    // KNOWN ISSUE (tracked): same root cause as the sibling test — the whole leaf is
+    // typeset up front, so initial work scales with min(file, maxLeafSpan) instead of
+    // the visible window. Flips to a hard pass when LineRowView windows its typeset.
+    withKnownIssue("initial-layout typeset scales with leaf size; windowed render pending") {
+      #expect(
+        huge <= small * 2,
+        """
+        Initial-layout typeset work scaled with file size: 1k→\(small) lines, 100k→\(huge) lines. \
+        A virtualized viewport typesets ~the same (≈ the visible window) regardless of file size; \
+        the growth means work is O(file/segment), not O(viewport).
+        """
+      )
+    }
+  }
+
+  // MARK: - Bug 2 — a scroll inside a materialized region must not re-project it
+
+  @Test func scrollWithinMaterializedRegionDoesNotReconfigureWholeSegment_100k() {
+    let tree = ChunkTreeFixture.uniform(rows: 100_000)  // content-agnostic: counts ROWS, not typesets
+    let controller = ViewportTestSupport.controller()
+    controller.apply(tree: tree, mode: .unified, scrollPreserving: false)
+
+    let baseline = controller.lineRowsConfigured
+    controller.scroll(toY: 40)  // 2 rows — the same 5_000-row segment is already materialized
+    let reconfigured = controller.lineRowsConfigured - baseline
+
+    #expect(
+      reconfigured <= 300,
+      """
+      A 2-row scroll re-configured \(reconfigured) rows. The visible segment was already \
+      materialized, so a pure scroll should re-project ~0 rows — `DiffViewportController.configure` \
+      is missing the line-segment early-out that widgets already have (`mountedKey == key ⇒ return`), \
+      so it re-projects (and re-hits the cache for) the whole segment every frame.
+      """
+    )
+  }
+
+  // MARK: - Scale guard — tree seeks per layout stay sublinear (O(log n × window))
+
+  @Test func seekCountPerLayoutIsSublinear_100k() {
+    let tree = ChunkTreeFixture.uniform(rows: 100_000)
+    let controller = ViewportTestSupport.controller()
+    controller.apply(tree: tree, mode: .unified, scrollPreserving: false)
+    #expect(
+      tree.diagnostics.seekCount < 2_000,
+      "seekCount \(tree.diagnostics.seekCount) for a 100k layout — must stay O(log n × window), not O(n)."
+    )
+  }
+}
