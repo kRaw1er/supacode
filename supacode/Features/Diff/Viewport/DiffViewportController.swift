@@ -27,6 +27,10 @@ final class DiffViewportController: NSObject {
   /// The per-pool key is the hit's `ChunkID`.
   private(set) var pools: [DiffReuseKind: ViewReuseQueue<NSView, ChunkID>] = [:]
 
+  /// Shared wrapped-`CTLine` LRU cache across every `LineRowView` (keyed by
+  /// content identity, not position). Dropped wholesale on a style flip.
+  let ctLineCache = CTLineCache()
+
   /// The materialized-window map: each placed chunk's anchor identity → its
   /// `yOrigin`, rebuilt every `layoutVisibleChunks`. **Bounded by window size**
   /// (Note A) — NOT a 1M-entry line→y index and NOT a widened Phase-1 API. The
@@ -165,8 +169,12 @@ final class DiffViewportController: NSObject {
     let kind = top.chunk.reuseKind
     let pool = pool(for: kind)
     let view = pool.getOrCreateView(forKey: top.id) { Self.makeView(for: kind) }
-    configure(view, for: top.chunk, id: top.id)
-    view.frame = CGRect(x: 0, y: top.yOrigin, width: width, height: height)
+    configure(view, for: top.chunk, id: top.id, width: width)
+    // Grow a wrapped line view's frame to its measured height IN THE SAME PASS so
+    // a wrapped row is never clipped while the tree catches up on the next pass.
+    var frameHeight = height
+    if let lineView = view as? LineRowView { frameHeight = max(height, lineView.totalMeasuredHeight) }
+    view.frame = CGRect(x: 0, y: top.yOrigin, width: width, height: frameHeight)
     if view.superview == nil { documentView.addSubview(view) }
     live[kind, default: []].insert(top.id)
     let identity = Self.anchorIdentity(for: top, mode: mode)
@@ -174,11 +182,22 @@ final class DiffViewportController: NSObject {
     materialized.append((identity, top.yOrigin))
   }
 
-  private func configure(_ view: NSView, for chunk: Chunk, id: ChunkID) {
+  private func configure(_ view: NSView, for chunk: Chunk, id: ChunkID, width: CGFloat) {
     switch chunk {
     case .lineSegment(let segment):
       (view as? LineRowView)?.configure(
-        segment: segment, chunkID: id, rowHeight: tree.metrics.lineHeight, font: metrics.font, mode: mode)
+        segment: segment,
+        chunkID: id,
+        context: LineRowRenderContext(
+          metrics: metrics,
+          rowHeight: tree.metrics.lineHeight,
+          mode: mode,
+          width: width,
+          cache: ctLineCache,
+          palette: .shared,
+          styleGeneration: DiffPalette.shared.styleGeneration
+        )
+      )
     case .widget(let widget):
       (view as? DiffWidgetPlaceholderView)?.configure(widget: widget, chunkID: id)
     }
@@ -299,35 +318,76 @@ final class DiffViewportController: NSObject {
     scrollView.reflectScrolledClipView(clip)
   }
 
-  // MARK: - Measure↔layout guard scaffold (C7; inert while heights are fixed)
+  // MARK: - Measure↔layout guard (C7; live in Phase 3)
 
-  /// The C7 guard scaffold. Phase 3 measures each placed row's typeset height
-  /// here and writes any delta back via `tree.setMeasuredHeight`, re-queuing an
-  /// anchored relayout (bounded by `maxMeasurePasses`, epsilon `heightEpsilon`).
-  /// With this phase's fixed 20pt rows every placed frame height already equals
-  /// the tree's estimate, so no row's `measuredHeight` differs by more than the
-  /// epsilon and the guard never fires — `measurePass` stays 0.
+  /// Phase 3 wires the C7 guard: each placed `LineRowView` reports its per-row
+  /// CoreText-typeset height; any row whose measured (possibly-wrapped) height
+  /// differs from the tree's current row height by more than `heightEpsilon` is
+  /// written back via `tree.setMeasuredHeight` (O(log n)) and an anchored relayout
+  /// is re-queued (bounded by `maxMeasurePasses`). A non-wrapping leaf measures
+  /// exactly one row height per row, so nothing differs and `measurePass` stays 0.
   private func runMeasureGuard(_ placed: [(hit: ChunkHit, reservedHeight: CGFloat)]) {
     var needsReflow = false
     for entry in placed {
       guard let view = pools[entry.hit.chunk.reuseKind]?.getView(forKey: entry.hit.id) else { continue }
-      let measured = measuredHeight(of: view)
-      if abs(measured - entry.reservedHeight) > heightEpsilon {
-        tree.setMeasuredHeight(measured, chunk: entry.hit.id, localRow: entry.hit.localRow, mode: mode)
-        needsReflow = true
+      if let lineView = view as? LineRowView {
+        if writeLineHeights(lineView, chunk: entry.hit.id) { needsReflow = true }
+      } else {
+        // A widget's whole-view frame height is its measured height (localRow 0).
+        let measured = view.frame.height
+        if abs(measured - entry.reservedHeight) > heightEpsilon {
+          tree.setMeasuredHeight(measured, chunk: entry.hit.id, localRow: entry.hit.localRow, mode: mode)
+          needsReflow = true
+        }
       }
     }
+    // A measured row grew / shrank the tree ⇒ grow the document so the scrollbar
+    // reflects the true height (pierre `computeApproximateSize` re-aggregate). Do
+    // this even at the pass cap so the final height is never left stale.
+    if needsReflow { resizeDocument() }
     guard needsReflow, measurePass < maxMeasurePasses else { return }
     measurePass += 1
     documentView.needsLayout = true
   }
 
-  /// The measured height of a placed view. Phase 3 returns the CTLine-typeset
-  /// height; here every row is fixed at `lineHeight`, so the placed frame height
-  /// (which equals the tree's reserved estimate) is the measured height and the
-  /// guard is provably inert (`measurePass` stays 0).
-  private func measuredHeight(of view: NSView) -> CGFloat {
-    view.frame.height
+  /// Write each rendered row's measured height back into the tree, but ONLY when
+  /// it differs from the tree's CURRENT row height (base + already-written delta)
+  /// by more than the epsilon — so a converged layout does not re-trigger reflow
+  /// (the guard against an unbounded sub-pixel loop). Returns whether any row
+  /// changed.
+  private func writeLineHeights(_ view: LineRowView, chunk id: ChunkID) -> Bool {
+    let heights = view.measuredRowHeights
+    guard !heights.isEmpty else { return false }
+    let node = tree.nodesByID[id]
+    let base = tree.metrics.lineHeight
+    var changed = false
+    for (localRow, measured) in heights.enumerated() {
+      let current = base + (node?.heightDeltas?[localRow]?.value(mode) ?? 0)
+      if abs(measured - current) > heightEpsilon {
+        tree.setMeasuredHeight(measured, chunk: id, localRow: localRow, mode: mode)
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  /// Appearance / Dynamic Type / zoom flip: bump the palette's `styleGeneration`,
+  /// drop the whole CTLine cache (parse trees survive — they're not here),
+  /// re-resolve font metrics, then re-measure the visible window with top-visible
+  /// anchoring so the viewport does not jump. Wired from
+  /// `DiffViewportView.viewDidChangeEffectiveAppearance`.
+  func styleDidChange() {
+    DiffPalette.shared.styleDidChange()
+    ctLineCache.invalidateStyle()
+    metrics = DiffMetrics.resolve()
+    let anchor = captureAnchor()
+    measurePass = 0
+    resizeDocument()
+    layoutVisibleChunks()
+    if let anchor {
+      restore(anchor)
+      layoutVisibleChunks()
+    }
   }
 
   // MARK: - Geometry API (Phase 6 gutter + Phase 10 scroll-spy)

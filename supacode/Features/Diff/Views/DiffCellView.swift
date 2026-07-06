@@ -1,60 +1,9 @@
 import AppKit
 
-/// Resolved rendering metrics for the diff viewer, derived from the system
-/// monospaced font (no hardcoded sizes). `lineHeight` is the O(1) fixed height
-/// returned from `heightOfRow`. Recomputed on font / appearance change.
-struct DiffMetrics {
-  let font: NSFont
-  let lineHeight: CGFloat
-  let charWidth: CGFloat
-  let vPad: CGFloat
-  let hPad: CGFloat
-  /// Width of one line-number gutter column (old and new each get one).
-  let gutterWidth: CGFloat
-
-  static func resolve() -> DiffMetrics {
-    let font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
-    let vPad: CGFloat = 1
-    let lineHeight = ceil(font.ascender - font.descender + font.leading) + 2 * vPad
-    let charWidth = ("0" as NSString).size(withAttributes: [.font: font]).width
-    return DiffMetrics(
-      font: font,
-      lineHeight: lineHeight,
-      charWidth: max(1, charWidth),
-      vPad: vPad,
-      hPad: 6,
-      gutterWidth: charWidth * 5 + 8
-    )
-  }
-
-  /// Returns a copy whose gutter is wide enough for the largest line number in
-  /// `rows` (keeps the code column aligned as numbers grow past 9,999).
-  func withGutter(for rows: [DiffRow]) -> DiffMetrics {
-    var maxNumber = 0
-    for row in rows {
-      switch row {
-      case .line(let line):
-        maxNumber = max(maxNumber, line.oldLineNumber ?? 0, line.newLineNumber ?? 0)
-      case .splitLine(_, let old, let new):
-        maxNumber = max(maxNumber, old?.oldLineNumber ?? 0, new?.newLineNumber ?? 0)
-      case .plainFallback(let number, _):
-        maxNumber = max(maxNumber, number)
-      default:
-        break
-      }
-    }
-    let digits = max(3, String(maxNumber).count)
-    let width = charWidth * CGFloat(digits) + 10
-    return DiffMetrics(
-      font: font,
-      lineHeight: lineHeight,
-      charWidth: charWidth,
-      vPad: vPad,
-      hPad: hPad,
-      gutterWidth: width
-    )
-  }
-}
+// NOTE: `DiffMetrics` was relocated to
+// `Features/Diff/Viewport/CoreText/DiffMetrics.swift` in Phase 3 (⚠️ Deepening
+// note 4 / S8) so the new CoreText render layer and the old table viewer share
+// one definition. The type name is unchanged; nothing else in this file moved.
 
 /// Composited styling for one row's code content: a syntax **foreground** pass
 /// (system-color theme) and an independent intra-line word-diff **background**

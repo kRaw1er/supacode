@@ -15,4 +15,13 @@ final class DiffViewportView: NSView {
     super.layout()
     controller?.layoutVisibleChunks()
   }
+
+  /// Appearance / Dynamic Type flip → bump `styleGeneration`, drop the CTLine
+  /// cache, re-measure with top-visible anchoring (Phase 3 §Round-3 theme/font
+  /// invalidation). The `effectiveAppearance` change propagates here because the
+  /// document view is in the scroll view's hierarchy.
+  override func viewDidChangeEffectiveAppearance() {
+    super.viewDidChangeEffectiveAppearance()
+    controller?.styleDidChange()
+  }
 }
