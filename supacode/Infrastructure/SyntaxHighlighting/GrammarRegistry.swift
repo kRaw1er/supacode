@@ -155,4 +155,30 @@ enum GrammarRegistry {
     if byteCount > byteCap { return true }
     return grammar(forPath: path) == nil
   }
+
+  // MARK: - Query resource lookup
+
+  /// Result of locating a *resolved* grammar's bundled `highlights.scm`. A missing
+  /// file here means `GrammarRegistry` already matched the file to `queryName` yet
+  /// the query resource is absent — a stale/partial `TreeSitterGrammars` build, NOT
+  /// a legitimate plain-text file — so the caller logs loudly instead of failing
+  /// silently to plain text (the root cause of "highlighting doesn't work").
+  enum QueryResource: Equatable {
+    case available(URL)
+    case missing(queryName: String)
+  }
+
+  /// Locates the bundled `highlights.scm` for a resolved grammar. Pure and
+  /// `bundle`-injectable so the loud-vs-silent decision is unit-testable without a
+  /// running engine. Mirrors the bundle lookup the runtime query loader uses.
+  static func queryResource(for queryName: String, in bundle: Bundle = .main) -> QueryResource {
+    guard
+      let url = bundle.url(
+        forResource: "highlights",
+        withExtension: "scm",
+        subdirectory: "TreeSitterQueries/\(queryName)"
+      )
+    else { return .missing(queryName: queryName) }
+    return .available(url)
+  }
 }

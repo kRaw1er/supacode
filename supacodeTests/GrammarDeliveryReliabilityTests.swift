@@ -37,7 +37,7 @@ struct GrammarDeliveryReliabilityTests {
   /// drops in production.
   @Test func allBundledQueriesParseUnderResolvedRuntime() throws {
     for grammar in GrammarRegistry.allGrammars {
-      guard case .available(let url) = SyntaxHighlighter.queryResource(for: grammar.queryName) else {
+      guard case .available(let url) = GrammarRegistry.queryResource(for: grammar.queryName) else {
         Issue.record("bundled highlights.scm missing for resolved grammar '\(grammar.queryName)'")
         continue
       }
@@ -56,13 +56,13 @@ struct GrammarDeliveryReliabilityTests {
   /// `return nil`, without needing to intercept the logger.
   @Test func missingGrammarLogsLoudly() {
     // A resolved grammar with a bundled query resolves to a real URL (silent path).
-    guard case .available = SyntaxHighlighter.queryResource(for: "swift") else {
+    guard case .available = GrammarRegistry.queryResource(for: "swift") else {
       Issue.record("expected the bundled swift highlights.scm to resolve in the test host")
       return
     }
     // A grammar name with no bundled query hits the loud branch, not a silent nil.
     #expect(
-      SyntaxHighlighter.queryResource(for: "no-such-grammar-xyz")
+      GrammarRegistry.queryResource(for: "no-such-grammar-xyz")
         == .missing(queryName: "no-such-grammar-xyz")
     )
   }

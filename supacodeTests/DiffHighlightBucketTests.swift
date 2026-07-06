@@ -7,15 +7,15 @@ import Testing
 /// Phase 4 — the diff-indirection bucketer: `NamedRange` (absolute UTF-16 file
 /// offsets) → line-relative `StyleRun`s. Pure over `DiffHighlightEngine.bucket`, so
 /// it needs no parser: the whole point is that neon hands back UTF-16 directly and
-/// the bucketer must NOT re-divide it (C10). Three of these are the failing-first
-/// regressions against the shipping bugs — RED on the old `SyntaxHighlighter`, GREEN
-/// on the new engine.
+/// the bucketer must NOT re-divide it (C10). Three of these were failing-first
+/// regressions against the retired hand-rolled highlighter's bugs — now GREEN on
+/// the new engine.
 struct DiffHighlightBucketTests {
 
   /// 🔴 4.1 — the single highest-value correction (C10). `NamedRange.range` is
   /// ALREADY UTF-16, so a `keyword` at UTF-16 `6..<9` must bucket to `6..<9` — NOT
-  /// `3..<4`, which the shipping `SyntaxHighlighter.swift:109-110` produces by
-  /// dividing an already-UTF-16 offset a SECOND time.
+  /// `3..<4`, which the retired hand-rolled highlighter produced by dividing an
+  /// already-UTF-16 offset a SECOND time.
   @Test func bucketMapsNamedRangeWithoutDoubleHalving() {
     let named = [DiffFixture.namedRange("keyword", NSRange(location: 6, length: 3))]
     let byLine = DiffHighlightEngine.bucket(named, lineStarts: [0], textLength: 20, window: 0..<1)

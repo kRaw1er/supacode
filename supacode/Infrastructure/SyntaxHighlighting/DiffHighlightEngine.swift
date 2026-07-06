@@ -222,8 +222,8 @@ final class DiffHighlightEngine {
   /// UTF-16 code units** (`QueryDefinitions.swift:57` reads `tsRange.bytes.range`,
   /// which `Encoding+Helpers.swift:30-31` already divided by 2, and the parser runs
   /// `TSInputEncodingUTF16` — `Parser.swift`), so it is consumed **directly**: NO
-  /// second `/2` (C10 — the currently-shipping `SyntaxHighlighter.swift:109-110`
-  /// bug). Only lines inside `window` produce runs (windowed query); a capture
+  /// second `/2` (C10 — the double-`/2` bug the retired hand-rolled highlighter
+  /// shipped). Only lines inside `window` produce runs (windowed query); a capture
   /// spanning multiple lines is clipped to each line's bounds.
   nonisolated static func bucket(
     _ named: [NamedRange],

@@ -74,7 +74,7 @@ enum DiffFixture {
   /// **UTF-16** `NSRange`. `NamedRange(name:range:)` stores `range.byteRange`
   /// (`×2`) and reads back `tsRange.bytes.range` (`÷2`), so `.range` round-trips to
   /// the SAME UTF-16 range — which the bucketer consumes directly (C10: NO second
-  /// `/2`, unlike the shipping `SyntaxHighlighter.swift:109-110`).
+  /// `/2`, unlike the retired hand-rolled highlighter).
   static func namedRange(_ name: String, _ range: NSRange) -> NamedRange {
     NamedRange(name: name, range: range)
   }
