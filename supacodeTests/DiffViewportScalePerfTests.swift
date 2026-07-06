@@ -38,23 +38,19 @@ struct DiffViewportScalePerfTests {
     controller.apply(tree: tree, mode: .unified, scrollPreserving: false)
 
     let typeset = controller.ctLineCache.buildCount
-    // KNOWN ISSUE (tracked): the FIRST layout still typesets the whole 5_000-row leaf.
-    // pierre renders only the visible lines in hunk-sized batches and keeps the large
-    // LAYOUT_CHECKPOINT_INTERVAL for the height index — so the fix is a windowed
-    // LineRowView typeset (estimate off-screen heights, reconcile after), NOT shrinking
-    // maxLeafSpan. This flips to a hard pass (and the wrapper must be removed) once the
-    // render layer windows its typeset. The scroll case (early-out) is already fixed.
-    withKnownIssue("initial layout typesets the whole leaf; windowed render pending") {
-      #expect(
-        typeset <= Self.windowBudget,
-        """
-        Opening a 100k-line file typeset \(typeset) lines on the FIRST layout — the visible \
-        window is ~80 rows. The viewport is materializing the whole \(ChunkLayoutMetrics.maxLeafSpan)-row \
-        leaf segment instead of just the visible sub-window (LineRowView.configure typesets every \
-        rendered row up front). Typeset work must be O(viewport), not O(segment).
-        """
-      )
-    }
+    // Windowed render (pierre `renderRange`): the FIRST layout typesets ONLY the
+    // visible viewport window (+overscan), estimating off-screen line heights and
+    // reconciling as you scroll — NOT the whole 5_000-row leaf, and WITHOUT shrinking
+    // `maxLeafSpan` (which stays the height-index checkpoint interval).
+    #expect(
+      typeset <= Self.windowBudget,
+      """
+      Opening a 100k-line file typeset \(typeset) lines on the FIRST layout — the visible \
+      window is ~80 rows. The viewport must materialize only the visible sub-window of the \
+      \(ChunkLayoutMetrics.maxLeafSpan)-row leaf, not the whole segment. Typeset work must be \
+      O(viewport), not O(segment).
+      """
+    )
   }
 
   // MARK: - Bug 1 — layout cost must be independent of FILE SIZE (scale invariance)
@@ -67,19 +63,16 @@ struct DiffViewportScalePerfTests {
     }
     let small = typesetsForInitialLayout(1_000)
     let huge = typesetsForInitialLayout(100_000)
-    // KNOWN ISSUE (tracked): same root cause as the sibling test — the whole leaf is
-    // typeset up front, so initial work scales with min(file, maxLeafSpan) instead of
-    // the visible window. Flips to a hard pass when LineRowView windows its typeset.
-    withKnownIssue("initial-layout typeset scales with leaf size; windowed render pending") {
-      #expect(
-        huge <= small * 2,
-        """
-        Initial-layout typeset work scaled with file size: 1k→\(small) lines, 100k→\(huge) lines. \
-        A virtualized viewport typesets ~the same (≈ the visible window) regardless of file size; \
-        the growth means work is O(file/segment), not O(viewport).
-        """
-      )
-    }
+    // Windowed render: initial typeset work is bounded by the visible window, so it is
+    // the same (≈ the viewport) whether the file is 1k or 100k lines — scale-invariant.
+    #expect(
+      huge <= small * 2,
+      """
+      Initial-layout typeset work scaled with file size: 1k→\(small) lines, 100k→\(huge) lines. \
+      A virtualized viewport typesets ~the same (≈ the visible window) regardless of file size; \
+      the growth means work is O(file/segment), not O(viewport).
+      """
+    )
   }
 
   // MARK: - Bug 2 — a scroll inside a materialized region must not re-project it

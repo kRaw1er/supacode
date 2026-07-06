@@ -211,12 +211,13 @@ final class DiffViewportController: NSObject {
     var live: [DiffReuseKind: Set<ChunkID>] = [:]
     var placed: [(hit: ChunkHit, reservedHeight: CGFloat)] = []
 
+    let window = LayoutWindow(minY: minY, maxY: maxY)
     var chunkTop = firstChunkTop(atOrBelow: minY)
     while let top = chunkTop, top.yOrigin < maxY {
       let rowCount = top.chunk.baseSummary(metrics: tree.metrics).count(mode)
       let next = tree.seek(index: top.rowIndex + rowCount, mode: mode)
       let height = (next?.yOrigin ?? tree.totalHeight(mode)) - top.yOrigin
-      place(top, height: height, width: width, live: &live)
+      place(top, height: height, width: width, window: window, live: &live)
       placed.append((top, height))
       chunkTop = next
     }
@@ -235,11 +236,30 @@ final class DiffViewportController: NSObject {
     return tree.seek(index: hit.rowIndex - hit.localRow, mode: mode)
   }
 
-  private func place(_ top: ChunkHit, height: CGFloat, width: CGFloat, live: inout [DiffReuseKind: Set<ChunkID>]) {
+  /// The visible viewport band (already inclusive of the ±overscan) a layout pass
+  /// materializes against — bundled so `place` / `configure` stay within the
+  /// parameter budget.
+  private struct LayoutWindow {
+    let minY: CGFloat
+    let maxY: CGFloat
+  }
+
+  /// A single chunk being placed this pass: its resolved top row, its reserved
+  /// height, and the layout band — bundled so `configure` takes one payload.
+  private struct Placement {
+    let top: ChunkHit
+    let height: CGFloat
+    let window: LayoutWindow
+  }
+
+  private func place(
+    _ top: ChunkHit, height: CGFloat, width: CGFloat, window: LayoutWindow,
+    live: inout [DiffReuseKind: Set<ChunkID>]
+  ) {
     let kind = top.chunk.reuseKind
     let pool = pool(for: kind)
     let view = pool.getOrCreateView(forKey: top.id) { Self.makeView(for: kind) }
-    configure(view, for: top.chunk, id: top.id, width: width)
+    configure(view, placement: Placement(top: top, height: height, window: window), width: width)
     // Grow a wrapped line view's frame to its measured height IN THE SAME PASS so
     // a wrapped row is never clipped while the tree catches up on the next pass.
     var frameHeight = height
@@ -252,13 +272,14 @@ final class DiffViewportController: NSObject {
     materialized.append((identity, top.yOrigin))
   }
 
-  private func configure(_ view: NSView, for chunk: Chunk, id: ChunkID, width: CGFloat) {
-    switch chunk {
+  private func configure(_ view: NSView, placement: Placement, width: CGFloat) {
+    switch placement.top.chunk {
     case .lineSegment(let segment):
       if let lineView = view as? LineRowView {
-        let reprojected = lineView.configure(
+        let window = lineRenderWindow(placement)
+        let typeset = lineView.configure(
           segment: segment,
-          chunkID: id,
+          chunkID: placement.top.id,
           context: LineRowRenderContext(
             metrics: metrics,
             rowHeight: tree.metrics.lineHeight,
@@ -270,14 +291,58 @@ final class DiffViewportController: NSObject {
             wordDiffEnabled: wordDiffEnabled,
             syntaxVersion: syntaxVersion,
             oldStyleRuns: oldStyleRuns,
-            newStyleRuns: newStyleRuns
+            newStyleRuns: newStyleRuns,
+            renderRange: window.rows,
+            renderRangeTop: window.top
           )
         )
-        if reprojected { lineRowsConfigured += lineView.renderedRowCount }
+        lineRowsConfigured += typeset
       }
     case .widget(let widget):
       configureWidget(view, widget: widget, width: width)
     }
+  }
+
+  /// The visible sub-range of a placed line leaf's rendered rows (the layout band
+  /// already carries the ±overscan) plus the y-offset of that range's first row
+  /// relative to the leaf top — pierre `renderRange` { startingLine, totalLines } +
+  /// `bufferBefore` (`VirtualizedFile.ts:191/909`). Two O(log n) tree seeks resolve
+  /// the window against the tree's CURRENT geometry (so `bufferBefore` already
+  /// accounts for any measured deltas of the rows above the window); the leaf then
+  /// typesets only these rows and estimates the rest.
+  private func lineRenderWindow(_ placement: Placement) -> (rows: Range<Int>, top: CGFloat) {
+    let top = placement.top
+    let rowCount = top.chunk.baseSummary(metrics: tree.metrics).count(mode)
+    guard rowCount > 0 else { return (0..<0, 0) }
+    let leafTop = top.yOrigin
+    let leafBottom = leafTop + placement.height
+    let windowTop = max(placement.window.minY, leafTop)
+    let windowBottom = min(placement.window.maxY, leafBottom)
+    guard windowBottom > windowTop else { return (0..<0, 0) }  // leaf not actually in the window
+    let clampedBottom = min(windowBottom, leafBottom - 0.001)
+
+    // Fast path — a leaf with NO measured height deltas has uniform (base) row
+    // heights, so the window resolves by arithmetic with ZERO tree seeks. This keeps
+    // the per-layout seek budget O(log n × window), not O(window) seeks: without it,
+    // a mode toggle / scroll over many small leaves would add two seeks per leaf.
+    let rowHeight = tree.metrics.lineHeight
+    if rowHeight > 0, tree.nodesByID[top.id]?.heightDeltas?.isEmpty ?? true {
+      let startLocal = min(max(0, Int((windowTop - leafTop) / rowHeight)), rowCount - 1)
+      let endRow = min(rowCount - 1, Int((clampedBottom - leafTop) / rowHeight))
+      let end = min(rowCount, max(startLocal, endRow) + 1)
+      return (startLocal..<end, CGFloat(startLocal) * rowHeight)
+    }
+
+    // Variable-height leaf (some rows wrapped): resolve the window via two O(log n)
+    // seeks so `bufferBefore` accounts for the measured deltas of the rows above it.
+    let startHit = tree.seek(y: windowTop, mode: mode)
+    let startLocal = min(max(0, startHit?.localRow ?? 0), rowCount - 1)
+    let startY = startHit?.yOrigin ?? leafTop
+    let endHit = tree.seek(y: clampedBottom, mode: mode)
+    let endLocal = min(rowCount, (endHit?.localRow ?? (rowCount - 1)) + 1)
+    let start = min(startLocal, rowCount)
+    let end = min(max(start, endLocal), rowCount)
+    return (start..<end, startY - leafTop)
   }
 
   /// Mount (or recycle) the resolved `DiffWidget` model into a `WidgetHostChunkView`
@@ -443,18 +508,20 @@ final class DiffViewportController: NSObject {
     documentView.needsLayout = true
   }
 
-  /// Write each rendered row's measured height back into the tree, but ONLY when
-  /// it differs from the tree's CURRENT row height (base + already-written delta)
-  /// by more than the epsilon — so a converged layout does not re-trigger reflow
-  /// (the guard against an unbounded sub-pixel loop). Returns whether any row
-  /// changed.
+  /// Write each TYPESET (visible-window) row's measured height back into the tree,
+  /// but ONLY when it differs from the tree's CURRENT row height (base +
+  /// already-written delta) by more than the epsilon — so a converged layout does
+  /// not re-trigger reflow (the guard against an unbounded sub-pixel loop). Only the
+  /// windowed rows are considered (`typesetRowHeights` carries their leaf-local
+  /// index); off-window rows keep whatever delta they earned when last visible, like
+  /// pierre's sparse height cache. Returns whether any row changed.
   private func writeLineHeights(_ view: LineRowView, chunk id: ChunkID) -> Bool {
-    let heights = view.measuredRowHeights
+    let heights = view.typesetRowHeights
     guard !heights.isEmpty else { return false }
     let node = tree.nodesByID[id]
     let base = tree.metrics.lineHeight
     var changed = false
-    for (localRow, measured) in heights.enumerated() {
+    for (localRow, measured) in heights {
       let current = base + (node?.heightDeltas?[localRow]?.value(mode) ?? 0)
       if abs(measured - current) > heightEpsilon {
         tree.setMeasuredHeight(measured, chunk: id, localRow: localRow, mode: mode)

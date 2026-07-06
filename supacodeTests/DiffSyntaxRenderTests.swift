@@ -53,7 +53,13 @@ struct DiffSyntaxRenderTests {
         if let nsColor = attrs[NSAttributedString.Key.foregroundColor.rawValue] as? NSColor {
           return nsColor.cgColor
         }
-        return attrs[kCTForegroundColorAttributeName as String].flatMap { $0 as? CGColor }
+        // The CoreText fallback: the value under `kCTForegroundColorAttributeName` is a raw
+        // `CGColor`. A plain `as? CGColor` is a compile error under Swift 6 ("downcast to a
+        // CoreFoundation type always succeeds"), so gate on the CFTypeID and bridge directly.
+        guard let value = attrs[kCTForegroundColorAttributeName as String],
+          CFGetTypeID(value as CFTypeRef) == CGColor.typeID
+        else { return nil }
+        return unsafeDowncast(value as AnyObject, to: CGColor.self)
       }
     }
     return nil
