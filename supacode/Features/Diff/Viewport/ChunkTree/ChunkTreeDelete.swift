@@ -72,6 +72,8 @@ extension ChunkTree {
       Widget(key: .fileHeader(fileID: new), estimatedHeight: widget.estimatedHeight, payload: .fileHeader(fileID: new)))
     fileHeaderNodes[old] = nil
     fileHeaderNodes[new] = headerID
+    widgetNodes[.fileHeader(fileID: old)] = nil
+    widgetNodes[.fileHeader(fileID: new)] = headerID
     return headerID
   }
 
@@ -91,10 +93,13 @@ extension ChunkTree {
 
   private func unregister(_ node: ChunkNode) {
     nodesByID[node.id] = nil
-    if case .widget(let widget) = node.chunk, case .fileHeader(let fileID) = widget.key,
-      fileHeaderNodes[fileID] == node.id
-    {
-      fileHeaderNodes[fileID] = nil
+    if case .widget(let widget) = node.chunk {
+      if widgetNodes[widget.key] == node.id {
+        widgetNodes[widget.key] = nil
+      }
+      if case .fileHeader(let fileID) = widget.key, fileHeaderNodes[fileID] == node.id {
+        fileHeaderNodes[fileID] = nil
+      }
     }
   }
 

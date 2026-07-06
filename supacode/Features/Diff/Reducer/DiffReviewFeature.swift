@@ -207,6 +207,7 @@ struct DiffReviewFeature {
       filePath: String, source: DiffSource, side: DiffSide, startLine: Int, endLine: Int, anchorSnippet: String,
       contextBefore: String)
     case composer(PresentationAction<CommentComposer.Action>)
+    case commentsLoaded([ReviewComment])  // persisted set restored on worktree open (D2)
     case commitComment(ReviewComment)  // upsert (replace by id on edit, else append)
     case editComment(id: UUID)  // open an existing thread to edit
     case deleteComment(id: UUID)  // remove a thread
@@ -231,6 +232,7 @@ struct DiffReviewFeature {
   private nonisolated enum CancelID: Hashable, Sendable {
     case load, debounce
     case baseLoad, baseResolve
+    case commentsLoad
     case diff(DiffDocumentKey)
     case stream(DiffDocumentKey)
     case highlight(DiffDocumentKey)
@@ -249,6 +251,7 @@ struct DiffReviewFeature {
       @Dependency(DiffHighlightClient.self) var diffHighlight
       @Dependency(TerminalClient.self) var terminalClient
       @Dependency(GitClientDependency.self) var gitClient
+      @Dependency(CommentPersistenceStoreClient.self) var persistenceStore
       @Dependency(\.continuousClock) var clock
       @Dependency(\.date.now) var now
       switch action {
@@ -258,10 +261,12 @@ struct DiffReviewFeature {
         // sources and cancels the load, base load, base resolve, and debounce.
         state.generation &+= 1
         state.baseGeneration &+= 1
-        // Comments are per-worktree and session-only (not persisted). A real
-        // worktree change drops the prior batch so it never leaks across
-        // worktrees; a re-select of the same worktree keeps it.
-        if state.selectedWorktree?.id != worktree?.id {
+        // Comments are per-worktree and disk-persisted (D2). A real worktree change
+        // drops the prior in-memory batch so it never leaks across worktrees, then
+        // the persisted set for the new worktree is loaded-then-relocated on open;
+        // a re-select of the same worktree keeps the in-memory batch untouched.
+        let worktreeChanged = state.selectedWorktree?.id != worktree?.id
+        if worktreeChanged {
           state.comments.removeAll()
           state.composer = nil
         }
@@ -272,7 +277,8 @@ struct DiffReviewFeature {
         state.baseLoadState = .idle
         let cancelAll: Effect<Action> = .merge(
           .cancel(id: CancelID.load), .cancel(id: CancelID.debounce),
-          .cancel(id: CancelID.baseLoad), .cancel(id: CancelID.baseResolve))
+          .cancel(id: CancelID.baseLoad), .cancel(id: CancelID.baseResolve),
+          .cancel(id: CancelID.commentsLoad))
         guard let worktree else {
           state.files = []
           state.loadState = .idle
@@ -297,11 +303,19 @@ struct DiffReviewFeature {
         state.files = []  // new worktree ⇒ drop the prior list
         state.loadState = .loading
         state.baseLoadState = .loading
-        return .merge(
+        var selectionEffects: [Effect<Action>] = [
           Self.loadEffect(worktree: worktree, generation: state.generation, diffClient: diffClient),
           Self.resolveBaseRefEffect(
-            worktree: worktree, prBaseRefName: prBaseRefName, generation: state.baseGeneration, gitClient: gitClient)
-        )
+            worktree: worktree, prBaseRefName: prBaseRefName, generation: state.baseGeneration, gitClient: gitClient),
+        ]
+        // Load-then-relocate on open: restore the persisted comments for this
+        // worktree (they re-anchor against the fresh lines when the diffs load).
+        // Only on a real worktree change, so a re-select doesn't clobber the batch.
+        if worktreeChanged {
+          selectionEffects.append(
+            Self.loadPersistedCommentsEffect(worktreeID: worktree.id.rawValue, persistenceStore: persistenceStore))
+        }
+        return .merge(selectionEffects)
 
       case .load:
         guard let worktree = state.selectedWorktree,
@@ -625,11 +639,24 @@ struct DiffReviewFeature {
       case .composer:
         return .none
 
-      case .commitComment(let comment):
-        state.comments[id: comment.id] = comment
-        state.composer = nil
-        Self.rebuildRows(&state, key: DiffDocumentKey(path: comment.filePath, source: comment.source))
+      case .commentsLoaded(let loaded):
+        // Restore the persisted set for the just-opened worktree (deduped by id
+        // against corrupt-disk dup ids). Relocation runs when the diffs load.
+        var restored: IdentifiedArrayOf<ReviewComment> = []
+        for comment in loaded where restored[id: comment.id] == nil {
+          restored[id: comment.id] = comment
+        }
+        state.comments = restored
         return .none
+
+      case .commitComment(let comment):
+        // Source of truth is `state.comments`; the viewport reconciles the tree
+        // widget (O(log n) insert / update) — NO flat `rebuildRows` (S7).
+        var committed = comment
+        committed.updatedAt = now
+        state.comments[id: committed.id] = committed
+        state.composer = nil
+        return Self.persistEffect(state, persistenceStore: persistenceStore)
 
       case .editComment(let id):
         guard let comment = state.comments[id: id] else { return .none }
@@ -637,10 +664,9 @@ struct DiffReviewFeature {
         return .none
 
       case .deleteComment(let id):
-        guard let comment = state.comments[id: id] else { return .none }
-        state.comments.remove(id: id)
-        Self.rebuildRows(&state, key: DiffDocumentKey(path: comment.filePath, source: comment.source))
-        return .none
+        guard state.comments[id: id] != nil else { return .none }
+        state.comments.remove(id: id)  // viewport removes the widget leaf; NO rebuildRows (S7)
+        return Self.persistEffect(state, persistenceStore: persistenceStore)
 
       case .sendBatchToAgent:
         guard !state.batchLocked,
@@ -664,11 +690,10 @@ struct DiffReviewFeature {
       case .sendBatchFinished(.sent):
         state.comments.removeAll()
         state.batchLocked = false
-        // Drop the now-stale comment threads from every open document.
-        for key in state.openDiffs.keys {
-          Self.rebuildRows(&state, key: key)
-        }
-        return .none
+        // The sent batch is cleared everywhere; persist the empty set so a reopen
+        // shows no ghost comments. The viewport drops the widget leaves (NO
+        // rebuildRows, S7).
+        return Self.persistEffect(state, persistenceStore: persistenceStore)
 
       case .sendBatchFinished(.noTerminal):
         state.batchLocked = false
@@ -682,10 +707,7 @@ struct DiffReviewFeature {
 
       case .discardConfirm(.presented(.discard)):
         state.comments.removeAll()
-        for key in state.openDiffs.keys {
-          Self.rebuildRows(&state, key: key)
-        }
-        return .none
+        return Self.persistEffect(state, persistenceStore: persistenceStore)
 
       case .discardConfirm:
         return .none
@@ -743,15 +765,28 @@ struct DiffReviewFeature {
     )
   }
 
-  /// Rebuilds one open document's rows from its cached hunks + the current
-  /// comments for its `(path, source)`, bumping `revision` so the viewer
-  /// re-applies. No I/O.
-  private static func rebuildRows(_ state: inout State, key: DiffDocumentKey) {
-    guard var document = state.openDiffs[key] else { return }
-    document.rows = Self.buildRows(
-      document: document, mode: state.diffViewMode, comments: state.comments(forPath: key.path, source: key.source))
-    document.revision &+= 1
-    state.openDiffs[key] = document
+  /// Persist the current comment set for the selected worktree (fire-and-forget;
+  /// source of truth stays `state.comments`). No-op when nothing is selected.
+  private static func persistEffect(
+    _ state: State, persistenceStore: CommentPersistenceStoreClient
+  ) -> Effect<Action> {
+    guard let worktreeID = state.selectedWorktree?.id.rawValue else { return .none }
+    let comments = Array(state.comments)
+    return .run { _ in await persistenceStore.save(worktreeID, comments) }
+  }
+
+  /// Load the persisted comments for a worktree on open, feeding them back as
+  /// `.commentsLoaded` only when non-empty (so a fresh worktree adds no action).
+  /// `cancelInFlight` so a rapid re-selection supersedes a slow disk read (8.1).
+  private static func loadPersistedCommentsEffect(
+    worktreeID: String, persistenceStore: CommentPersistenceStoreClient
+  ) -> Effect<Action> {
+    .run { send in
+      let loaded = await persistenceStore.load(worktreeID)
+      guard !loaded.isEmpty else { return }
+      await send(.commentsLoaded(loaded))
+    }
+    .cancellable(id: CancelID.commentsLoad, cancelInFlight: true)
   }
 
   /// Re-anchors every comment for `key` (matched on both `filePath` and

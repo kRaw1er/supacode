@@ -57,6 +57,17 @@ final class ChunkTree {
   /// fileID → its leading `.widget(fileHeader)` node id (file-nav seek).
   var fileHeaderNodes: [FileID: ChunkID] = [:]
 
+  /// `WidgetKey` → its node id. `WidgetKey` is per-instance identity (Phase 1 S1),
+  /// so a widget resolves its MODEL and its measured-height write-back by key
+  /// (Phase 6 `LayoutCoalescer` / comment-thread harness) without a linear walk.
+  var widgetNodes: [WidgetKey: ChunkID] = [:]
+
+  /// The node backing a `WidgetKey`, or `nil` when no such widget is in the tree.
+  func widgetNode(for key: WidgetKey) -> ChunkNode? {
+    guard let cid = widgetNodes[key] else { return nil }
+    return nodesByID[cid]
+  }
+
   /// Monotonic id allocator — document order on a from-scratch build, so two
   /// deterministic builds mint the same id sequence.
   var nextRaw: UInt64 = 0

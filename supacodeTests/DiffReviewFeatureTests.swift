@@ -917,6 +917,7 @@ struct DiffReviewFeatureTests {
       $0.discardConfirm = nil
       $0.comments.removeAll()
     }
+    await store.finish()  // drain the fire-and-forget persist effect (empty set)
   }
 
   @Test(.dependencies) func requestDiscardKeepRetainsComments() async {

@@ -49,6 +49,12 @@ final class DiffViewportController: NSObject {
   /// not re-trigger the `boundsDidChange → relayout` feedback loop.
   private var isAdjustingScroll = false
 
+  /// The content width each widget's height was last measured at (Phase 6
+  /// `LayoutCoalescer`). A `nil` entry means "never measured" — the first report
+  /// always applies; a width change re-measures (a widget wraps differently at a
+  /// new width). Keyed by `WidgetKey` (per-instance identity), not `ChunkID`.
+  private var widgetMeasuredWidth: [WidgetKey: CGFloat] = [:]
+
   // C7 measure↔layout guard (Phase 3 uses it; inert while heights are fixed).
   private(set) var measurePass = 0
   private let maxMeasurePasses = 5
@@ -439,4 +445,190 @@ final class DiffViewportController: NSObject {
     resizeDocument()
     layoutVisibleChunks()
   }
+
+  // MARK: - Gutter geometry API (Phase 6 — consumed by `GutterRibbonController`)
+
+  /// The line-number gutter-column width (both old / new columns share it). The
+  /// gutter ribbon uses it to place the "+" glyph and gate number-column hits.
+  var gutterWidth: CGFloat { metrics.gutterWidth }
+
+  /// Side-pinned geometric hit (drag continuation): read the git line number on
+  /// `side` under `point.y` regardless of which x-band `point.x` fell in (pierre
+  /// `requireNumberColumn: false` on drag, side pinned to the anchor).
+  func hitTest(_ point: CGPoint, side: DiffSide) -> DiffHit? {
+    DiffHitTest.hit(point, side: side, tree: tree, mode: mode)
+  }
+
+  /// The logical location of a rendered row carrying a git line on a side — a
+  /// recycle-safe `(chunkID, localRow, rowIndex)` coordinate, the inverse of
+  /// `hitTest`.
+  struct LineLocation: Equatable {
+    let chunkID: ChunkID
+    let localRow: Int
+    let rowIndex: Int
+  }
+
+  /// The `LineLocation` of the rendered row carrying `line` on `side` (an in-order
+  /// scan; a user gutter action is infrequent and the target line sits in the
+  /// viewport). `nil` when no rendered row carries that number on that side.
+  func lineLocation(line: Int, side: DiffSide) -> LineLocation? {
+    var hit = tree.seek(index: 0, mode: mode)
+    while let current = hit {
+      if current.chunk.lineAndSide(for: .gutter(side), localRow: current.localRow, mode: mode).line == line {
+        return LineLocation(chunkID: current.id, localRow: current.localRow, rowIndex: current.rowIndex)
+      }
+      hit = tree.successor(of: current, mode: mode)
+    }
+    return nil
+  }
+
+  /// The document-space rect of the rendered row carrying `line` on `side`, used
+  /// to paint the "+" glyph and the drag band. `nil` when the line isn't rendered.
+  func lineRect(line: Int, side: DiffSide) -> NSRect? {
+    guard let location = lineLocation(line: line, side: side),
+      let hit = tree.seek(index: location.rowIndex, mode: mode)
+    else { return nil }
+    return CGRect(x: 0, y: hit.yOrigin, width: documentView.bounds.width, height: hit.rowHeight)
+  }
+
+  /// Build the anchor snippet (the joined text of the covered lines) + up to three
+  /// preceding-context lines for a resolved `side` range, read straight off the
+  /// `DiffLine`s (mode-independent — relocation keys off the exact line text; ports
+  /// `DiffTableController.anchorPayload`). In-order scan (infrequent user action).
+  func anchorPayload(side: DiffSide, startLine: Int, endLine: Int) -> (snippet: String, contextBefore: String) {
+    var covered: [String] = []
+    var preceding: [String] = []
+    for node in tree.inorderNodes() {
+      guard let segment = node.chunk.lineSegment else { continue }
+      for line in segment.windowedLines {
+        guard let number = line.lineNumber(on: side) else { continue }
+        if number >= startLine, number <= endLine {
+          covered.append(line.content)
+        } else if number < startLine {
+          preceding.append(line.content)
+        }
+      }
+    }
+    return (covered.joined(separator: "\n"), preceding.suffix(3).joined(separator: "\n"))
+  }
+
+  // MARK: - Widget layout host (Phase 6 — consumed by `LayoutCoalescer`)
+
+  /// Retina pixel-snap a height so a measured widget lands on a device pixel
+  /// (`(v·scale).rounded()/scale`) — avoids a sub-pixel measure↔layout wobble.
+  func retinaSnap(_ value: CGFloat) -> CGFloat {
+    let scale = documentView.window?.backingScaleFactor ?? 2
+    return (value * scale).rounded() / scale
+  }
+
+  /// The last recorded `(width, height)` a widget was measured at, or `nil` when
+  /// it has never been measured (so the first report always applies). Height is
+  /// read back from the tree (est + measured delta) in the current `mode`.
+  func measuredHeight(forWidget key: WidgetKey) -> (width: CGFloat, height: CGFloat)? {
+    guard let width = widgetMeasuredWidth[key], let node = tree.widgetNode(for: key) else { return nil }
+    return (width, node.summary.height(mode))
+  }
+
+  /// Write a widget's measured height back into the tree (O(log n) re-aggregate)
+  /// and record the width it was measured at. No relayout here — the coalescer
+  /// captures / restores the scroll anchor once around the whole batch.
+  func setMeasuredHeight(_ key: WidgetKey, width: CGFloat, height: CGFloat) {
+    guard let node = tree.widgetNode(for: key) else { return }
+    tree.setMeasuredHeight(height, chunk: node.id, localRow: 0, mode: mode)
+    widgetMeasuredWidth[key] = width
+  }
+
+  /// Capture the current scroll anchor (first fully-visible chunk). Public alias
+  /// for the coalescer's once-per-frame anchor capture.
+  func captureScrollAnchor() -> ScrollAnchor? { captureAnchor() }
+
+  /// Re-grow the document to the tree's fresh height and re-land the anchor at the
+  /// same pixel — the once-per-frame anti-jump restore the coalescer runs after a
+  /// height batch. Anchoring holds even for a widget ABOVE the fold, because the
+  /// anchor is the first fully-visible line, not the mutated widget.
+  func restoreScrollAnchor(_ anchor: ScrollAnchor?) {
+    measurePass = 0
+    resizeDocument()
+    clampScrollOrigin()
+    layoutVisibleChunks()
+    if let anchor {
+      restore(anchor)
+      layoutVisibleChunks()
+    }
+  }
+
+  // MARK: - Comment-thread widget harness (Phase 6 — gutter commit / cancel)
+
+  /// Insert an editing comment-thread widget anchored below the bottom
+  /// (`endLine`) of a gutter range (pierre insertion flow): `split` the line
+  /// segment after the commented row when needed, then `insert(after:)` the
+  /// `.widget(.commentThread)` — O(log n). The widget's height reserves via its
+  /// `estimatedHeight`, pushing the lines below it down while lines above are
+  /// unaffected. Returns the inserted node id, or `nil` when the line isn't found.
+  @discardableResult
+  func insertCommentWidget(
+    side: DiffSide, startLine: Int, endLine: Int, anchorID: UUID, estimatedHeight: CGFloat
+  ) -> ChunkID? {
+    guard let location = lineLocation(line: endLine, side: side), let node = tree.nodesByID[location.chunkID]
+    else { return nil }
+    let widget = Widget(
+      key: .commentThread(anchorID: anchorID),
+      estimatedHeight: estimatedHeight,
+      payload: .commentThread(anchorID: anchorID)
+    )
+    let anchorChunk = splitAnchor(for: node, localRow: location.localRow)
+    let inserted = tree.insert(.widget(widget), after: anchorChunk)
+    let scrollAnchor = captureAnchor()
+    restoreScrollAnchor(scrollAnchor)
+    return inserted
+  }
+
+  /// Remove the comment-thread widget for `anchorID` (cancel path): the lines
+  /// below re-close to their prior pixels. O(log n).
+  @discardableResult
+  func removeCommentWidget(anchorID: UUID) -> Bool {
+    guard let node = tree.widgetNode(for: .commentThread(anchorID: anchorID)) else { return false }
+    let scrollAnchor = captureAnchor()
+    let removed = tree.remove(node.id)
+    restoreScrollAnchor(scrollAnchor)
+    return removed
+  }
+
+  /// The chunk id to insert the widget after: the commented row's own leaf when it
+  /// is that leaf's last rendered row (or a single-row leaf), otherwise the LEFT
+  /// half of a split so the widget lands directly under the commented line rather
+  /// than after the rest of the leaf. Splitting is defined for the 1:1 context
+  /// projection; a mid-change-leaf comment inserts after the whole leaf.
+  private func splitAnchor(for node: ChunkNode, localRow: Int) -> ChunkID {
+    guard let segment = node.chunk.lineSegment else { return node.id }
+    let renderedCount = segment.renderedRows(mode).count
+    guard localRow + 1 < renderedCount else { return node.id }  // last row → no split
+    switch segment.classification {
+    case .context, .contextExpanded:
+      // 1:1 projection (barring markers): rendered row r ↔ window offset r.
+      let offset = localRow + 1
+      guard offset > 0, offset < segment.window.count else { return node.id }
+      let (left, _) = tree.split(node.id, atLocalRow: offset)
+      return left
+    case .change:
+      return node.id  // coarser placement (after the change block) — never mis-orders
+    }
+  }
 }
+
+// MARK: - WidgetLayoutHost
+
+/// The height write-back + anti-jump surface a `LayoutCoalescer` drives. Abstracted
+/// so the coalescer's arithmetic (epsilon, 5-pass guard, `max`-paired, capture /
+/// restore once) is unit-testable against a fake host with NO live view / display
+/// link (C §CI note).
+@MainActor
+protocol WidgetLayoutHost: AnyObject {
+  func retinaSnap(_ value: CGFloat) -> CGFloat
+  func measuredHeight(forWidget key: WidgetKey) -> (width: CGFloat, height: CGFloat)?
+  func setMeasuredHeight(_ key: WidgetKey, width: CGFloat, height: CGFloat)
+  func captureScrollAnchor() -> ScrollAnchor?
+  func restoreScrollAnchor(_ anchor: ScrollAnchor?)
+}
+
+extension DiffViewportController: WidgetLayoutHost {}

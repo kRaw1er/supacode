@@ -11,7 +11,7 @@ import Foundation
 ///   `"origin/main"` (from `automaticWorktreeBaseRef`).
 ///
 /// Identity / dedup / comment-scope use the whole case, so `ref` participates.
-nonisolated enum DiffSource: Equatable, Sendable, Hashable {
+nonisolated enum DiffSource: Equatable, Sendable, Hashable, Codable {
   case workingTree
   case baseBranch(ref: String)
 

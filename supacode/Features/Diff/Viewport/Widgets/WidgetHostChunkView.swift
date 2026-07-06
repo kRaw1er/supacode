@@ -1,0 +1,64 @@
+import AppKit
+import SwiftUI
+
+/// Hosts exactly one `DiffWidget`'s self-sizing `NSView` for a `.widget` chunk and
+/// wires its height reports into the `LayoutCoalescer`. The container owns the
+/// width; the hosted view reports its height (never the reverse). A recycled host
+/// is offered to a new model via `reuse` — the widget accepts (identity swap) or
+/// refuses (an `.editing` comment editor), in which case the harness rebuilds
+/// (`NSHostingView` `rootView` swap over a live `TextEditor` has sharp edges).
+@MainActor
+final class WidgetHostChunkView: NSView, DiffViewportRecyclable {
+  override var isFlipped: Bool { true }
+
+  /// The mounted widget's self-sizing view.
+  private(set) var hosted: NSView?
+  /// The identity currently mounted — proves a recycled host resolves the RIGHT
+  /// model after a pool reuse (keyed by `WidgetKey`, not `ChunkID`).
+  private(set) var mountedKey: WidgetKey?
+  private var coalescer: LayoutCoalescer?
+
+  override init(frame frameRect: NSRect) {
+    super.init(frame: frameRect)
+    setAccessibilityElement(false)
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+  /// Mount `widget`'s host view at `width × estimatedHeight` (the offscreen
+  /// reservation) and connect its height reports to `coalescer`.
+  func mount(_ widget: some DiffWidget, key: WidgetKey, width: CGFloat, coalescer: LayoutCoalescer) {
+    hosted?.removeFromSuperview()
+    self.coalescer = coalescer
+    let reporter = HeightReporter(key: key, coalescer: coalescer)
+    let host = widget.makeHostView(reporter: reporter)
+    if let hostingView = host as? NSHostingView<AnyView> { hostingView.sizingOptions = [] }  // container owns sizing
+    host.frame = CGRect(x: 0, y: 0, width: width, height: widget.estimatedHeight)
+    addSubview(host)
+    hosted = host
+    mountedKey = key
+    frame.size.height = widget.estimatedHeight
+  }
+
+  /// Offer this already-mounted host to `widget` (a pool recycle). Returns whether
+  /// the widget accepted the identity swap; `false` ⇒ the harness must
+  /// `prepareForReuse` + `mount` a fresh host.
+  func reuse(_ widget: some DiffWidget, key: WidgetKey, width: CGFloat) -> Bool {
+    guard let hosted, mountedKey?.reuseKind == key.reuseKind else { return false }
+    guard widget.update(hostView: hosted, width: width) else { return false }
+    hosted.frame.size.width = width
+    mountedKey = key
+    return true
+  }
+
+  /// Unmount hook — tears the hosted view down before the recycled host is handed
+  /// to another chunk (pierre `onPostRenderPhase`, B §20). The autoscroller /
+  /// display-link ownership lives on the coalescer, not here.
+  override func prepareForReuse() {
+    hosted?.removeFromSuperview()
+    hosted = nil
+    mountedKey = nil
+    coalescer = nil
+  }
+}

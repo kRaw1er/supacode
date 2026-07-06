@@ -13,6 +13,15 @@ nonisolated enum DiffColumn: Equatable {
     case .changeBar(let side), .gutter(let side), .content(let side): return side
     }
   }
+
+  /// Whether this band is a line-number gutter column. The gutter "+" range-select
+  /// begins ONLY on a number column (pierre `requireNumberColumn: true` on down,
+  /// `InteractionManager.ts:748-751`); a drag endpoint may sit over content
+  /// (`requireNumberColumn: false`, `:889-892`).
+  var isNumberColumn: Bool {
+    if case .gutter = self { return true }
+    return false
+  }
 }
 
 /// A resolved geometric hit — which chunk / column / line a point is over. This
@@ -109,6 +118,32 @@ nonisolated enum DiffHitTest {
       column: column,
       lineNumber: resolved.line,
       side: resolved.side,
+      rowIndex: seekHit.rowIndex,
+      subline: 0
+    )
+  }
+
+  /// Side-pinned resolve (drag continuation). The endpoint of a gutter range-drag
+  /// may sit over content, not just the number column (pierre
+  /// `requireNumberColumn: false` on drag, `InteractionManager.ts:889-892`), and
+  /// the side is PINNED to the anchor's side — so we seek the chunk under `point.y`
+  /// and read the line number on `side` regardless of which x-band `point.x` hit.
+  /// (No `width` — the side variant forces `.gutter(side)`, so `point.x` and the
+  /// x-band widths are irrelevant.)
+  @MainActor
+  static func hit(
+    _ point: CGPoint,
+    side: DiffSide,
+    tree: ChunkTree,
+    mode: DiffViewMode
+  ) -> DiffHit? {
+    guard let seekHit = tree.seek(y: point.y, mode: mode) else { return nil }
+    let resolved = seekHit.chunk.lineAndSide(for: .gutter(side), localRow: seekHit.localRow, mode: mode)
+    return DiffHit(
+      chunkID: seekHit.id,
+      column: .gutter(side),
+      lineNumber: resolved.line,
+      side: side,
       rowIndex: seekHit.rowIndex,
       subline: 0
     )

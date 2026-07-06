@@ -23,11 +23,16 @@ extension ChunkTree {
     return summary
   }
 
-  /// Index the node for O(1) lookup, and register a file header for file-nav.
+  /// Index the node for O(1) lookup, register a file header for file-nav, and
+  /// index any widget by its per-instance `WidgetKey` (Phase 6 model + measured-
+  /// height resolution).
   func register(_ node: ChunkNode) {
     nodesByID[node.id] = node
-    if case .widget(let widget) = node.chunk, case .fileHeader(let fileID) = widget.key {
-      fileHeaderNodes[fileID] = node.id
+    if case .widget(let widget) = node.chunk {
+      widgetNodes[widget.key] = node.id
+      if case .fileHeader(let fileID) = widget.key {
+        fileHeaderNodes[fileID] = node.id
+      }
     }
   }
 }
