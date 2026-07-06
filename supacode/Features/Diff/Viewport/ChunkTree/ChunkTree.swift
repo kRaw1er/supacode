@@ -274,6 +274,28 @@ final class ChunkTree {
     return startIndex + clamped
   }
 
+  // MARK: - Model-sourced copy projection (Phase 11)
+
+  /// Resolve a rendered-row index to the single `(side, lineNumber)` the row
+  /// displays, for model-sourced clean copy. `.old` for a deletion row, `.new` for a
+  /// context / addition row; `nil` for a widget row, a no-newline marker row, or an
+  /// empty split pane (nothing to copy). `lineNumber` is the git line number on
+  /// `side` (1-based, matching `DiffLine.oldLineNumber` / `.newLineNumber`); the
+  /// copy path translates it to the side store's own index. O(log n) via `seek`.
+  func diffLine(atRow row: Int, mode: DiffViewMode) -> (side: DiffSide, lineNumber: Int)? {
+    guard let hit = seek(index: row, mode: mode) else { return nil }
+    let rendered = hit.chunk.renderedRows(mode)
+    guard hit.localRow >= 0, hit.localRow < rendered.count else { return nil }
+    let renderedRow = rendered[hit.localRow]
+    guard !renderedRow.isMarker else { return nil }
+    if renderedRow.origin == .deletion {
+      guard let lineNumber = renderedRow.oldNumber else { return nil }
+      return (.old, lineNumber)
+    }
+    guard let lineNumber = renderedRow.newNumber else { return nil }
+    return (.new, lineNumber)
+  }
+
   // MARK: - Totals
 
   /// Rendered-row count in `mode` (root aggregate). O(1).

@@ -49,16 +49,25 @@ nonisolated struct WrappedSubLine {
 }
 
 /// The strict bottom→top paint order for one rendered diff row (the authoritative
-/// z-order `row-tint < word-diff < search/selection < syntax-fg` from the plan
-/// index). Exposed as an ordered list so Phase 11's search / selection band slots in
-/// between `.wordDiff` and `.glyphs` WITHOUT reordering the existing layers. Phase 5
-/// ships three passes; Phase 11 inserts its own case.
+/// z-order `row-tint < word-diff < search < syntax-fg` from the plan index). Exposed
+/// as an ordered list so Phase 11's search band slots in between `.wordDiff` and
+/// `.glyphs` WITHOUT reordering the existing layers. Phase 5 shipped three passes;
+/// Phase 11 inserts `.search` (⚠️ Deepening note — Phase 5 prose lumps search with
+/// the row-tint at the bottom; the plan index is authoritative and puts search
+/// ABOVE word-diff so an active match on a changed token stays visible instead of
+/// being masked by the word-diff tint). "Layer" is a z-ordered draw pass inside the
+/// row view — NOT a `CALayer` (which would composite above `drawRect` content and
+/// break this deterministic order).
 nonisolated enum DiffRowLayer: Int, CaseIterable, Comparable, Sendable {
   /// Full-row add/del substrate tint (bottom) — `GutterRenderer`.
   case rowTint
   /// Intra-line word-diff emphasis rects, ON TOP of the row tint, BEHIND the glyphs
   /// — `WordDiffBackgroundPainter`.
   case wordDiff
+  /// Search-match highlight rects, ON TOP of word-diff, BEHIND the glyphs —
+  /// `SearchMatchLayer` (Phase 11). Drawn AFTER word-diff so an active match on a
+  /// changed token samples as the search color, not the word-diff tint.
+  case search
   /// Glyphs via `CTLineDraw` (syntax foreground baked; background ignored by
   /// CoreText) — the terminal pass.
   case glyphs

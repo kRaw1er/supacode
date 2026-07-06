@@ -68,6 +68,24 @@ final class DiffPalette {
     Self.alphaTint(isOld ? delBase : addBase, alpha: 0.18)
   }
 
+  // MARK: - Search match highlight (Phase 11)
+
+  /// Find-highlight base — the conventional editor "find" yellow, system-derived so
+  /// it tracks appearance under the scoped exemption (no hand-picked hex).
+  var searchBase: NSColor { .systemYellow }
+  /// The current-nav match accent (a warmer tone than `searchBase` so the active hit
+  /// reads distinctly against the rest of the matches).
+  var searchCurrentBase: NSColor { .systemOrange }
+
+  /// All-matches tint (dim). The Phase-11 search band draws ABOVE row-tint (0.12)
+  /// AND word-diff (0.18) but BELOW the glyphs, so its alpha is deliberately higher
+  /// than both to read on top of a changed token (⚠️ Deepening note — Phase 11 wins
+  /// the z-order). A distinct alpha also makes the ordered-pass headless assertion
+  /// able to tell search from word-diff by its fill color.
+  var searchMatch: NSColor { Self.alphaTint(searchBase, alpha: 0.35) }
+  /// The current-nav match (accent, stronger) — sits at the top of the search band.
+  var searchCurrent: NSColor { Self.alphaTint(searchCurrentBase, alpha: 0.55) }
+
   /// A **dynamic** alpha-tinted color that re-resolves `base` under each
   /// appearance before applying `alpha`. Plain `NSColor.withAlphaComponent(_:)`
   /// snapshots a dynamic system color to whatever appearance is current at the

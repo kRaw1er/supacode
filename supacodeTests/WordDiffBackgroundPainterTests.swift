@@ -112,9 +112,10 @@ struct WordDiffBackgroundPainterTests {
   // MARK: - E 3.1 / C 5.15 three-pass z-order
 
   @Test func drawOrderRowtintWorddiffText() {
-    // P5 ships exactly three passes (P11 inserts its search band between wordDiff and
-    // glyphs); glyphs are the terminal, non-fill pass.
-    #expect(DiffRowLayer.drawOrder == [.rowTint, .wordDiff, .glyphs])
+    // P5 shipped three passes; P11 inserts its `.search` band between wordDiff and
+    // glyphs (⚠️ z-order: search draws AFTER word-diff). Glyphs are the terminal,
+    // non-fill pass.
+    #expect(DiffRowLayer.drawOrder == [.rowTint, .wordDiff, .search, .glyphs])
 
     let palette = DiffPalette.shared
     let gutter = GutterRenderer(metrics: CoreTextHarness.metrics, scale: 2, palette: palette)
@@ -133,6 +134,8 @@ struct WordDiffBackgroundPainterTests {
         WordDiffBackgroundPainter.fill(
           spans: [WordDiff.Span(range: 0..<3)], subLines: [sub],
           color: palette.wordEmphasis(isOld: false).cgColor, scale: 2, in: recording)
+      case .search:
+        break  // Phase 5 row draws no search band (Phase 11 owns that pass)
       case .glyphs:
         break  // CTLineDraw — terminal pass, not a DiffGraphics fill
       }
