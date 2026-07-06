@@ -1,0 +1,16 @@
+0 · widget:fileHeader
+1 · widget:hunkHeader
+2 · ctx · o1/n1 · "import Foundation" · [0..<6:keyword 6..<7: 7..<17:type]
+3 · ctx · o2/n2 · "" · []
+4 · ctx · o3/n3 · "struct Counter {" · [0..<6:keyword 6..<7: 7..<14:type 14..<16:]
+5 · ctx · o4/n4 · "  var count = 0" · [0..<2: 2..<5:keyword 5..<6: 6..<11:property 11..<14: 14..<15:number]
+6 · ctx · o5/n5 · "" · []
+7 · ctx · o6/n6 · "  mutating func increment() {" · []
+8 · del · o7/n- · "    count = count + 1" · [0..<10: 10..<11:operator#wordDiffDeletion 11..<18:#wordDiffDeletion 18..<19:operator#wordDiffDeletion 19..<20:#wordDiffDeletion 20..<21:number#wordDiffDeletion]
+9 · add · o-/n7 · "    count += 1" · [0..<10: 10..<12:operator#wordDiffAddition 12..<13:#wordDiffAddition 13..<14:number#wordDiffAddition]
+10 · ctx · o8/n8 · "  }" · []
+11 · ctx · o9/n9 · "" · []
+12 · ctx · o10/n10 · "  func describe() -> String {" · []
+13 · ctx · o11/n11 · "    return "count: \(count)"" · []
+14 · ctx · o12/n12 · "  }" · []
+15 · ctx · o13/n13 · "}" · []
