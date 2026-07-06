@@ -136,6 +136,12 @@ final class DiffKeyboardNav {
   private(set) var focusedRowIndex = 0
   private let send: (DiffReviewFeature.Action) -> Void  // views send actions
 
+  /// Phase 12 — the keyboard→VoiceOver focus mirror. Invoked after a keyboard nav
+  /// lands `focusedRowIndex` (already revealed) so the AX provider drags the
+  /// VoiceOver cursor along (`keyboardDidFocus` posts `.focusedUIElementChanged`).
+  /// Wired by the viewport seam; `nil` when no VoiceOver bridge is installed.
+  var onFocusRow: ((Int) -> Void)?
+
   init(
     controller: any DiffRevealing,
     tree: ChunkTree,
@@ -209,6 +215,17 @@ final class DiffKeyboardNav {
     guard rowCount > 0 else { return }
     focusedRowIndex = min(max(0, index), rowCount - 1)
     controller.reveal(row: focusedRowIndex, align: align)  // Phase 12 VO focus routes through the same call
+    onFocusRow?(focusedRowIndex)  // keyboard → VoiceOver cursor mirror
+  }
+
+  /// Phase 12 — VoiceOver moved its cursor; mirror it into the keyboard cursor
+  /// WITHOUT re-revealing (the AX provider already scrolled the row in) or
+  /// re-emitting focus (the provider guards the mirror with `suppressFocusPost`, so
+  /// the SoT stays single). Clamps into range like `focusRow`.
+  func syncFocusedRow(_ index: Int) {
+    let rowCount = tree.rowCount(controller.currentMode)
+    guard rowCount > 0 else { return }
+    focusedRowIndex = min(max(0, index), rowCount - 1)
   }
 
   /// Walk the change-block start rows and land on the next / previous one relative to

@@ -56,103 +56,16 @@ final class DiffCellView: NSView {
     self.mode = mode
     self.highlight = highlight
     self.callbacks = callbacks
-    configureAccessibility(for: row)
     needsDisplay = true
   }
 
-  /// VoiceOver exposure for a custom-drawn cell: each recycled `DiffCellView`
-  /// re-publishes its role + label from the row it is configured with, so the
-  /// virtualized table reads correctly without a retained control per row.
-  private func configureAccessibility(for row: DiffRow) {
-    setAccessibilityElement(true)
-    setAccessibilityCustomActions([])
-    switch row {
-    case .expander(_, _, let hiddenCount):
-      setAccessibilityRole(.button)
-      setAccessibilityLabel("Show \(hiddenCount) hidden line\(hiddenCount == 1 ? "" : "s")")
-    case .hunkHeader(_, let text):
-      setAccessibilityRole(.staticText)
-      setAccessibilityLabel("Hunk header, \(text)")
-    case .line, .splitLine:
-      setAccessibilityRole(.staticText)
-      setAccessibilityLabel(Self.axLabel(for: row, mode: mode))
-      // Expose the gutter "+" as a real, focusable rotor action so VoiceOver
-      // users don't depend on hover to add a review comment on the line.
-      if let anchor = Self.commentAnchor(for: row) {
-        let action = NSAccessibilityCustomAction(name: "Add comment on line \(anchor.line)") { [weak self] in
-          self?.callbacks?.onAddComment(anchor.side, anchor.line)
-          return true
-        }
-        setAccessibilityCustomActions([action])
-      }
-    default:
-      setAccessibilityRole(.staticText)
-      setAccessibilityLabel(Self.axLabel(for: row, mode: mode))
-    }
-  }
-
-  /// The `(side, line)` the gutter "+" would target for a line/split row, or nil
-  /// for a gap / marker cell. Unified deletions anchor on the old side; additions
-  /// and context on the new side. Split rows prefer the new side when present.
-  static func commentAnchor(for row: DiffRow) -> (side: DiffSide, line: Int)? {
-    switch row {
-    case .line(let line):
-      guard line.origin != .noNewlineMarker else { return nil }
-      if line.origin == .deletion, let old = line.oldLineNumber { return (.old, old) }
-      if let new = line.newLineNumber { return (.new, new) }
-      if let old = line.oldLineNumber { return (.old, old) }
-      return nil
-    case .splitLine(_, let old, let new):
-      if let new, new.origin != .noNewlineMarker, let line = new.newLineNumber { return (.new, line) }
-      if let old, old.origin != .noNewlineMarker, let line = old.oldLineNumber { return (.old, line) }
-      return nil
-    default:
-      return nil
-    }
-  }
-
-  /// The spoken label for a row. Line rows read "<origin> line <n>: <content>";
-  /// split rows name each side; comment threads read the anchored range + body.
-  static func axLabel(for row: DiffRow, mode: DiffViewMode) -> String {
-    switch row {
-    case .line(let line):
-      return lineLabel(line)
-    case .splitLine(_, let old, let new):
-      var parts: [String] = []
-      if let old { parts.append("old, \(lineLabel(old))") }
-      if let new { parts.append("new, \(lineLabel(new))") }
-      return parts.isEmpty ? "blank line" : parts.joined(separator: ", ")
-    case .plainFallback(let number, let text):
-      return "line \(number): \(text)"
-    case .placeholder(let placeholder):
-      return placeholderText(placeholder)
-    case .commentThread(let comment):
-      let sideWord = comment.side == .old ? "old" : "new"
-      let range =
-        comment.startLine == comment.endLine
-        ? "\(comment.startLine)" : "\(comment.startLine) to \(comment.endLine)"
-      let orphan = comment.orphaned ? "Orphaned — original line no longer present. " : ""
-      return "\(orphan)Comment on \(sideWord) line \(range): \(comment.body)"
-    case .hunkHeader(_, let text):
-      return "Hunk header, \(text)"
-    case .expander(_, _, let hiddenCount):
-      return "Show \(hiddenCount) hidden line\(hiddenCount == 1 ? "" : "s")"
-    }
-  }
-
-  private static func lineLabel(_ line: DiffLine) -> String {
-    let origin: String
-    switch line.origin {
-    case .addition: origin = "added"
-    case .deletion: origin = "removed"
-    case .context: origin = "context"
-    case .noNewlineMarker: return line.content
-    }
-    if let number = line.newLineNumber ?? line.oldLineNumber {
-      return "\(origin) line \(number): \(line.content)"
-    }
-    return "\(origin): \(line.content)"
-  }
+  // NOTE: VoiceOver exposure for the diff body moved OUT of this recycled view in
+  // Phase 12. A recycled cell republishing role/label on every `configure` is the
+  // pool-coupled a11y model the new viewport rejects; the synthesized
+  // `DiffLineAXElement`s on the `documentView` own diff a11y now, and the pure
+  // string logic (`axLabel` / `lineLabel` / `commentAnchor`) moved verbatim into
+  // `DiffAXText`. `Callbacks.onAddComment` stays for the legacy table controller
+  // until the Phase-13 seam swap deletes this viewer wholesale.
 
   /// Re-applies just the composited styling (after async highlights arrive)
   /// without rebuilding the row, then redraws.

@@ -296,6 +296,18 @@ final class ChunkTree {
     return (.new, lineNumber)
   }
 
+  // MARK: - Accessibility geometry (Phase 12 consumer-API)
+
+  /// The document-space rect of a materialized row in `mode` — a pure O(log n) seek
+  /// that is VALID OFFSCREEN (no dependency on any live / recycled view), so
+  /// `DiffLineAXElement.accessibilityFrameInParentSpace` hands VoiceOver a real frame
+  /// for a line far off either edge. `x` is always 0 (full-bleed rows); `width` is
+  /// the AX-parent (documentView) width. `.zero` for an out-of-range row.
+  func rowFrameInDocument(_ row: Int, mode: DiffViewMode, width: CGFloat) -> CGRect {
+    guard let hit = seek(index: row, mode: mode) else { return .zero }
+    return CGRect(x: 0, y: hit.yOrigin, width: width, height: hit.rowHeight)
+  }
+
   // MARK: - Totals
 
   /// Rendered-row count in `mode` (root aggregate). O(1).

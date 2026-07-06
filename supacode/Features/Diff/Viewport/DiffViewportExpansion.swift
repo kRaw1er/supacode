@@ -52,6 +52,7 @@ extension DiffViewportController {
     }
     expansionNodes[gap] = inserted
     restoreScrollAnchor(scrollAnchor)
+    axProvider?.reload()  // revealed lines grew the tree → re-read the now-visible rows
     return true
   }
 
@@ -71,6 +72,7 @@ extension DiffViewportController {
     }
     originalExpanders[gap] = nil
     restoreScrollAnchor(scrollAnchor)
+    axProvider?.reload()  // re-hiding the gap shrank the tree back to one expander row
     return true
   }
 

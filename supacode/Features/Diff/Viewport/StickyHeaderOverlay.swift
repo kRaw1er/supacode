@@ -45,7 +45,13 @@ final class StickyHeaderOverlay {
     self.resolveModel = resolveModel
     hosting.sizingOptions = []  // harness owns the frame (Phase 6 widget rule)
     container.addSubview(hosting)
-    container.setAccessibilityElement(false)  // Phase 12: hidden → no double-announce
+    // Phase 12: the pinned overlay duplicates a file-header widget that already lives
+    // in the tree (and is an AX element via the synthesized set), so hide the whole
+    // overlay subtree from VoiceOver — otherwise the file is announced twice while
+    // scrolling. `setAccessibilityHidden(true)` hides the container AND its hosted
+    // SwiftUI header (`NSAccessibility.h:462`).
+    container.setAccessibilityElement(false)
+    container.setAccessibilityHidden(true)
     container.isHidden = true
     scrollView.addFloatingSubview(container, for: .vertical)  // subview of contentView (clip view)
   }

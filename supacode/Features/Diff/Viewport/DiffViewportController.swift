@@ -31,6 +31,15 @@ final class DiffViewportController: NSObject {
   /// content identity, not position). Dropped wholesale on a style flip.
   let ctLineCache = CTLineCache()
 
+  /// Phase 12 — the accessibility tree owner. Installed by the viewport seam (it
+  /// needs the reducer's comment / file-header side caches + the expand / comment /
+  /// keyboard-nav wiring the controller doesn't hold). `reload()` is driven from
+  /// every structural mutation (re-diff / mode toggle / expand / collapse / comment
+  /// insert-remove) so the synthesized element set tracks the materialized-row
+  /// COUNT — never on scroll, never on recycle; per-row labels / frames re-seek the
+  /// tree lazily on each VoiceOver query.
+  var axProvider: DiffAXProvider?
+
   /// The materialized-window map: each placed chunk's anchor identity → its
   /// `yOrigin`, rebuilt every `layoutVisibleChunks`. **Bounded by window size**
   /// (Note A) — NOT a 1M-entry line→y index and NOT a widened Phase-1 API. The
@@ -125,6 +134,7 @@ final class DiffViewportController: NSObject {
       restore(anchor)
       layoutVisibleChunks()
     }
+    axProvider?.reload()  // re-diff / mode change → materialized-row count may have changed
   }
 
   private func resizeDocument() {
@@ -450,6 +460,7 @@ final class DiffViewportController: NSObject {
     }
     clampScrollOrigin()
     layoutVisibleChunks()
+    axProvider?.reload()  // unified↔split changes the row count + per-row labels
     Self.logger.debug("mode toggle \(oldMode) → \(newMode) re-seek (no reproject)")
   }
 
@@ -637,6 +648,7 @@ final class DiffViewportController: NSObject {
     let inserted = tree.insert(.widget(widget), after: anchorChunk)
     let scrollAnchor = captureAnchor()
     restoreScrollAnchor(scrollAnchor)
+    axProvider?.reload()  // a new comment thread widget grows the materialized-row count
     return inserted
   }
 
@@ -648,6 +660,7 @@ final class DiffViewportController: NSObject {
     let scrollAnchor = captureAnchor()
     let removed = tree.remove(node.id)
     restoreScrollAnchor(scrollAnchor)
+    axProvider?.reload()  // removing a comment thread widget shrinks the row count
     return removed
   }
 
