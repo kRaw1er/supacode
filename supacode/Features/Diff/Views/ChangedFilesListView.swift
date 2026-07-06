@@ -62,23 +62,34 @@ struct ChangedFilesListView: View {
 
   /// Two Orca-style sections: "Uncommitted" (working tree vs HEAD) and, when a
   /// base ref resolved, "vs `<base>`" (committed `merge-base..HEAD` changes).
+  ///
+  /// Wrapped in a `ScrollViewReader` so a scroll-spy move in the diff body
+  /// (`.diffActiveFileChanged` → `store.activeFileID`) keeps the highlighted file
+  /// visible in the inspector (body → list). The reverse link (list → body) is a tap
+  /// sending `.diffJumpToFile`, which the diff viewport drains as a one-shot scroll.
   @ViewBuilder
   private func fileList(updating: Bool) -> some View {
-    List {
-      Section {
-        uncommittedSection(updating: updating)
-      } header: {
-        Text("Uncommitted")
-      }
-      if let title = store.baseSectionTitle, let baseRef = store.baseRef {
+    ScrollViewReader { proxy in
+      List {
         Section {
-          baseSection(baseRef: baseRef)
+          uncommittedSection(updating: updating)
         } header: {
-          Text(title)
+          Text("Uncommitted")
+        }
+        if let title = store.baseSectionTitle, let baseRef = store.baseRef {
+          Section {
+            baseSection(baseRef: baseRef)
+          } header: {
+            Text(title)
+          }
         }
       }
+      .listStyle(.inset)
+      .onChange(of: store.activeFileID) { _, id in
+        guard let id else { return }
+        withAnimation { proxy.scrollTo(id, anchor: .center) }
+      }
     }
-    .listStyle(.inset)
   }
 
   /// Working-tree (uncommitted) rows. Empty here only ever shows when a base
@@ -98,7 +109,7 @@ struct ChangedFilesListView: View {
     } else {
       ForEach(store.files) { file in
         // file.id = newPath ?? oldPath ?? ""
-        fileRow(file, source: .workingTree, axPrefix: nil)
+        fileRow(file, source: .workingTree, axPrefix: nil, scrollSpy: true)
       }
     }
   }
@@ -116,7 +127,7 @@ struct ChangedFilesListView: View {
           .listRowSeparator(.hidden)
       }
       ForEach(store.baseFiles) { file in
-        fileRow(file, source: .baseBranch(ref: baseRef), axPrefix: "vs \(baseName)")
+        fileRow(file, source: .baseBranch(ref: baseRef), axPrefix: "vs \(baseName)", scrollSpy: false)
       }
     case .empty:
       Label("Up to date with \(baseName)", systemImage: "checkmark.circle")
@@ -137,14 +148,27 @@ struct ChangedFilesListView: View {
 
   /// A tappable changed-file row shared by both sections. `axPrefix` prefixes the
   /// VoiceOver label so a file appearing in both sections is distinguishable.
+  /// `scrollSpy` rows (the working-tree section, the diff viewport's scroll-spy
+  /// target) highlight when active and, on tap, also record a jump-to-file intent.
   @ViewBuilder
-  private func fileRow(_ file: FileChange, source: DiffSource, axPrefix: String?) -> some View {
+  private func fileRow(_ file: FileChange, source: DiffSource, axPrefix: String?, scrollSpy: Bool) -> some View {
     FileChangeRow(file: file)
       .contentShape(Rectangle())
-      .onTapGesture { store.send(.openFile(path: file.id, source: source)) }
+      .onTapGesture {
+        store.send(.openFile(path: file.id, source: source))
+        if scrollSpy { store.send(.diffJumpToFile(file.id)) }
+      }
       .accessibilityAddTraits(.isButton)
       .accessibilityHint("Opens the diff in a new tab")
       .accessibilityLabel(axPrefix.map { "\($0): \(FileChangeRow.axLabel(file))" } ?? FileChangeRow.axLabel(file))
+      .listRowBackground(rowHighlight(for: file, scrollSpy: scrollSpy))
+  }
+
+  /// The active-file selection highlight for a scroll-spy row (system selection
+  /// color, subdued); `nil` for inactive / non-spy rows so the default backing shows.
+  private func rowHighlight(for file: FileChange, scrollSpy: Bool) -> Color? {
+    guard scrollSpy, store.activeFileID == file.id else { return nil }
+    return Color(nsColor: .selectedContentBackgroundColor).opacity(0.35)
   }
 
   private static func message(for error: DiffError) -> String {

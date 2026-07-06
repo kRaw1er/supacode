@@ -448,6 +448,7 @@ struct SupacodeApp: App {
       Group {
         TerminalCommands(ghosttyShortcuts: ghosttyShortcuts)
         TerminalTabSelectionCommands(store: store)
+        DiffNavigationCommands()
       }
       WindowCommands(ghosttyShortcuts: ghosttyShortcuts)
       CommandGroup(after: .textEditing) {

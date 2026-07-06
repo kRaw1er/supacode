@@ -8,16 +8,72 @@ import SwiftUI
 @MainActor
 final class FileHeaderWidget: DiffWidget {
   /// The resolved-by-`WidgetKey` model. Scalars only — the rich model lives here,
-  /// not on the tree chunk (D3).
+  /// not on the tree chunk (D3). `path` already carries the rename arrow
+  /// (`old → new`); `addedLines` / `removedLines` mirror pierre's
+  /// `createFileHeaderElement` +/- counts. The Phase-10 sticky overlay renders the
+  /// **same** `Model`, so the pinned copy is a faithful 1:1 mirror.
   struct Model: Equatable {
     var path: String
     var statusText: String
+    var addedLines: Int
+    var removedLines: Int
     var canCommentOnFile: Bool
 
-    init(path: String, statusText: String, canCommentOnFile: Bool = true) {
+    init(
+      path: String,
+      statusText: String,
+      addedLines: Int = 0,
+      removedLines: Int = 0,
+      canCommentOnFile: Bool = true
+    ) {
       self.path = path
       self.statusText = statusText
+      self.addedLines = addedLines
+      self.removedLines = removedLines
       self.canCommentOnFile = canCommentOnFile
+    }
+
+    /// Build the header model from a `FileChange` — the single canonical mapping
+    /// shared by the in-flow header widget AND the Phase-10 sticky overlay, so the
+    /// two never drift (ports pierre `createFileHeaderElement`: name / rename arrow /
+    /// +/- counts).
+    static func make(from file: FileChange, canCommentOnFile: Bool = true) -> Model {
+      let path: String
+      if file.status == .renamed, let old = file.oldPath, let new = file.newPath, old != new {
+        path = "\(old) → \(new)"
+      } else {
+        path = file.newPath ?? file.oldPath ?? ""
+      }
+      return Model(
+        path: path,
+        statusText: Self.statusText(for: file.status),
+        addedLines: file.addedLines,
+        removedLines: file.removedLines,
+        canCommentOnFile: canCommentOnFile
+      )
+    }
+
+    /// A non-interactive copy for the pinned sticky header (a static header renders
+    /// no buttons → no tooltip obligation; the in-flow header keeps its affordance).
+    var staticMirror: Model {
+      var copy = self
+      copy.canCommentOnFile = false
+      return copy
+    }
+
+    private static func statusText(for status: FileStatus) -> String {
+      switch status {
+      case .added: "Added"
+      case .untracked: "Untracked"
+      case .modified: "Modified"
+      case .deleted: "Deleted"
+      case .renamed: "Renamed"
+      case .copied: "Copied"
+      case .modeChanged: "Mode Changed"
+      case .binary: "Binary"
+      case .submodule: "Submodule"
+      case .conflicted: "Conflicted"
+      }
     }
   }
 
@@ -57,9 +113,11 @@ final class FileHeaderWidget: DiffWidget {
   }
 }
 
-/// The file-header row body (path, status badge, "Comment on file"). Layout-
-/// agnostic; the parent host owns the width.
-private struct FileHeaderView: View {
+/// The file-header row body (path, status badge, +/- counts, "Comment on file").
+/// Layout-agnostic; the parent host owns the width. Internal (not `private`) so the
+/// Phase-10 sticky overlay renders the identical body from the same `Model` (a
+/// pixel-faithful pinned mirror).
+struct FileHeaderView: View {
   let model: FileHeaderWidget.Model
   let onCommentOnFile: () -> Void
 
@@ -78,6 +136,15 @@ private struct FileHeaderView: View {
         .padding(.vertical, 2)
         .background(.quaternary, in: Capsule())
         .foregroundStyle(.secondary)
+      if model.addedLines > 0 || model.removedLines > 0 {
+        HStack(spacing: 4) {
+          Text("+\(model.addedLines)").foregroundStyle(.green)
+          Text("−\(model.removedLines)").foregroundStyle(.red)
+        }
+        .font(.caption.monospaced())
+        .help("\(model.addedLines) added, \(model.removedLines) removed")
+        .accessibilityLabel("\(model.addedLines) added, \(model.removedLines) removed")
+      }
       Spacer(minLength: 8)
       if model.canCommentOnFile {
         Button(action: onCommentOnFile) {
@@ -90,5 +157,29 @@ private struct FileHeaderView: View {
     }
     .padding(.horizontal, 12)
     .frame(minHeight: ChunkLayoutMetrics.production.diffHeaderHeight)
+  }
+}
+
+/// The pinned file-header body rendered into the Phase-10 `StickyHeaderOverlay`
+/// floating subview. A thin wrapper over the **same** `FileHeaderView` + `Model` the
+/// in-flow header uses, so the pinned copy is pixel-identical (minus interactive
+/// affordances — a static header carries no buttons). A `.bar` material backing
+/// keeps scrolled content from bleeding through.
+struct StickyFileHeaderView: View {
+  let model: FileHeaderWidget.Model?
+
+  var body: some View {
+    Group {
+      if let model {
+        FileHeaderView(model: model.staticMirror, onCommentOnFile: {})
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .frame(height: ChunkLayoutMetrics.production.diffHeaderHeight)
+          .background(.bar)
+          .overlay(alignment: .bottom) { Divider() }
+      } else {
+        Color.clear
+      }
+    }
+    .accessibilityHidden(true)
   }
 }

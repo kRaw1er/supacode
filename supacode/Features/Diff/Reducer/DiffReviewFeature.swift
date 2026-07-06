@@ -84,6 +84,15 @@ nonisolated struct DiffDocumentKey: Hashable, Sendable {
   var source: DiffSource
 }
 
+/// A one-shot scroll intent the diff viewport consumes once (jump-to-file from the
+/// inspector, Phase 10). Distinct from the tree's geometric `ScrollTarget`: this is
+/// the reducer-level "please scroll the body to this file" the representable drains
+/// on its next `updateNSView`, then clears via `.diffScrollTargetConsumed` — the same
+/// consume-once pattern the app uses for setup-script consumption.
+nonisolated enum PendingScrollTarget: Equatable, Sendable {
+  case file(FileChange.ID)
+}
+
 // MARK: - Gap geometry (Phase 7 — bounding-hunk math, mirrored from the builder)
 
 extension DiffDocument {
@@ -197,6 +206,23 @@ struct DiffReviewFeature {
     /// diff from a previous worktree can't overwrite the current one (8.1).
     var baseGeneration: Int = 0
 
+    // MARK: Phase 10 — sticky header / keyboard nav / scroll-spy
+
+    /// The file currently owning the diff viewport's top edge (scroll-spy body →
+    /// list). Display-only: drives the inspector row highlight + auto-scroll; does
+    /// NOT trigger any structural recompute. `nil` before the first scroll-spy tick.
+    var activeFileID: FileChange.ID?
+    /// A one-shot jump-to-file scroll intent (inspector list → body). Set by
+    /// `.diffJumpToFile`, drained by the viewport representable, cleared by
+    /// `.diffScrollTargetConsumed` (consume-once).
+    var pendingScrollTarget: PendingScrollTarget?
+    /// Whether the `?` keyboard-shortcuts help overlay is showing (toggled by
+    /// `.diffShowKeyboardHelp` from `DiffKeyboardNav`).
+    var keyboardHelpVisible = false
+    /// Set true by `.diffBeginFind` (`/`) — the entry-point flag the Phase-11 find
+    /// bar consumes to open itself. Cleared when find opens.
+    var findRequested = false
+
     /// Open center diff tabs, keyed by `(path, source)`. Additive over the
     /// Phase 0 state (`DiffTabPayload` stays `filePath`-only; the document lives here).
     var openDiffs: [DiffDocumentKey: DiffDocument] = [:]
@@ -293,6 +319,26 @@ struct DiffReviewFeature {
     case gapSliceLoaded(key: DiffDocumentKey, gap: Int, lines: [DiffLine], token: Int)
     /// A blob slice failed (non-fatal) → the gap stays collapsed.
     case gapSliceFailed(key: DiffDocumentKey, gap: Int, DiffError, token: Int)
+
+    // MARK: Phase 10 — sticky header / keyboard nav / scroll-spy
+    /// Body → list: the diff viewport scroll-spy resolved a new owning file
+    /// (`y → chunk → file`, change-only dedupe). Display-only (row highlight).
+    case diffActiveFileChanged(FileChange.ID)
+    /// List → body: the user picked a file in the inspector → record a one-shot
+    /// scroll intent the viewport drains, and highlight the row immediately.
+    case diffJumpToFile(FileChange.ID)
+    /// The viewport consumed the pending scroll target (consume-once).
+    case diffScrollTargetConsumed
+    /// `?` — toggle the keyboard-shortcuts help overlay.
+    case diffShowKeyboardHelp
+    /// `/` — request the find bar (Phase 11 entry point).
+    case diffBeginFind
+    /// `o` — reveal every collapsed gap of a file (declarative whole-file expand,
+    /// reuses Phase-7 `ExpansionState.full`).
+    case diffExpandWholeFile(fileID: FileChange.ID)
+    /// `e` / `⇧E` — grow (`delta > 0`) or re-hide (`delta < 0`) a file's inter-hunk
+    /// context (declarative, reuses Phase-7 `ExpansionState`).
+    case diffExpandContext(fileID: FileChange.ID, delta: Int)
 
     // MARK: Phase 4 — neon syntax highlighting driver
     /// Viewport scrolled/resized → (re)issue a windowed highlight for `range`,
@@ -705,6 +751,68 @@ struct DiffReviewFeature {
         guard state.openDiffs[key]?.generation == token else { return .none }
         // Non-fatal: the gap stays collapsed (last-good), the user can retry.
         Self.logger.error("gap slice failed for \(key.path) gap \(gap): \(String(describing: error))")
+        return .none
+
+      // MARK: Phase 10 — sticky header / keyboard nav / scroll-spy
+
+      case .diffActiveFileChanged(let id):
+        // Display-only: highlight the inspector row. NO structural recompute — this
+        // reducer is disjoint from the sidebar structure cache (CLAUDE.md sidebar-perf
+        // discipline: a display-only mutation must not invalidate unrelated state).
+        state.activeFileID = id
+        return .none
+
+      case .diffJumpToFile(let id):
+        // List → body: record the one-shot scroll intent for the viewport to drain,
+        // and highlight the row now so the inspector reflects the pick immediately.
+        state.pendingScrollTarget = .file(id)
+        state.activeFileID = id
+        return .none
+
+      case .diffScrollTargetConsumed:
+        state.pendingScrollTarget = nil
+        return .none
+
+      case .diffShowKeyboardHelp:
+        state.keyboardHelpVisible.toggle()
+        return .none
+
+      case .diffBeginFind:
+        state.findRequested = true
+        return .none
+
+      case .diffExpandWholeFile(let fileID):
+        // Declarative whole-file reveal (Phase-7 `ExpansionState.full`). The ChunkTree
+        // viewport is a projection of `expansion` (the source of truth) and windows the
+        // revealed lines lazily on scroll, so no eager blob slice is needed here — the
+        // per-gap `.expandGap` path owns the incremental slice.
+        for key in state.openDiffs.keys where key.path == fileID {
+          guard var document = state.openDiffs[key], document.expansion != .full else { continue }
+          document.expansion = .full
+          document.revision &+= 1
+          state.openDiffs[key] = document
+        }
+        return .none
+
+      case .diffExpandContext(let fileID, let delta):
+        for key in state.openDiffs.keys where key.path == fileID {
+          guard var document = state.openDiffs[key] else { continue }
+          if delta > 0 {
+            // Grow every gap's context by one fine step, both ends (`.full` is
+            // all-or-nothing and a no-op under `expand`).
+            for gap in 0...document.hunks.count {
+              document.expansion.expand(gap: gap, by: .fine, direction: .both)
+            }
+          } else if delta < 0 {
+            // Re-hide: drop back to the collapsed default.
+            document.expansion = .collapsed
+            document.revealed.removeAll()
+          } else {
+            continue
+          }
+          document.revision &+= 1
+          state.openDiffs[key] = document
+        }
         return .none
 
       // MARK: Phase 4 — neon syntax highlighting driver

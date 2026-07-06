@@ -9,11 +9,30 @@ import AppKit
 final class DiffViewportView: NSView {
   weak var controller: DiffViewportController?
 
+  /// Phase 10 — single-letter diff-body navigation (`n`/`p`/`[`/`]`/`j`/`k`/…). Set
+  /// by the viewport seam once the tree + reducer send are wired. Routed from
+  /// `keyDown` WHILE THIS VIEW HOLDS FIRST RESPONDER, so the keys are inert whenever
+  /// the comment editor (a different first responder) is focused — AppKit routes
+  /// `keyDown` to the current first responder, never broadcasts it, so no FR guard is
+  /// needed here (unlike `performKeyEquivalent`).
+  weak var keyboardNav: DiffKeyboardNav?
+
   override var isFlipped: Bool { true }
+
+  /// The viewport takes first responder so diff-body key navigation works. The
+  /// comment editor's `NSHostingView` steals FR for typing (mutually exclusive).
+  override var acceptsFirstResponder: Bool { true }
 
   override func layout() {
     super.layout()
     controller?.layoutVisibleChunks()
+  }
+
+  /// Route single-letter nav keys to `DiffKeyboardNav` first; unhandled keys fall
+  /// through to the responder chain (so ↑/↓/⌘-chords keep working).
+  override func keyDown(with event: NSEvent) {
+    if keyboardNav?.handle(event) == true { return }
+    super.keyDown(with: event)
   }
 
   /// Appearance / Dynamic Type flip → bump `styleGeneration`, drop the CTLine
