@@ -14,7 +14,7 @@ enum DiffAXText {
   /// The spoken label for a `DiffRow`. Line rows read "<origin> line <n>: <content>";
   /// split rows name each side; comment threads read the anchored range + body.
   /// (Ported from `DiffCellView.axLabel(for:mode:)`.)
-  static func label(for row: DiffRow, mode: DiffViewMode) -> String {
+  static func label(for row: DiffAXRow, mode: DiffViewMode) -> String {
     switch row {
     case .line(let line):
       return lineLabel(line)
@@ -60,7 +60,7 @@ enum DiffAXText {
   /// for a gap / marker cell. Unified deletions anchor on the old side; additions
   /// and context on the new side. Split rows prefer the new side when present.
   /// (Ported from `DiffCellView.commentAnchor(for:)`.)
-  static func commentAnchor(for row: DiffRow) -> (side: DiffSide, line: Int)? {
+  static func commentAnchor(for row: DiffAXRow) -> (side: DiffSide, line: Int)? {
     switch row {
     case .line(let line):
       guard line.origin != .noNewlineMarker else { return nil }
@@ -90,6 +90,8 @@ enum DiffAXText {
       return oldMode.isEmpty || newMode.isEmpty ? "File mode changed" : "File mode changed \(oldMode) → \(newMode)"
     case .submodule(let oldSHA, let newSHA):
       return oldSHA.isEmpty || newSHA.isEmpty ? "Submodule changed" : "Submodule \(oldSHA) → \(newSHA)"
+    case .imageCompare: return "Image file — before and after compare"
+    case .conflict: return "Merge conflict"
     }
   }
 

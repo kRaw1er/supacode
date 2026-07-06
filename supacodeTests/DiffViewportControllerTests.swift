@@ -174,7 +174,7 @@ struct DiffViewportControllerTests {
     #expect(!lineViews.isEmpty)
     #expect(!widgetViews.isEmpty)
     for view in lineViews { #expect(view is LineRowView) }
-    for view in widgetViews { #expect(view is DiffWidgetPlaceholderView) }
+    for view in widgetViews { #expect(view is WidgetHostChunkView) }
     // Scroll away and back: a line chunk re-materializes with a LineRowView from
     // the line pool — a header pool never yields a line, and vice-versa.
     controller.scroll(toY: 10000)
@@ -243,7 +243,7 @@ struct DiffViewportControllerTests {
 
     controller.apply(tree: tree, mode: .unified, scrollPreserving: false)  // top: A visible
     let viewA = controller.pools[.widget(.commentThread)]?.getView(forKey: aID)
-    #expect((viewA as? DiffWidgetPlaceholderView)?.configuredKey == .commentThread(anchorID: idA))
+    #expect((viewA as? WidgetHostChunkView)?.mountedKey == .commentThread(anchorID: idA))
 
     controller.scroll(toY: 3000)  // neither A nor B visible → A recycled off
     #expect(controller.pools[.widget(.commentThread)]?.getView(forKey: aID) == nil)
@@ -252,7 +252,7 @@ struct DiffViewportControllerTests {
     let viewB = controller.pools[.widget(.commentThread)]?.getView(forKey: bID)
     #expect(viewB === viewA)  // SAME recycled instance (ChunkID keys the view)
     // …resolved to B's MODEL via WidgetKey, never A's stale model.
-    #expect((viewB as? DiffWidgetPlaceholderView)?.configuredKey == .commentThread(anchorID: idB))
+    #expect((viewB as? WidgetHostChunkView)?.mountedKey == .commentThread(anchorID: idB))
   }
 
   // MARK: - Differential oracle — windowed seek == full-render slice, both modes

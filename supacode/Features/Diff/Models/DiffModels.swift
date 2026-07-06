@@ -135,3 +135,26 @@ nonisolated enum DiffError: Error, Equatable, Sendable {
   /// it as "hide the base-branch section" rather than surfacing a failure.
   case baseRefUnresolved
 }
+
+/// A whole-file placeholder shown in place of a line list when there is no
+/// textual diff to render (binary / mode / deleted / submodule / empty), plus the
+/// two edge-diff kinds routed to a dedicated widget: an image compare and a merge
+/// conflict. `nonisolated` so it embeds in the pure (off-main) chunk-tree value
+/// types alongside `DiffLineOrigin` / `FileStatus`. (Relocated from the deleted
+/// `DiffRow.swift` in the Phase-13 seam swap — the ChunkTree `WidgetPayload`
+/// carries it.)
+nonisolated enum FilePlaceholder: Hashable, Sendable {
+  case binaryFile
+  case deletedFile
+  case addedEmpty
+  case noChanges
+  case modeChangeOnly(oldMode: String, newMode: String)
+  case submodule(oldSHA: String, newSHA: String)
+  /// A binary file whose path carries an image extension — routed to the
+  /// `ImageCompareWidget` (before/after compare; blob-bytes read is a gated
+  /// follow-up, ⚠️ note 1, so it renders the binary summary in the interim).
+  case imageCompare
+  /// A file with merge-conflict markers — routed to the `ConflictWidget`
+  /// (line-type tint + accept-ours/theirs, gated on straddling hunks).
+  case conflict
+}

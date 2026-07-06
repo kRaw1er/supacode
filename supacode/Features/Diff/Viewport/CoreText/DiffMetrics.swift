@@ -34,22 +34,11 @@ struct DiffMetrics {
     )
   }
 
-  /// Returns a copy whose gutter is wide enough for the largest line number in
-  /// `rows` (keeps the code column aligned as numbers grow past 9,999).
-  func withGutter(for rows: [DiffRow]) -> DiffMetrics {
-    var maxNumber = 0
-    for row in rows {
-      switch row {
-      case .line(let line):
-        maxNumber = max(maxNumber, line.oldLineNumber ?? 0, line.newLineNumber ?? 0)
-      case .splitLine(_, let old, let new):
-        maxNumber = max(maxNumber, old?.oldLineNumber ?? 0, new?.newLineNumber ?? 0)
-      case .plainFallback(let number, _):
-        maxNumber = max(maxNumber, number)
-      default:
-        break
-      }
-    }
+  /// Returns a copy whose gutter is wide enough for `maxLineNumber` (keeps the
+  /// code column aligned as numbers grow past 9,999). The tree viewport resolves
+  /// the largest rendered line number from the visible window directly, so this
+  /// takes a scalar (the flat `[DiffRow]` overload retired in the Phase-13 swap).
+  func withGutter(forMaxLineNumber maxNumber: Int) -> DiffMetrics {
     let digits = max(3, String(maxNumber).count)
     let width = charWidth * CGFloat(digits) + 10
     return DiffMetrics(

@@ -66,7 +66,6 @@ struct DiffNavReducerTests {
 
     await store.send(.diffExpandWholeFile(fileID: "a.swift")) {
       $0.openDiffs[key]?.expansion = .full
-      $0.openDiffs[key]?.revision = 1
     }
     // Idempotent: a second whole-file expand of an already-full doc is a no-op.
     await store.send(.diffExpandWholeFile(fileID: "a.swift"))
@@ -83,12 +82,10 @@ struct DiffNavReducerTests {
     // delta > 0 grows every gap by one fine (±20) step, both ends.
     await store.send(.diffExpandContext(fileID: "a.swift", delta: 1)) {
       $0.openDiffs[key]?.expansion = .regions([0: HunkExpansionRegion(fromStart: 20, fromEnd: 20)])
-      $0.openDiffs[key]?.revision = 1
     }
     // delta < 0 re-hides back to the collapsed default.
     await store.send(.diffExpandContext(fileID: "a.swift", delta: -1)) {
       $0.openDiffs[key]?.expansion = .collapsed
-      $0.openDiffs[key]?.revision = 2
     }
     // delta == 0 is a no-op.
     await store.send(.diffExpandContext(fileID: "a.swift", delta: 0))

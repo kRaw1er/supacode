@@ -31,6 +31,26 @@ final class DiffViewportController: NSObject {
   /// content identity, not position). Dropped wholesale on a style flip.
   let ctLineCache = CTLineCache()
 
+  /// Resolves a `.widget` leaf's scalar payload into the concrete `DiffWidget`
+  /// model the Phase-6 harness hosts. The seam (`DiffViewerRepresentable`) injects
+  /// a context-rich resolver (`FileChange` / comments / callbacks); the default
+  /// still renders every widget from its payload alone so headless controller
+  /// tests that apply a tree without a representable keep mounting real hosts.
+  var widgetResolver = DiffWidgetResolver()
+
+  /// Whether intra-line word-diff is drawn (the upstream `WordDiffPolicy` gate,
+  /// surfaced as `DiffDocument.wordDiffDisabled`). Folded into every line row's
+  /// render context so `WordDiff` is never invoked for a massively-changed file.
+  var wordDiffEnabled = true
+
+  /// Per-frame widget height coalescer (Phase 6): applies `host.setMeasuredHeight`
+  /// → O(log n) tree re-aggregate, anchor captured / restored once. Lazy so `self`
+  /// is a valid `WidgetLayoutHost` before it binds. Constructed WITHOUT a live
+  /// display link — fixed-height widgets (file / hunk header, expander, placeholder)
+  /// render at their reserved height, and display-link-driven dynamic coalescing
+  /// (variable comment / image widgets) is a documented follow-up.
+  private lazy var coalescer = LayoutCoalescer(host: self)
+
   /// Phase 12 — the accessibility tree owner. Installed by the viewport seam (it
   /// needs the reducer's comment / file-header side caches + the expand / comment /
   /// keyboard-nav wiring the controller doesn't hold). `reload()` is driven from
@@ -220,18 +240,35 @@ final class DiffViewportController: NSObject {
           width: width,
           cache: ctLineCache,
           palette: .shared,
-          styleGeneration: DiffPalette.shared.styleGeneration
+          styleGeneration: DiffPalette.shared.styleGeneration,
+          wordDiffEnabled: wordDiffEnabled
         )
       )
     case .widget(let widget):
-      (view as? DiffWidgetPlaceholderView)?.configure(widget: widget, chunkID: id)
+      configureWidget(view, widget: widget, width: width)
+    }
+  }
+
+  /// Mount (or recycle) the resolved `DiffWidget` model into a `WidgetHostChunkView`
+  /// (Phase-6 harness). A recycled host is offered the new model first (identity
+  /// swap); an occupied / incompatible host is torn down and re-mounted.
+  private func configureWidget(_ view: NSView, widget: Widget, width: CGFloat) {
+    guard let host = view as? WidgetHostChunkView else { return }
+    guard let model = widgetResolver.resolve(widget, coalescer: coalescer) else {
+      host.prepareForReuse()
+      return
+    }
+    if host.mountedKey == widget.key { return }  // already showing this model
+    if !host.reuse(model, key: widget.key, width: width) {
+      host.prepareForReuse()
+      host.mount(model, key: widget.key, width: width, coalescer: coalescer)
     }
   }
 
   private static func makeView(for kind: DiffReuseKind) -> NSView {
     switch kind {
     case .line: return LineRowView()
-    case .widget: return DiffWidgetPlaceholderView()
+    case .widget: return WidgetHostChunkView()
     }
   }
 

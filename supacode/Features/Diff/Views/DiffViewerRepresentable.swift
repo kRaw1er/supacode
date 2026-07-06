@@ -1,101 +1,136 @@
 import AppKit
 import SwiftUI
 
-/// SwiftUI bridge to the AppKit `DiffTableController`. Mirrors the
-/// `CommandPalettePanelHost` idiom: the coordinator owns the AppKit object, the
-/// representable re-enters through `updateNSView`, and teardown happens in
-/// `dismantleNSView`. `revision` is bumped by the reducer on every live re-diff;
-/// a change in `revision`/`mode` (not row identity) is what triggers a re-apply
-/// with scroll preserved.
+/// SwiftUI bridge to the AppKit `DiffViewportController` — the Phase-13 seam swap
+/// that retires the flat `DiffTableController` / `[DiffRow]` viewer. The coordinator
+/// owns the controller; the representable re-enters through `updateNSView`, rebuilds
+/// the dual-mode `ChunkTree` from the document's `hunks` + `comments` (via
+/// `ChunkTreeBuilder`) whenever its content signature changes, and drives the
+/// controller — `apply(tree:)` on a content change, `toggleMode` on a unified↔split
+/// flip (O(log #hunks), no reproject). The `generation` token + comment set replace
+/// the deleted `revision`/`rows` inputs.
 ///
-/// Phase 4: syntax highlighting moved OUT of this coordinator into the reducer's
-/// neon-backed `DiffHighlightEngine` driver + the tree-backed viewport. This legacy
-/// `DiffTableController` viewer therefore renders plain from wave 4 until the Phase-13
-/// seam swap replaces it wholesale — intentional (the whole plan deletes this viewer;
-/// no temporary highlight bridge is built for it). `main` is untouched; the swap is
-/// atomic at Phase 13.
+/// Interaction is wired through the widget harness callbacks (expander taps → the
+/// reducer's `expandGap`; comment-thread edit → `editComment`), not a per-row closure
+/// on this view. Gated follow-ups (documented in the PR body): incremental blob-slice
+/// reveal spliced into the live tree, gutter-drag comment CREATION, syntax-run
+/// compositing into `LineRowView`, and the a11y provider wiring.
 struct DiffViewerRepresentable: NSViewRepresentable {
-  let rows: [DiffRow]
+  let file: FileChange
+  let hunks: [DiffHunk]
+  let comments: [ReviewComment]
   let mode: DiffViewMode
-  let revision: Int
-  var onExpandGap: (Int) -> Void = { _ in }
-  /// Handed the controller once so Phase 5 can reach the geometry API.
-  var onController: (DiffTableController) -> Void = { _ in }
+  /// Monotonic load/expand token — a change re-projects the tree scroll-preserving.
+  let generation: Int
+  /// `WordDiffPolicy` gate (`DiffDocument.wordDiffDisabled`): off ⇒ `WordDiff` is
+  /// never invoked on the render path (only the row-level `+`/`-` tint).
+  var wordDiffEnabled: Bool = true
+
+  /// Viewport scrolled/resized → windowed highlight (re)issue (Phase 4 driver).
   var onVisibleRangeChanged: (Range<Int>) -> Void = { _ in }
-  /// Gutter "+"/drag resolved a range → open the composer (Phase 5).
-  var onOpenComposer:
-    (_ side: DiffSide, _ startLine: Int, _ endLine: Int, _ snippet: String, _ contextBefore: String) -> Void = {
-      _, _, _, _, _ in
-    }
-  /// An inline comment thread row was clicked → open it to edit (Phase 5).
-  var onCommentTap: (UUID) -> Void = { _ in }
+  /// An expander widget's reveal button → the reducer's incremental `expandGap`.
+  var onExpandGap: (_ gap: Int, _ step: ExpansionState.Step, _ direction: ExpansionState.Direction) -> Void = {
+    _, _, _ in
+  }
+  /// A comment-thread widget row's edit tap → open it in the composer.
+  var onEditComment: (UUID) -> Void = { _ in }
 
   func makeCoordinator() -> Coordinator { Coordinator() }
 
   func makeNSView(context: Context) -> NSScrollView {
-    let controller = context.coordinator.controller
-    controller.onExpandGap = { [coordinator = context.coordinator] anchor in
-      coordinator.onExpandGap(anchor)
+    let coordinator = context.coordinator
+    let controller = coordinator.controller
+    controller.onVisibleRangeChanged = { [weak coordinator] range in
+      coordinator?.onVisibleRangeChanged(range.rows)
     }
-    controller.onVisibleRangeChanged = { [coordinator = context.coordinator] range in
-      coordinator.handleVisibleRange(range)
-    }
-    controller.onOpenComposer = { [coordinator = context.coordinator] side, start, end, snippet, context in
-      coordinator.onOpenComposer(side, start, end, snippet, context)
-    }
-    controller.onCommentTap = { [coordinator = context.coordinator] id in
-      coordinator.onCommentTap(id)
-    }
-    context.coordinator.onExpandGap = onExpandGap
-    context.coordinator.onVisibleRangeChanged = onVisibleRangeChanged
-    context.coordinator.onOpenComposer = onOpenComposer
-    context.coordinator.onCommentTap = onCommentTap
-    onController(controller)
-    controller.apply(rows: rows, mode: mode, scrollPreserving: false)
-    context.coordinator.lastRevision = revision
-    context.coordinator.lastMode = mode
+    syncCallbacks(coordinator)
+    controller.wordDiffEnabled = wordDiffEnabled
+    controller.widgetResolver = makeResolver(coordinator)
+    let tree = buildTree()
+    controller.apply(tree: tree, mode: mode, scrollPreserving: false)
+    coordinator.lastSignature = signature
+    coordinator.lastMode = mode
     return controller.scrollView
   }
 
   func updateNSView(_ nsView: NSScrollView, context: Context) {
-    // Refresh the callbacks so the latest closures (capturing fresh SwiftUI
-    // state) are used, then apply only when something actually changed.
-    context.coordinator.onExpandGap = onExpandGap
-    context.coordinator.onVisibleRangeChanged = onVisibleRangeChanged
-    context.coordinator.onOpenComposer = onOpenComposer
-    context.coordinator.onCommentTap = onCommentTap
     let coordinator = context.coordinator
-    guard coordinator.lastRevision != revision || coordinator.lastMode != mode else { return }
-    let preserve = coordinator.lastMode == mode  // mode switch reloads; re-diff preserves scroll.
-    coordinator.lastRevision = revision
-    coordinator.lastMode = mode
-    coordinator.controller.apply(rows: rows, mode: mode, scrollPreserving: preserve)
+    let controller = coordinator.controller
+    syncCallbacks(coordinator)
+    controller.wordDiffEnabled = wordDiffEnabled
+    controller.widgetResolver = makeResolver(coordinator)
+
+    if coordinator.lastSignature != signature {
+      // Content changed (re-diff / comment insert-remove): re-project the tree,
+      // scroll-preserving by line identity, in the current render mode.
+      controller.apply(tree: buildTree(), mode: mode, scrollPreserving: true)
+      coordinator.lastSignature = signature
+      coordinator.lastMode = mode
+    } else if coordinator.lastMode != mode {
+      // Only the unified↔split preference flipped: O(log #hunks) re-seek, no rebuild.
+      controller.toggleMode(to: mode)
+      coordinator.lastMode = mode
+    }
   }
 
   static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
     coordinator.tearDown()
   }
 
+  // MARK: - Projection
+
+  private func buildTree() -> ChunkTree {
+    // Incremental blob-slice reveal is a gated follow-up, so the pure rebuild
+    // renders at the loaded context with collapsed-gap expanders (the reducer's
+    // `ExpansionState` / `revealed` machinery is intact for the follow-up splice).
+    ChunkTreeBuilder.build(file: file, hunks: hunks, mode: mode, comments: comments)
+  }
+
+  private func makeResolver(_ coordinator: Coordinator) -> DiffWidgetResolver {
+    DiffWidgetResolver(
+      file: file,
+      hunks: hunks,
+      comments: comments,
+      onExpand: { [weak coordinator] gap, step, direction in
+        coordinator?.onExpandGap(gap.hunkIndex, step, direction)
+      },
+      onEditComment: { [weak coordinator] id in coordinator?.onEditComment(id) }
+    )
+  }
+
+  private func syncCallbacks(_ coordinator: Coordinator) {
+    // Refresh so the latest SwiftUI closures (fresh store) are used on each pass.
+    coordinator.onVisibleRangeChanged = onVisibleRangeChanged
+    coordinator.onExpandGap = onExpandGap
+    coordinator.onEditComment = onEditComment
+  }
+
+  /// The content signature that triggers a full tree re-projection. `generation`
+  /// covers a re-diff / expand token; `comments` covers a thread insert / remove
+  /// / edit (which does not bump `generation`); `wordDiffEnabled` re-renders on a
+  /// gate flip. Mode is handled separately (`toggleMode`).
+  private var signature: Coordinator.Signature {
+    Coordinator.Signature(generation: generation, comments: comments, wordDiffEnabled: wordDiffEnabled)
+  }
+
   @MainActor
   final class Coordinator {
-    let controller = DiffTableController()
-    var onExpandGap: (Int) -> Void = { _ in }
+    let controller = DiffViewportController()
     var onVisibleRangeChanged: (Range<Int>) -> Void = { _ in }
-    var onOpenComposer: (DiffSide, Int, Int, String, String) -> Void = { _, _, _, _, _ in }
-    var onCommentTap: (UUID) -> Void = { _ in }
-    var lastRevision = -1
+    var onExpandGap: (Int, ExpansionState.Step, ExpansionState.Direction) -> Void = { _, _, _ in }
+    var onEditComment: (UUID) -> Void = { _ in }
+    var lastSignature: Signature?
     var lastMode: DiffViewMode = .unified
 
-    /// Forwards the viewport change to SwiftUI. Highlighting is no longer driven
-    /// here — the reducer's neon `DiffHighlightEngine` owns it (Phase 4), consumed
-    /// by the tree-backed viewport at the Phase-13 swap.
-    func handleVisibleRange(_ range: Range<Int>) {
-      onVisibleRangeChanged(range)
+    struct Signature: Equatable {
+      var generation: Int
+      var comments: [ReviewComment]
+      var wordDiffEnabled: Bool
     }
 
     func tearDown() {
-      controller.onExpandGap = nil
       controller.onVisibleRangeChanged = nil
+      controller.onHit = nil
     }
   }
 }

@@ -141,21 +141,21 @@ struct DiffTabContentView: View {
       .frame(maxWidth: .infinity, maxHeight: .infinity)
     case .loaded:
       if let document {
+        let key = DiffDocumentKey(path: filePath, source: source)
         DiffViewerRepresentable(
-          rows: document.rows,
+          file: document.file,
+          hunks: document.hunks,
+          comments: store.comments.filter { $0.filePath == filePath && $0.source == source },
           mode: store.diffViewMode,
-          revision: document.revision,
-          // Incremental collapse/expand is declarative `ExpansionState` consumed by
-          // the ChunkTree viewport (Phase 7); the legacy flat viewer cannot reveal an
-          // inter-hunk gap without the deleted 1M-context re-diff, so its expander is
-          // inert here until the Phase-13 viewport seam flip retires this view.
-          onOpenComposer: { side, start, end, snippet, context in
-            store.send(
-              .openCommentComposer(
-                filePath: filePath, source: source, side: side, startLine: start, endLine: end,
-                anchorSnippet: snippet, contextBefore: context))
+          generation: document.generation,
+          wordDiffEnabled: !document.wordDiffDisabled,
+          onVisibleRangeChanged: { range in
+            store.send(.highlightVisibleRangeChanged(key: key, range: range))
           },
-          onCommentTap: { id in store.send(.editComment(id: id)) }
+          onExpandGap: { gap, step, direction in
+            store.send(.expandGap(key: key, gap: gap, step: step, direction: direction))
+          },
+          onEditComment: { id in store.send(.editComment(id: id)) }
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
       }

@@ -125,13 +125,11 @@ struct DiffStreamReducerTests {
       document.hunks = hunks
       document.loadState = .loaded
       document.isStale = false
-      document.rows = DiffRowBuilder.build(file: file, hunks: hunks, mode: .unified, expanded: [])
-      document.revision = 1
+      // Post-P13 seam swap: the tree-backed viewport projects `hunks` directly —
+      // no flat `rows`, no `revision` bump.
       $0.openDiffs[key] = document
     }
-    await store.receive(\.streamFinished) {
-      $0.openDiffs[key]?.revision = 2
-    }
+    await store.receive(\.streamFinished)
 
     #expect(await spy.begins.count == 1)
     #expect(await spy.consumeCount == 1)
@@ -273,15 +271,14 @@ struct DiffStreamReducerTests {
     #expect(store.state.openDiffs[key]?.expansion == .regions([1: HunkExpansionRegion(fromStart: 20)]))
   }
 
-  // MARK: - 🔴 RED until Phase 13 flips the seam (retires `buildRows`)
+  // MARK: - Phase 13 seam swap — mode toggle is a global re-seek, no per-doc work
 
-  @Test(.dependencies, .disabled("RED until Phase 13 flips the viewport seam (retires buildRows)"))
-  func modeToggleBumpsRevisionOnly() async {
+  @Test(.dependencies)
+  func modeToggleIsGlobalReseekNoDiff() async {
     let file = StreamFixture.makeFile("a.swift")
     let hunks = [StreamFixture.hunk("keep", newLine: 1)]
     var document = DiffDocument(file: file, loadState: .loaded, generation: 1)
     document.hunks = hunks
-    let originalRows = document.rows
     let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
     var initialState = DiffReviewFeature.State()
     initialState.selectedWorktree = StreamFixture.worktree()
@@ -299,9 +296,10 @@ struct DiffStreamReducerTests {
     store.exhaustivity = .off
 
     await store.send(.diffModeChanged(.split))
-    // Post-P13: the mode is a global re-seek — no per-doc `buildRows`, no diff call.
-    #expect(store.state.openDiffs[key]?.revision == 1)
-    #expect(store.state.openDiffs[key]?.rows == originalRows)
+    // Post-P13: the tree is dual-mode, so the toggle only persists the global
+    // preference — no per-doc row rebuild, no diff call, document unchanged.
+    #expect(store.state.diffViewMode == .split)
+    #expect(store.state.openDiffs[key]?.hunks == hunks)
     #expect(diffCalled.value == false)
   }
 }

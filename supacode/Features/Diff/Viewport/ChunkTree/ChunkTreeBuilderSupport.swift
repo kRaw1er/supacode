@@ -70,8 +70,23 @@ extension ChunkTreeBuilder {
     return chunks
   }
 
-  /// The empty-content placeholder for a file with no hunk lines (`DiffRowBuilder`
-  /// `:57-69`).
+  /// Whether the file's path carries a raster-image extension — the classifier
+  /// routes such a binary to the `ImageCompareWidget` (⚠️ note 1) instead of the
+  /// plain binary summary. Case-insensitive; keyed on the new path (falling back to
+  /// the old for a deletion).
+  static let imageExtensions: Set<String> = [
+    "png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "webp", "heic", "heif", "ico", "icns",
+  ]
+
+  static func isImagePath(_ file: FileChange) -> Bool {
+    let path = file.newPath ?? file.oldPath ?? file.id
+    guard let dot = path.lastIndex(of: ".") else { return false }
+    let ext = path[path.index(after: dot)...].lowercased()
+    return imageExtensions.contains(ext)
+  }
+
+  /// The empty-content placeholder for a file with no hunk lines (`ChunkTreeBuilder`
+  /// legacy `:57-69`).
   static func emptyPlaceholder(for status: FileStatus) -> FilePlaceholder {
     switch status {
     case .deleted: .deletedFile

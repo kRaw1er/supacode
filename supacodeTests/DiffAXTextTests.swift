@@ -40,7 +40,7 @@ struct DiffAXTextTests {
   }
 
   @Test func splitLabelNamesBothSides() {
-    let row: DiffRow = .splitLine(
+    let row: DiffAXRow = .splitLine(
       pairID: 1, old: line(.deletion, old: 3, new: nil, "old"), new: line(.addition, old: nil, new: 3, "new"))
     #expect(DiffAXText.label(for: row, mode: .split) == "old, removed line 3: old, new, added line 3: new")
     // A fully-blank split pair reads "blank line".
@@ -101,11 +101,11 @@ struct DiffAXTextTests {
     // A no-newline marker has no anchor.
     #expect(DiffAXText.commentAnchor(for: .line(line(.noNewlineMarker, old: 3, new: 3, "x"))) == nil)
     // Split prefers the new side when present, else falls back to old.
-    let bothSides: DiffRow = .splitLine(
+    let bothSides: DiffAXRow = .splitLine(
       pairID: 1, old: line(.deletion, old: 3, new: nil, "o"), new: line(.addition, old: nil, new: 3, "n"))
     #expect(DiffAXText.commentAnchor(for: bothSides)?.side == .new)
     #expect(DiffAXText.commentAnchor(for: bothSides)?.line == 3)
-    let oldOnly: DiffRow = .splitLine(pairID: 2, old: line(.deletion, old: 7, new: nil, "o"), new: nil)
+    let oldOnly: DiffAXRow = .splitLine(pairID: 2, old: line(.deletion, old: 7, new: nil, "o"), new: nil)
     #expect(DiffAXText.commentAnchor(for: oldOnly)?.side == .old)
     #expect(DiffAXText.commentAnchor(for: oldOnly)?.line == 7)
     // Non-line rows have no gutter anchor.

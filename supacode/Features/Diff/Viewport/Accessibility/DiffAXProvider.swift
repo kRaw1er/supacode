@@ -408,9 +408,9 @@ final class DiffAXRowToken: NSObject, NSSecureCoding {
   }
 }
 
-// MARK: - Row reconstruction (tree row → ported `DiffRow` for `DiffAXText`)
+// MARK: - Row reconstruction (tree row → a11y `DiffAXRow` for `DiffAXText`)
 
-/// Reconstructs the `DiffRow` a materialized line-segment row displays — the bridge
+/// Reconstructs the `DiffAXRow` a materialized line-segment row displays — the bridge
 /// from the tree's `(segment, localRow)` coordinate to the ported `DiffAXText`
 /// strings. Mirrors `SegmentProjection.renderedRows` order + count EXACTLY (so a
 /// `localRow` indexes the right row) while carrying the line CONTENT the rendered
@@ -418,14 +418,14 @@ final class DiffAXRowToken: NSObject, NSSecureCoding {
 enum DiffAXRowProjection {
   /// The reconstructed row for `localRow` of a line segment in `mode`, or `nil` when
   /// the offset is out of range.
-  static func diffRow(segment: LineSegment, localRow: Int, mode: DiffViewMode) -> DiffRow? {
+  static func diffRow(segment: LineSegment, localRow: Int, mode: DiffViewMode) -> DiffAXRow? {
     let rows = rows(for: segment, mode: mode)
     guard rows.indices.contains(localRow) else { return nil }
     return rows[localRow]
   }
 
   /// The full projected rows for a segment — mirrors `LineSegment.renderedRows`.
-  static func rows(for segment: LineSegment, mode: DiffViewMode) -> [DiffRow] {
+  static func rows(for segment: LineSegment, mode: DiffViewMode) -> [DiffAXRow] {
     switch segment.classification {
     case .context, .contextExpanded:
       return contextRows(segment, mode: mode)
@@ -434,8 +434,8 @@ enum DiffAXRowProjection {
     }
   }
 
-  private static func contextRows(_ segment: LineSegment, mode: DiffViewMode) -> [DiffRow] {
-    var rows: [DiffRow] = []
+  private static func contextRows(_ segment: LineSegment, mode: DiffViewMode) -> [DiffAXRow] {
+    var rows: [DiffAXRow] = []
     for line in segment.windowedLines {
       switch mode {
       case .unified: rows.append(.line(line))
@@ -452,8 +452,8 @@ enum DiffAXRowProjection {
     return rows
   }
 
-  private static func unifiedChangeRows(_ segment: LineSegment) -> [DiffRow] {
-    var rows: [DiffRow] = []
+  private static func unifiedChangeRows(_ segment: LineSegment) -> [DiffAXRow] {
+    var rows: [DiffAXRow] = []
     for line in segment.windowDeletions + segment.windowAdditions {
       rows.append(.line(line))
       if line.noNewlineAtEof { rows.append(.line(noNewlineLine(from: line))) }
@@ -461,10 +461,10 @@ enum DiffAXRowProjection {
     return rows
   }
 
-  private static func splitChangeRows(_ segment: LineSegment) -> [DiffRow] {
+  private static func splitChangeRows(_ segment: LineSegment) -> [DiffAXRow] {
     let dels = segment.windowDeletions
     let adds = segment.windowAdditions
-    var rows: [DiffRow] = []
+    var rows: [DiffAXRow] = []
     for index in 0..<max(dels.count, adds.count) {
       let old = index < dels.count ? dels[index] : nil
       let new = index < adds.count ? adds[index] : nil

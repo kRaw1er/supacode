@@ -9,18 +9,18 @@ enum DiffViewMode: String, Codable, Sendable, Equatable, CaseIterable { case uni
 
 /// Per-open-file diff document living in `DiffReviewFeature.State.openDiffs`,
 /// keyed by file path. Owns everything the center diff tab renders: the file
-/// metadata, the raw hunks (kept so a mode toggle rebuilds rows without I/O),
-/// the flat `[DiffRow]` for the viewer, the load state, the "no longer changed"
-/// stale flag, the **declarative expansion state** (Phase 7), a viewport handoff
-/// cache of revealed blob slices, and a monotonic `revision` the viewer watches
-/// to re-apply while preserving scroll.
+/// metadata, the raw hunks (the ChunkTree viewport projects these directly — no
+/// flat `[DiffRow]` anymore, Phase 13 seam swap), the load state, the "no longer
+/// changed" stale flag, the **declarative expansion state** (Phase 7), and a
+/// viewport handoff cache of revealed blob slices. The tree-backed
+/// `DiffViewerRepresentable` re-applies whenever the document's content signature
+/// changes (`generation` + comments + expansion), scroll-preserving.
 struct DiffDocument: Equatable, Sendable {
   var file: FileChange
   /// Which diff this document renders. Part of its `DiffDocumentKey` identity so
   /// a working-tree tab and a base-branch tab of the same file are distinct.
   var source: DiffSource = .workingTree
   var hunks: [DiffHunk] = []
-  var rows: [DiffRow] = []
   var loadState: LoadState = .loading
   var isStale: Bool = false
   /// Declarative, document-level collapse/expand (Phase 7). Keyed by gap INDEX
@@ -35,7 +35,6 @@ struct DiffDocument: Equatable, Sendable {
   /// on a re-diff (the materialized slices are re-sliced against the fresh geometry);
   /// the declarative `expansion` persists.
   var revealed: [Int: [DiffLine]] = [:]
-  var revision: Int = 0
   /// Generation guard for this document's in-flight `diff` request (8.1). A
   /// returning `.diffLoaded/.diffFailed` whose token no longer matches is dropped.
   var generation: Int = 0
@@ -113,7 +112,7 @@ extension DiffDocument {
   }
 
   /// The gap's hidden-line count (`rangeSize`), from the bounding hunks — the
-  /// current `DiffRowBuilder`/`ChunkTreeBuilder` gap math. Returns `0` for a gap
+  /// current `ChunkTreeBuilder` gap math. Returns `0` for a gap
   /// index that no longer maps to a real gap after a re-diff (degrade to collapsed,
   /// never a crash). The trailing gap is EOF-unbounded, so `Int.max` — the reducer
   /// caps the eager slice and the `BlobSliceProvider` clamps at EOF.
@@ -311,7 +310,7 @@ struct DiffReviewFeature {
     // MARK: Phase 9 — streaming producer↔consumer
     case streamStarted(key: DiffDocumentKey, fileCount: Int, token: Int)  // `.started` → scaffold the consumer
     case streamFileReady(key: DiffDocumentKey, batch: FileDiffBatch, token: Int)  // `.fileReady` → feed + build rows
-    case streamFinished(key: DiffDocumentKey, token: Int)  // `.finished` → mark loaded, bump revision
+    case streamFinished(key: DiffDocumentKey, token: Int)  // `.finished` → mark loaded
     case diffModeChanged(DiffViewMode)  // unified/split toggle → rebuild all open docs
     // MARK: Phase 7 — incremental collapse / expand (blob-slice, NO re-diff)
     /// Expander tap → mutate `ExpansionState` (pure) + fire a blob-slice effect for
@@ -597,8 +596,8 @@ struct DiffReviewFeature {
         document.generation = token
         state.openDiffs[key] = document
         // Streaming path (Phase 9) replaces the single per-file round-trip with a
-        // stream pump feeding the tree consumer; gated OFF until the P13 seam flip
-        // so the live `[DiffRow]` path stays authoritative in production.
+        // stream pump feeding the tree consumer; gated OFF by default so the
+        // per-file `.diffLoaded` hunk path stays authoritative in production.
         let loadEffect: Effect<Action> =
           diffStreamingEnabled
           ? Self.streamEffect(
@@ -618,18 +617,15 @@ struct DiffReviewFeature {
         // declarative `expansion` (gap-index keyed) persists across the re-diff.
         document.revealed.removeAll()
         // Re-anchor this document's comments against the fresh lines (5.1);
-        // orphans are marked, never dropped.
+        // orphans are marked, never dropped. The tree-backed viewport projects
+        // `hunks` + `comments` directly — no flat row rebuild (Phase 13 swap).
         Self.relocateComments(&state, key: key, lines: hunks.flatMap(\.lines))
-        document.rows = Self.buildRows(
-          document: document, mode: state.diffViewMode, comments: state.comments(forPath: key.path, source: key.source))
-        document.revision &+= 1
         state.openDiffs[key] = document
         return .none
 
       case .diffFailed(let key, let error, let token):
         guard var document = state.openDiffs[key], document.generation == token else { return .none }
         document.loadState = .error(error)
-        document.revision &+= 1
         state.openDiffs[key] = document
         return .none
 
@@ -648,9 +644,8 @@ struct DiffReviewFeature {
         let mode = state.diffViewMode
         // Feed the tree consumer (zero-I/O, MainActor).
         let feed: Effect<Action> = .run { _ in await diffStreamConsumer.consume(key, batch, mode) }
-        // The batch for THIS document's file also supplies its hunks/rows so the
-        // live `[DiffRow]` view renders progressively (until the P13 seam flip
-        // retires `rows` for the tree-backed viewport).
+        // The batch for THIS document's file also supplies its hunks so the
+        // tree-backed viewport re-projects progressively as files stream in.
         guard batch.file.id == key.path else { return feed }
         document.file = batch.file
         document.hunks = batch.hunks
@@ -693,9 +688,6 @@ struct DiffReviewFeature {
         // (gap-index keyed) survives the line shift (Phase 7).
         document.revealed.removeAll()
         Self.relocateComments(&state, key: key, lines: batch.hunks.flatMap(\.lines))
-        document.rows = Self.buildRows(
-          document: document, mode: mode, comments: state.comments(forPath: key.path, source: key.source))
-        document.revision &+= 1
         state.openDiffs[key] = document
         return feed
 
@@ -703,20 +695,14 @@ struct DiffReviewFeature {
         guard var document = state.openDiffs[key], document.generation == token else { return .none }
         document.loadState = .loaded
         document.isStale = false
-        document.revision &+= 1
         state.openDiffs[key] = document
         return .run { _ in await diffStreamConsumer.finish(key, token) }
 
       case .diffModeChanged(let mode):
+        // The tree is dual-mode: the viewport re-seeks unified↔split with no row
+        // rebuild (Phase 8). Only persist the global preference; the representable
+        // observes `diffViewMode` and drives `controller.toggleMode` (Phase 13 swap).
         state.$diffViewMode.withLock { $0 = mode }
-        // Rebuild every open document's rows from its cached hunks (no I/O).
-        for key in state.openDiffs.keys {
-          guard var document = state.openDiffs[key] else { continue }
-          document.rows = Self.buildRows(
-            document: document, mode: mode, comments: state.comments(forPath: key.path, source: key.source))
-          document.revision &+= 1
-          state.openDiffs[key] = document
-        }
         return .none
 
       // MARK: Phase 7 — incremental collapse / expand (blob-slice, NO re-diff)
@@ -810,7 +796,6 @@ struct DiffReviewFeature {
         for key in state.openDiffs.keys where key.path == fileID {
           guard var document = state.openDiffs[key], document.expansion != .full else { continue }
           document.expansion = .full
-          document.revision &+= 1
           state.openDiffs[key] = document
         }
         return .none
@@ -831,7 +816,6 @@ struct DiffReviewFeature {
           } else {
             continue
           }
-          document.revision &+= 1
           state.openDiffs[key] = document
         }
         return .none
@@ -1020,25 +1004,6 @@ struct DiffReviewFeature {
       }
     }
     .cancellable(id: CancelID.load, cancelInFlight: true)
-  }
-
-  /// Builds the flat (legacy) row list for a document at a constant collapse
-  /// threshold. Incremental collapse/expand is now declarative `ExpansionState`
-  /// consumed by the ChunkTree viewport (Phase 7) — no `collapseThreshold` flip,
-  /// no full-context re-diff. Retired by the Phase-13 viewport seam flip.
-  private static func buildRows(
-    document: DiffDocument,
-    mode: DiffViewMode,
-    comments: [ReviewComment] = []
-  ) -> [DiffRow] {
-    DiffRowBuilder.build(
-      file: document.file,
-      hunks: document.hunks,
-      mode: mode,
-      expanded: [],
-      options: DiffRowBuilder.Options(collapseThreshold: 10),
-      comments: comments
-    )
   }
 
   /// Persist the current comment set for the selected worktree (fire-and-forget;

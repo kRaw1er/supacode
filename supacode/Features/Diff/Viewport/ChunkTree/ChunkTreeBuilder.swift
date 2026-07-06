@@ -108,11 +108,23 @@ enum ChunkTreeBuilder {
       return chunks
     }
     if file.isBinary || file.status == .binary {
-      chunks.append(placeholderWidget(.binaryFile, fileID, options))
+      // An image-extension binary routes to the `ImageCompareWidget` (⚠️ note 1 —
+      // the blob-bytes read is a gated follow-up); any other binary is a summary.
+      chunks.append(placeholderWidget(isImagePath(file) ? .imageCompare : .binaryFile, fileID, options))
       return chunks
     }
     if file.status == .submodule {
       chunks.append(placeholderWidget(.submodule(oldSHA: "", newSHA: ""), fileID, options))
+      return chunks
+    }
+    if file.status == .conflicted {
+      // Merge conflict (⚠️ note 2): a `ConflictWidget` action leaf (accept-ours/
+      // theirs, gated when it straddles hunks) plus the tinted marker body lines.
+      chunks.append(placeholderWidget(.conflict, fileID, options))
+      appendHunks(
+        &chunks, hunks: hunks,
+        context: BuildContext(
+          fileID: fileID, expanded: expanded, options: options, commented: CommentedLines.from(comments)))
       return chunks
     }
     if !hunks.contains(where: { !$0.lines.isEmpty }) {

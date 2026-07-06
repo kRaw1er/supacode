@@ -541,7 +541,7 @@ struct DiffReviewFeatureTests {
     )
   }
 
-  @Test(.dependencies) func openFileLoadsHunksAndBuildsRows() async {
+  @Test(.dependencies) func openFileLoadsHunks() async {
     let worktree = gitLocalWorktree()
     let file = makeFile("a.swift")
     let hunks = [modifiedHunk()]
@@ -562,25 +562,24 @@ struct DiffReviewFeatureTests {
       $0.diffLoadToken = 1
       $0.openDiffs[key] = DiffDocument(file: file, loadState: .loading, generation: 1)
     }
+    // Post-P13 seam swap: `.diffLoaded` stores hunks for the tree-backed viewport
+    // to project — the deleted flat `rows` / `revision` are never touched.
     await store.receive(\.diffLoaded) {
       var document = DiffDocument(file: file, loadState: .loading, generation: 1)
       document.hunks = hunks
       document.loadState = .loaded
       document.isStale = false
-      document.rows = DiffRowBuilder.build(file: file, hunks: hunks, mode: .unified, expanded: [])
-      document.revision = 1
       $0.openDiffs[key] = document
     }
   }
 
-  // MARK: - mode toggle rebuilds open documents
+  // MARK: - mode toggle persists the global preference (dual-mode tree re-seek)
 
-  @Test(.dependencies) func diffModeChangedRebuildsRows() async {
+  @Test(.dependencies) func diffModeChangedPersistsPreference() async {
     let file = makeFile("a.swift")
     let hunks = [modifiedHunk()]
     var document = DiffDocument(file: file, loadState: .loaded, generation: 1)
     document.hunks = hunks
-    document.rows = DiffRowBuilder.build(file: file, hunks: hunks, mode: .unified, expanded: [])
     let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
     var initialState = DiffReviewFeature.State()
     initialState.selectedWorktree = gitLocalWorktree()
@@ -593,12 +592,10 @@ struct DiffReviewFeatureTests {
     store.exhaustivity = .off  // @Shared diffViewMode write is asserted separately.
 
     await store.send(.diffModeChanged(.split))
+    // Post-P13: the tree is dual-mode — the toggle only persists the preference; the
+    // document's hunks are untouched (no per-doc row rebuild, no `revision`).
     #expect(store.state.diffViewMode == .split)
-    #expect(
-      store.state.openDiffs[key]?.rows
-        == DiffRowBuilder.build(file: file, hunks: hunks, mode: .split, expanded: [])
-    )
-    #expect(store.state.openDiffs[key]?.revision == 1)
+    #expect(store.state.openDiffs[key]?.hunks == hunks)
   }
 
   // MARK: - live update: vanished file goes stale, tab stays (3.2/3.3)
@@ -607,7 +604,7 @@ struct DiffReviewFeatureTests {
     let worktree = gitLocalWorktree()
     let file = makeFile("a.swift")
     var document = DiffDocument(file: file, loadState: .loaded, generation: 1)
-    document.rows = DiffRowBuilder.build(file: file, hunks: [modifiedHunk()], mode: .unified, expanded: [])
+    document.hunks = [modifiedHunk()]
     let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
     var initialState = DiffReviewFeature.State()
     initialState.selectedWorktree = worktree
@@ -628,8 +625,9 @@ struct DiffReviewFeatureTests {
       $0.loadState = .empty
       $0.openDiffs[key]?.isStale = true
     }
-    // Tab stays open with its last-rendered rows.
-    #expect(store.state.openDiffs[key]?.rows.isEmpty == false)
+    // Tab stays open (marked stale) with its last-loaded hunks for the viewport.
+    #expect(store.state.openDiffs[key]?.isStale == true)
+    #expect(store.state.openDiffs[key]?.hunks.isEmpty == false)
   }
 
   // MARK: - Phase 7: incremental collapse / expand (blob-slice, NO re-diff)
