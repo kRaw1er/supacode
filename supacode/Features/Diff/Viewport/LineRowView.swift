@@ -17,6 +17,18 @@ struct LineRowRenderContext {
   var cache: CTLineCache
   var palette: DiffPalette
   var styleGeneration: Int
+  /// Whether intra-line word-diff is drawn for this document. The upstream gate
+  /// (`WordDiffPolicy`, surfaced as `DiffDocument.wordDiffDisabled`) flips this off
+  /// for a massively-changed file so `WordDiff` is never invoked on the render path.
+  var wordDiffEnabled: Bool = true
+  /// Syntax-highlight generation (Phase 4). Folded into the CTLine cache key only
+  /// where the foreground is baked into the glyphs — a syntax arrival re-typesets;
+  /// word-diff never does (§Cache + async).
+  var syntaxVersion: Int = 0
+  /// Word-diff generation. Deliberately EXCLUDED from the CTLine cache key: because
+  /// `CTLineDraw` ignores background, a word-diff arrival recomposites + redraws the
+  /// row's rects but must NOT re-typeset the glyphs (⚠️ Deepening note 4).
+  var wordDiffVersion: Int = 0
 }
 
 /// Renders one `.line` **chunk** (a dense leaf) as real wrapped code via CoreText
@@ -45,6 +57,13 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     var content: NSString?  // unified content column
     var oldContent: NSString?  // split old pane
     var newContent: NSString?  // split new pane
+    /// Intra-line word-diff spans for the unified content column (a deletion row's
+    /// `oldSpans` / an addition row's `newSpans`); empty when word-diff is off.
+    var unifiedWordSpans: [WordDiff.Span] = []
+    /// Word-diff spans for the split old pane (`oldSpans`).
+    var oldWordSpans: [WordDiff.Span] = []
+    /// Word-diff spans for the split new pane (`newSpans`).
+    var newWordSpans: [WordDiff.Span] = []
     var wrapped: LineTypesetter.Wrapped?  // unified column
     var oldWrapped: LineTypesetter.Wrapped?
     var newWrapped: LineTypesetter.Wrapped?
@@ -122,7 +141,7 @@ final class LineRowView: NSView, DiffViewportRecyclable {
   func configure(segment: LineSegment, chunkID: ChunkID, context: LineRowRenderContext) {
     self.context = context
     self.configuredChunkID = chunkID
-    self.rows = Self.project(segment: segment, mode: context.mode)
+    self.rows = Self.project(segment: segment, mode: context.mode, wordDiffEnabled: context.wordDiffEnabled)
     typesetRows()
     isHidden = false
     needsDisplay = true
@@ -274,7 +293,10 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     drawNumber(row.oldNumber, originX: geo.unifiedOldNumX, top: row.top)
     drawNumber(row.newNumber, originX: geo.unifiedNewNumX, top: row.top)
     if let wrapped = row.wrapped {
-      drawWrapped(wrapped, contentX: geo.unifiedContentX, top: row.top, scale: scale, in: ctx)
+      drawContent(
+        wrapped,
+        wordDiff: WordDiffLayer(spans: row.unifiedWordSpans, isOld: row.unifiedOrigin == .deletion),
+        origin: CGPoint(x: geo.unifiedContentX, y: row.top), scale: scale, in: ctx)
     }
   }
 
@@ -290,12 +312,12 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     drawPane(
       PaneRender(
         wrapped: row.oldWrapped, origin: row.oldOrigin, number: row.oldNumber, paneRect: oldRect, barX: 0,
-        numberX: geo.oldNumX, contentX: geo.oldContentX),
+        numberX: geo.oldNumX, contentX: geo.oldContentX, wordSpans: row.oldWordSpans, isOld: true),
       gutter: gutter, scale: scale, in: ctx)
     drawPane(
       PaneRender(
         wrapped: row.newWrapped, origin: row.newOrigin, number: row.newNumber, paneRect: newRect, barX: geo.newBarX,
-        numberX: geo.newNumX, contentX: geo.newContentX),
+        numberX: geo.newNumX, contentX: geo.newContentX, wordSpans: row.newWordSpans, isOld: false),
       gutter: gutter, scale: scale, in: ctx)
     // Center divider.
     NSColor.separatorColor.setFill()
@@ -311,6 +333,9 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     var barX: CGFloat
     var numberX: CGFloat
     var contentX: CGFloat
+    var wordSpans: [WordDiff.Span] = []
+    /// `true` for the deletion (old) pane — selects the del-side word-diff color.
+    var isOld: Bool = false
   }
 
   private func drawPane(_ pane: PaneRender, gutter: GutterRenderer, scale: CGFloat, in ctx: CGContext) {
@@ -322,7 +347,10 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     gutter.draw(row: LineRowGeometry(rowRect: pane.paneRect, barX: pane.barX), origin: origin, in: ctx)
     drawNumber(pane.number, originX: pane.numberX, top: pane.paneRect.minY)
     if let wrapped = pane.wrapped {
-      drawWrapped(wrapped, contentX: pane.contentX, top: pane.paneRect.minY, scale: scale, in: ctx)
+      drawContent(
+        wrapped,
+        wordDiff: WordDiffLayer(spans: pane.wordSpans, isOld: pane.isOld),
+        origin: CGPoint(x: pane.contentX, y: pane.paneRect.minY), scale: scale, in: ctx)
     }
   }
 
@@ -354,40 +382,55 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     text.draw(in: inset, withAttributes: attributes)
   }
 
-  /// Draw each wrapped sub-line via CoreText, snapping the baseline to the backing
-  /// pixel grid BEFORE the draw origin (§Round-3 Retina). The per-sub-line
-  /// save/translate/scale flips CoreText's y-up glyph space right-side-up inside
-  /// this flipped `NSView`.
-  private func drawWrapped(
-    _ wrapped: LineTypesetter.Wrapped, contentX: CGFloat, top: CGFloat, scale: CGFloat, in ctx: CGContext
+  /// Draw one content column's word-diff background rects THEN its glyphs, in the
+  /// strict `DiffRowLayer` order — the row tint is already painted by the gutter, so
+  /// this covers layers 2 (word-diff, behind the glyphs) and 3 (glyphs). The
+  /// per-sub-line baseline geometry is shared with the word-diff pass via
+  /// `WrappedSubLine.lines` so a background rect lands exactly under its glyphs. The
+  /// per-sub-line save/translate/scale flips CoreText's y-up glyph space right-side-up
+  /// inside this flipped `NSView`; `CTLineDraw` ignores background (hence the separate
+  /// hand-filled rects).
+  /// The intra-line word-diff inputs for one content column (bundled so the draw
+  /// call stays within the parameter budget).
+  private struct WordDiffLayer {
+    var spans: [WordDiff.Span]
+    /// `true` for the deletion (old) side — selects the del-side emphasis color.
+    var isOld: Bool
+  }
+
+  private func drawContent(
+    _ wrapped: LineTypesetter.Wrapped, wordDiff: WordDiffLayer, origin: CGPoint, scale: CGFloat, in ctx: CGContext
   ) {
-    let font = context.metrics.font
-    let ascent = font.ascender
-    let textHeight = font.ascender - font.descender
-    let inset = max(0, (context.rowHeight - textHeight) / 2)
-    for (index, ctLine) in wrapped.ctLines.enumerated() {
-      let lineTop = top + CGFloat(index) * context.rowHeight
-      let baseline = snap(lineTop + inset + ascent, scale: scale)
+    let subLines = WrappedSubLine.lines(
+      from: wrapped, font: context.metrics.font, origin: origin, rowHeight: context.rowHeight, scale: scale)
+    // Layer 2 — word-diff rects (on top of the row tint, behind the glyphs).
+    if context.wordDiffEnabled, !wordDiff.spans.isEmpty {
+      WordDiffBackgroundPainter.fill(
+        spans: wordDiff.spans, subLines: subLines,
+        color: context.palette.wordEmphasis(isOld: wordDiff.isOld).cgColor, scale: scale, in: ctx)
+    }
+    // Layer 3 — glyphs.
+    for sub in subLines {
       ctx.saveGState()
       ctx.textMatrix = .identity
-      ctx.translateBy(x: snap(contentX, scale: scale), y: baseline)
+      ctx.translateBy(x: sub.origin.x, y: sub.origin.y)
       ctx.scaleBy(x: 1, y: -1)
       ctx.textPosition = .zero
-      CTLineDraw(ctLine, ctx)
+      CTLineDraw(sub.line, ctx)
       ctx.restoreGState()
     }
   }
 
-  private func snap(_ value: CGFloat, scale: CGFloat) -> CGFloat { (value * scale).rounded() / scale }
-
   // MARK: - Projection (mirrors `SegmentProjection.renderedRows` order + count)
 
-  private static func project(segment: LineSegment, mode: DiffViewMode) -> [RowRender] {
+  private static func project(segment: LineSegment, mode: DiffViewMode, wordDiffEnabled: Bool) -> [RowRender] {
     switch segment.classification {
     case .context, .contextExpanded:
       return projectContext(segment, mode: mode)
     case .change:
-      return mode == .unified ? projectUnifiedChange(segment) : projectSplitChange(segment)
+      return mode == .unified
+        ? projectUnifiedChange(segment, wordDiffEnabled: wordDiffEnabled)
+        : projectSplitChange(segment, wordDiffEnabled: wordDiffEnabled)
     }
   }
 
@@ -411,21 +454,34 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     return out
   }
 
-  private static func projectUnifiedChange(_ segment: LineSegment) -> [RowRender] {
+  private static func projectUnifiedChange(_ segment: LineSegment, wordDiffEnabled: Bool) -> [RowRender] {
+    let dels = segment.windowDeletions
+    let adds = segment.windowAdditions
+    // Pair deletion[i] ↔ addition[i] for intra-line word-diff — the SAME pairing the
+    // split projection uses, so unified and split emit identical spans (mode-agnostic).
+    let paired = Self.wordDiffPairs(dels: dels, adds: adds, enabled: wordDiffEnabled)
     var out: [RowRender] = []
-    for line in segment.windowDeletions + segment.windowAdditions {
+    for (index, line) in dels.enumerated() {
       out.append(
         RowRender(
           oldNumber: line.oldLineNumber, newNumber: line.newLineNumber, unifiedOrigin: line.origin,
-          content: line.content as NSString, isMarker: false, height: 0, top: 0))
-      appendMarkerIfNeeded(&out, old: line.origin == .deletion ? line : nil, new: line.origin == .addition ? line : nil)
+          content: line.content as NSString, unifiedWordSpans: paired.old[index], isMarker: false, height: 0, top: 0))
+      appendMarkerIfNeeded(&out, old: line, new: nil)
+    }
+    for (index, line) in adds.enumerated() {
+      out.append(
+        RowRender(
+          oldNumber: line.oldLineNumber, newNumber: line.newLineNumber, unifiedOrigin: line.origin,
+          content: line.content as NSString, unifiedWordSpans: paired.new[index], isMarker: false, height: 0, top: 0))
+      appendMarkerIfNeeded(&out, old: nil, new: line)
     }
     return out
   }
 
-  private static func projectSplitChange(_ segment: LineSegment) -> [RowRender] {
+  private static func projectSplitChange(_ segment: LineSegment, wordDiffEnabled: Bool) -> [RowRender] {
     let dels = segment.windowDeletions
     let adds = segment.windowAdditions
+    let paired = Self.wordDiffPairs(dels: dels, adds: adds, enabled: wordDiffEnabled)
     var out: [RowRender] = []
     for index in 0..<max(dels.count, adds.count) {
       let old = index < dels.count ? dels[index] : nil
@@ -435,10 +491,31 @@ final class LineRowView: NSView, DiffViewportRecyclable {
           oldNumber: old?.oldLineNumber, newNumber: new?.newLineNumber,
           oldOrigin: old != nil ? .deletion : nil, newOrigin: new != nil ? .addition : nil,
           oldContent: old.map { $0.content as NSString }, newContent: new.map { $0.content as NSString },
+          oldWordSpans: index < paired.old.count ? paired.old[index] : [],
+          newWordSpans: index < paired.new.count ? paired.new[index] : [],
           isMarker: false, height: 0, top: 0))
       appendMarkerIfNeeded(&out, old: old, new: new)
     }
     return out
+  }
+
+  /// Intra-line word-diff spans for a change segment, keyed by side index. Pairs
+  /// deletion[i] ↔ addition[i] and runs `WordDiff` on the NSString hot path; an
+  /// unpaired trailing deletion / addition (count mismatch) gets no word-diff (only
+  /// the row tint), matching pierre. `enabled == false` ⇒ all-empty (the upstream
+  /// `WordDiffPolicy` gate: `WordDiff` is never invoked).
+  private static func wordDiffPairs(
+    dels: [DiffLine], adds: [DiffLine], enabled: Bool
+  ) -> (old: [[WordDiff.Span]], new: [[WordDiff.Span]]) {
+    var old = [[WordDiff.Span]](repeating: [], count: dels.count)
+    var new = [[WordDiff.Span]](repeating: [], count: adds.count)
+    guard enabled else { return (old, new) }
+    for index in 0..<min(dels.count, adds.count) {
+      let result = WordDiff.diff(old: dels[index].content as NSString, new: adds[index].content as NSString)
+      old[index] = result.oldSpans
+      new[index] = result.newSpans
+    }
+    return (old, new)
   }
 
   private static func appendMarkerIfNeeded(_ out: inout [RowRender], old: DiffLine?, new: DiffLine?) {

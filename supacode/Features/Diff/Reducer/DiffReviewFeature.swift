@@ -41,6 +41,11 @@ struct DiffDocument: Equatable, Sendable {
   /// Set once by the size gate at load; short-circuits the highlight driver so a
   /// 200k-line / >2.5M-unit file renders plain with a header affordance, no stall.
   var highlightingDisabled: Bool = false
+  /// Set once by the word-diff gate (`WordDiffPolicy`) at load: a file whose changed
+  /// lines exceed the per-side cap gets NO intra-line word-diff (only the row-level
+  /// `+`/`-` tint). The render path reads this so `WordDiff` is never invoked for a
+  /// massively-changed file — the "gate lives upstream" contract.
+  var wordDiffDisabled: Bool = false
   /// `line → runs` for the OLD side of the visible window (both sides highlighted —
   /// fixes bug #2, the old path forced the old side `[]`).
   var oldStyleRuns: [Int: [StyleRun]] = [:]
@@ -487,6 +492,11 @@ struct DiffReviewFeature {
         document.newBlob = newBlob
         document.highlightingDisabled = diffHighlight.isPlain(
           batch.file.removedLines, batch.file.addedLines, oldBlob?.utf16.count ?? 0, newBlob?.utf16.count ?? 0)
+        // Word-diff gate (upstream, Phase 5): a file whose changed lines exceed the
+        // per-side cap gets no intra-line word-diff — the render path never invokes
+        // `WordDiff` for it. Evaluated on the same per-side counts as the size gate.
+        document.wordDiffDisabled = WordDiffPolicy.isDisabled(
+          oldChangedLines: batch.file.removedLines, newChangedLines: batch.file.addedLines)
         document.oldStyleRuns = [:]
         document.newStyleRuns = [:]
         Self.relocateComments(&state, key: key, lines: batch.hunks.flatMap(\.lines))
