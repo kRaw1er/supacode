@@ -46,6 +46,8 @@ struct AppFeature {
     var terminals = TerminalsFeature.State()
     /// Right inspector panel: changed-files list for the selected worktree.
     var review = DiffReviewFeature.State()
+    /// Claude usage indicator (pill + popover). App-global; one poll loop.
+    var usage = UsageFeature.State()
     var openActionSelection: OpenWorktreeAction = .finder
     var repoScripts: [ScriptDefinition] = []
     var globalScripts: [ScriptDefinition] = []
@@ -159,6 +161,7 @@ struct AppFeature {
     case agentPresence(AgentPresenceFeature.Action)
     case terminals(TerminalsFeature.Action)
     case review(DiffReviewFeature.Action)
+    case usage(UsageFeature.Action)
     case appLaunched
     case scenePhaseChanged(ScenePhase)
     case repositories(RepositoriesFeature.Action)
@@ -226,6 +229,7 @@ struct AppFeature {
         return .merge(
           .send(.repositories(.task)),
           .send(.settings(.task)),
+          .send(.usage(.task)),
           .run { _ in
             await MainActor.run {
               NSApplication.shared.dockTile.badgeLabel = nil
@@ -279,6 +283,8 @@ struct AppFeature {
           analyticsClient.capture("app_activated", nil)
           return .merge(
             .send(.repositories(.refreshWorktrees)),
+            // Refresh usage on foreground (no-op if the pill is disabled).
+            .send(.usage(.scenePhaseChanged(.active))),
             // Re-probe agent integrations on activation so the sidebar
             // card reflects external installs (e.g. `claude install`)
             // for users who keep the app open across days.
@@ -1416,6 +1422,10 @@ struct AppFeature {
 
       case .terminalEvent:
         return .none
+
+      // Handled by the `UsageFeature` Scope below; the core reducer ignores it.
+      case .usage:
+        return .none
       }
     }
     core
@@ -1424,6 +1434,9 @@ struct AppFeature {
     }
     Scope(state: \.review, action: \.review) {
       DiffReviewFeature()
+    }
+    Scope(state: \.usage, action: \.usage) {
+      UsageFeature()
     }
     Scope(state: \.agentPresence, action: \.agentPresence) {
       AgentPresenceFeature()
