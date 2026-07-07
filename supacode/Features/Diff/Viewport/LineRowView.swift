@@ -467,7 +467,13 @@ final class LineRowView: NSView, DiffViewportRecyclable {
 
   override func draw(_ dirtyRect: NSRect) {
     NSColor.textBackgroundColor.setFill()
-    dirtyRect.fill()
+    // Fill only our OWN bounds — NOT `dirtyRect`. AppKit hands each subview the whole
+    // invalidated region (the full viewport) in its own coordinates, and an NSView does
+    // NOT clip drawing to its bounds by default, so `dirtyRect.fill()` would paint this
+    // leaf's background across every SIBLING leaf's position and erase them — leaving only
+    // the last-drawn leaf visible (the "only one hunk renders" bug; single-hunk files have
+    // no sibling to erase, so they looked fine).
+    bounds.fill()
     guard !rows.isEmpty, let ctx = NSGraphicsContext.current?.cgContext else { return }
     let scale = window?.backingScaleFactor ?? 2
     let geo = geometry()

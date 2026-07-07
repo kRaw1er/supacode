@@ -52,6 +52,12 @@ final class ViewReuseQueue<View: NSView, Key: Hashable> {
   func getOrCreateView(forKey key: Key, createView: () -> View) -> View {
     if let existing = used[key] { return existing }
     let view = queued.popFirst() ?? createView()
+    // A view coming off the free-list was hidden by `enqueueView`; anything handed back
+    // for use must be visible again. `LineRowView.configure` also clears this, but a
+    // recycled widget host has no such hook — without this, a hunk-header / file-header /
+    // expander that scrolled off and back stays HIDDEN (blank), the "no hunk headers,
+    // only one hunk renders" bug. Hiding is exclusively `enqueueView`'s job.
+    view.isHidden = false
     used[key] = view
     return view
   }
