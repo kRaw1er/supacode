@@ -2,6 +2,7 @@ import Foundation
 import SupacodeSettingsShared
 import SwiftTreeSitter
 import SwiftTreeSitterLayer
+import Synchronization
 import TreeSitterClient
 
 /// One blob (old OR new side) prepared for highlighting. `utf16` is the raw UTF-16
@@ -32,7 +33,7 @@ nonisolated struct HighlightBlobInput: Sendable, Equatable {
 /// the `DiffHighlightPolicy` size gate + the windowed query + the sync fast path.
 @MainActor
 final class DiffHighlightEngine {
-  private static let logger = SupaLogger("DiffHighlightEngine")
+  private nonisolated static let logger = SupaLogger("DiffHighlightEngine")
 
   /// Shared instance so every open diff tab reuses one bounded parse cache across
   /// files. `disposeShared()` tears it down; the next access rebuilds a fresh one.
@@ -41,7 +42,12 @@ final class DiffHighlightEngine {
 
   private let parseTrees = ParseTreeCache(capacity: 24)
   private let spans = HighlightSpanCache(capacity: 100)
-  private var configCache: [String: LanguageConfiguration] = [:]
+  /// Per-engine cache of language configs (root + injected), keyed by `queryName`. A
+  /// `Mutex` (not a plain dict) because neon calls the `languageProvider` off the main
+  /// actor to resolve injected sublayers, so this must be reachable nonisolated. It is
+  /// PER-INSTANCE (not static): a tree-sitter `Query` is bound to its parser, so a
+  /// config must not be shared across the distinct neon clients different engines own.
+  private let configCache = Mutex<[String: LanguageConfiguration]>([:])
   /// NSString + line-start table per blob (content identity), so bucketing is O(1)
   /// per span and the blob is decoded once. Keyed by `blobOID`.
   private var blobStore: [String: PreparedBlob] = [:]
@@ -121,8 +127,15 @@ final class DiffHighlightEngine {
     if let cached = blobStore[input.blobOID] {
       blob = cached
     } else {
-      let text = NSString(characters: input.utf16, length: input.utf16.count)
-      let string = text as String
+      // Build the Swift String FIRST from the UTF-16 units, then derive the NSString
+      // from IT (`string as NSString`) so `text.length == string.utf16.count` by
+      // construction. The reverse (`NSString(fromRawUTF16) as String`) can re-normalize
+      // and CHANGE the UTF-16 count, desyncing every consumer: `lineStarts` +
+      // `windowRange` live in `NSString.length` space while neon parses `string` in
+      // `String.utf16.count` space — a query range past the parse length makes
+      // tree-sitter read past content (`location > end` crash). ONE UTF-16 space now.
+      let string = String(decoding: input.utf16, as: UTF16.self)
+      let text = string as NSString
       let prepared = PreparedBlob(text: text, string: string, lineStarts: Self.lineStarts(of: text))
       blobStore[input.blobOID] = prepared
       blob = prepared
@@ -144,14 +157,18 @@ final class DiffHighlightEngine {
   }
 
   private func buildClient(grammar: GrammarRegistry.Grammar, content: String) throws -> TreeSitterClient {
-    let config = try languageConfiguration(for: grammar)
+    let config = languageConfiguration(for: grammar)
     let length = content.utf16.count
     let snapshot = LanguageLayer.ContentSnapshot(string: content, limit: length)
     let client = try TreeSitterClient(
       rootLanguageConfig: config,
       configuration: .init(
+        // neon resolves injected sublayers on its BACKGROUND processor, so this is a
+        // NONISOLATED instance call — `MainActor.assumeIsolated` here crashed off the
+        // main thread. Per-engine (via `self`) so each neon client's configs stay
+        // isolated (a tree-sitter `Query` is bound to its parser).
         languageProvider: { [weak self] name in
-          MainActor.assumeIsolated { self?.injectedConfiguration(named: name) }
+          self?.injectedConfiguration(named: name)
         },
         contentSnapshopProvider: { _ in snapshot },
         lengthProvider: { length },
@@ -164,34 +181,34 @@ final class DiffHighlightEngine {
     return client
   }
 
-  private func languageConfiguration(for grammar: GrammarRegistry.Grammar) throws -> LanguageConfiguration {
-    if let cached = configCache[grammar.queryName] { return cached }
-    var queries: [Query.Definition: Query] = [:]
-    if let highlights = loadQuery(.highlights, grammar: grammar) {
-      queries[.highlights] = highlights
+  /// Resolve + cache a grammar's `LanguageConfiguration`. `nonisolated` because neon
+  /// resolves injected sublayers on its BACKGROUND processor and calls this through
+  /// the `languageProvider`; the `Mutex` cache makes that safe. Pure otherwise (bundle
+  /// read + query compile), so it runs correctly off the main actor.
+  nonisolated func languageConfiguration(for grammar: GrammarRegistry.Grammar) -> LanguageConfiguration {
+    configCache.withLock { cache in
+      if let cached = cache[grammar.queryName] { return cached }
+      var queries: [Query.Definition: Query] = [:]
+      if let highlights = Self.loadQuery(.highlights, grammar: grammar) { queries[.highlights] = highlights }
+      // Injections are legitimately absent for most grammars (only html/markdown/php
+      // etc. bundle one); a missing `injections.scm` is NOT an error.
+      if let injections = Self.loadQuery(.injections, grammar: grammar) { queries[.injections] = injections }
+      let config = LanguageConfiguration(grammar.language(), name: grammar.queryName, queries: queries)
+      cache[grammar.queryName] = config
+      return config
     }
-    // Injections are legitimately absent for most grammars (only html/markdown/php
-    // etc. bundle one); a missing `injections.scm` is NOT an error.
-    if let injections = loadQuery(.injections, grammar: grammar) {
-      queries[.injections] = injections
-    }
-    let config = LanguageConfiguration(grammar.language(), name: grammar.queryName, queries: queries)
-    configCache[grammar.queryName] = config
-    return config
   }
 
-  /// Resolves an injected language name (e.g. `"javascript"`, `"css"`) to its
-  /// bundled config. A missing grammar logs loudly (Phase 0 principle — never a
-  /// silent drop) and returns `nil`, so the embedded region renders plain.
-  func injectedConfiguration(named name: String) -> LanguageConfiguration? {
-    guard let grammar = GrammarRegistry.grammar(forInjectionName: name) else {
-      Self.logger.info("no grammar for injected language '\(name)'; embedded region renders plain")
-      return nil
-    }
-    return try? languageConfiguration(for: grammar)
+  /// Resolves an injected language name (e.g. `"javascript"`) to this engine's config
+  /// for it — nonisolated so neon's `languageProvider` can call it off the main actor
+  /// (a `MainActor.assumeIsolated` here crashed on neon's background processor). A
+  /// missing grammar returns `nil` so the embedded region renders plain.
+  nonisolated func injectedConfiguration(named name: String) -> LanguageConfiguration? {
+    guard let grammar = GrammarRegistry.grammar(forInjectionName: name) else { return nil }
+    return languageConfiguration(for: grammar)
   }
 
-  private func loadQuery(_ definition: Query.Definition, grammar: GrammarRegistry.Grammar) -> Query? {
+  nonisolated static func loadQuery(_ definition: Query.Definition, grammar: GrammarRegistry.Grammar) -> Query? {
     guard
       let url = Bundle.main.url(
         forResource: definition.name,

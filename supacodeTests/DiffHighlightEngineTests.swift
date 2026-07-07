@@ -49,8 +49,14 @@ struct DiffHighlightEngineTests {
     // `keyword` capture, so a `keyword` run can ONLY come from the injected JS layer.
     let source = "<script>let answer = 42;</script>"
     let input = HighlightBlobInput(blobOID: "html-inj", utf16: DiffFixture.blob(source), path: "page.html")
-    let byLine = await engine.styleRuns(for: input, visibleLines: 0..<1)
-    let runs = byLine.values.flatMap { $0 }
+    // neon resolves injected sublayers on its BACKGROUND processor (async), so the
+    // FIRST query can return before the JS sublayer is ready — the viewer simply
+    // re-queries on the next scroll/relayout. Re-query (bounded) until it settles.
+    var runs: [StyleRun] = []
+    for _ in 0..<20 {
+      runs = (await engine.styleRuns(for: input, visibleLines: 0..<1)).values.flatMap { $0 }
+      if runs.contains(where: { $0.capture.hasPrefix("keyword") }) { break }
+    }
 
     #expect(!runs.isEmpty)
     #expect(runs.contains { $0.capture.hasPrefix("keyword") }, "expected injected JS `let` keyword in <script>")

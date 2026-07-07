@@ -9,7 +9,11 @@ import TreeSitterGrammars
 /// `Grammar.language` returns an `OpaquePointer` from the prebuilt
 /// `TreeSitterGrammars` xcframework — exactly what `SwiftTreeSitter.Language(_:)`
 /// accepts — so no tree-sitter runtime type crosses into Swift here.
-enum GrammarRegistry {
+///
+/// `nonisolated` (pure static lookups over immutable data) so neon's background
+/// `languageProvider` can resolve an injected grammar off the main actor without
+/// tripping `MainActor.assumeIsolated`.
+nonisolated enum GrammarRegistry {
   struct Grammar: Sendable {
     /// The `tree_sitter_<lang>()` C entry point, wrapped `@Sendable` so it can
     /// ride into the parsing actor.
