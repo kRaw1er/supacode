@@ -159,7 +159,21 @@ final class DiffHighlightEngine {
   private func buildClient(grammar: GrammarRegistry.Grammar, content: String) throws -> TreeSitterClient {
     let config = languageConfiguration(for: grammar)
     let length = content.utf16.count
-    let snapshot = LanguageLayer.ContentSnapshot(string: content, limit: length)
+    // tree-sitter's parser reads a few UTF-16 units PAST the content end (lookahead /
+    // EOF detection). SwiftTreeSitter's stock reader `assertionFailure`s on that in
+    // DEBUG (`String+Data.swift "location is greater than end"`) but returns `nil`
+    // (benign) in RELEASE. Our index math is already consistent —
+    // `(content as NSString).length == content.utf16.count` by construction, since the
+    // blob is built String-FIRST (see `prepare`), verified: the over-read is at
+    // `unit > length` while `nsLength == length` — so this is NOT a length desync, it
+    // is that third-party DEBUG assertion. Return `nil` past the end (release
+    // behaviour) so DEBUG builds don't crash mid-parse.
+    let stock = Parser.readFunction(for: content, limit: length)
+    let read: Parser.DataSnapshotProvider = { byteOffset, point in
+      byteOffset / 2 > length ? nil : stock(byteOffset, point)
+    }
+    let snapshot = LanguageLayer.ContentSnapshot(
+      readHandler: read, textProvider: content.predicateTextSnapshotProvider)
     let client = try TreeSitterClient(
       rootLanguageConfig: config,
       configuration: .init(

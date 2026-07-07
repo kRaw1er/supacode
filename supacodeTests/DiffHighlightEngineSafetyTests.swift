@@ -16,10 +16,13 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct DiffHighlightEngineSafetyTests {
+  /// A real repo file that PROVABLY triggered the `location > end` crash — tree-sitter
+  /// reads a few UTF-16 units past EOF while parsing it, which SwiftTreeSitter asserts
+  /// on in DEBUG. (`DiffReviewFeature.swift` did NOT crash, so use the known culprit.)
   private func realLargeSwiftSource() throws -> String {
     let url = URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent().deletingLastPathComponent()
-      .appending(path: "supacode/Features/Diff/Reducer/DiffReviewFeature.swift")
+      .appending(path: "supacode/Clients/Workspace/WorkspaceClient.swift")
     let data = try #require(FileManager.default.contents(atPath: url.path), "fixture file missing")
     return try #require(String(data: data, encoding: .utf8))
   }
@@ -32,8 +35,14 @@ struct DiffHighlightEngineSafetyTests {
     let lineCount = source.split(separator: "\n", omittingEmptySubsequences: false).count
     let engine = DiffHighlightEngine()
     let input = HighlightBlobInput(
-      blobOID: "safety-large", utf16: Array(source.utf16), path: "DiffReviewFeature.swift")
-    let runs = await engine.styleRuns(for: input, visibleLines: 0..<lineCount)
+      blobOID: "safety-large", utf16: Array(source.utf16), path: "WorkspaceClient.swift")
+    // Progressive windows to EOF (a scroll) — the parse to the deepest queried line is
+    // what reads past the content end.
+    var runs: [Int: [StyleRun]] = [:]
+    for upper in stride(from: 20, through: lineCount, by: 20) {
+      runs = await engine.styleRuns(for: input, visibleLines: 0..<upper)
+    }
+    runs = await engine.styleRuns(for: input, visibleLines: 0..<lineCount)
     #expect(!runs.isEmpty, "a real Swift file must highlight")
   }
 
