@@ -12,8 +12,11 @@ import Foundation
 /// (`TreeSitterClient.swift:22-24`); calling it from a `.run` effect hops to the main
 /// actor via `await`. `isPlain` is pure (the size gate on counts).
 nonisolated struct DiffHighlightClient: Sendable {
-  /// Windowed, both-sides highlight for ONE blob: `line → runs` for the visible
-  /// range. Empty when there is no grammar / nothing visible / the parse failed.
+  /// Windowed highlight for ONE blob. `visibleLines` is a **1-based source-line**
+  /// range (the `DiffLine.old/newLineNumber` space) and the result is keyed the same
+  /// way, so `LineRowView.syntaxRuns` looks the runs up with no coordinate skew. The
+  /// live adapter converts to/from the engine's 0-based blob-line space. Empty when
+  /// there is no grammar / nothing visible / the parse failed.
   var styleRuns:
     @MainActor @Sendable (_ input: HighlightBlobInput, _ visibleLines: Range<Int>) async -> [Int: [StyleRun]]
   /// The size gate, evaluated on counts BEFORE any parse — `true` ⇒ render plain.
@@ -21,10 +24,36 @@ nonisolated struct DiffHighlightClient: Sendable {
     @Sendable (_ oldChangedLines: Int, _ newChangedLines: Int, _ oldBlobUTF16: Int, _ newBlobUTF16: Int) -> Bool
 }
 
+extension DiffHighlightClient {
+  /// 1-based visible line-number range → the 0-based blob-line window the engine
+  /// queries (`DiffHighlightEngine` indexes `lineStarts` 0-based, blob line `i` ==
+  /// source line number `i + 1`). An empty / degenerate range stays empty.
+  nonisolated static func blobWindow(forLineNumbers lines: Range<Int>) -> Range<Int> {
+    guard !lines.isEmpty else { return 0..<0 }
+    let lower = max(0, lines.lowerBound - 1)
+    let upper = max(lower, lines.upperBound - 1)
+    return lower..<upper
+  }
+
+  /// 0-based blob-line keys (engine output) → 1-based source line numbers (the
+  /// `DiffLine.old/newLineNumber` space the row lookup keys off). This `+1` is the
+  /// single fix for the "runs bucketed one line off from where the row reads them"
+  /// skew — confined to the one adapter that straddles blob-space and line-space.
+  nonisolated static func lineNumberKeyed(_ byBlobLine: [Int: [StyleRun]]) -> [Int: [StyleRun]] {
+    var out: [Int: [StyleRun]] = [:]
+    out.reserveCapacity(byBlobLine.count)
+    for (blobLine, runs) in byBlobLine { out[blobLine + 1] = runs }
+    return out
+  }
+}
+
 extension DiffHighlightClient: DependencyKey {
   static let liveValue = DiffHighlightClient(
     styleRuns: { input, visibleLines in
-      await DiffHighlightEngine.shared.styleRuns(for: input, visibleLines: visibleLines)
+      let window = blobWindow(forLineNumbers: visibleLines)
+      guard !window.isEmpty else { return [:] }
+      let byBlobLine = await DiffHighlightEngine.shared.styleRuns(for: input, visibleLines: window)
+      return lineNumberKeyed(byBlobLine)
     },
     isPlain: { oldChanged, newChanged, oldBlob, newBlob in
       DiffHighlightPolicy.isPlain(

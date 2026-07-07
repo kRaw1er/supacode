@@ -845,6 +845,10 @@ extension Libgit2Diff {
       let delta = deltaPtr.pointee
       let result = fileDiffResult(delta: delta, diff: diff, idx: idx, caps: streamCaps, wantHunks: true)
       let file = makeFileChange(delta: delta, result: result)
+      // For a working-tree diff the new side's content is on disk (zero OID), so read
+      // it from the working directory — otherwise the new (right) side never highlights.
+      let workdirNew = source.isWorkingTree
+        ? workdirBlobUTF16(repo: repo, path: delta.new_file.path, caps: streamCaps) : nil
       emit(
         .fileReady(
           FileDiffBatch(
@@ -853,9 +857,10 @@ extension Libgit2Diff {
             unifiedLineCount: result.hunks.reduce(0) { $0 + $1.lines.count },
             splitLineCount: result.hunks.reduce(0) { $0 + max($1.oldCount, $1.newCount) },
             oldBlobID: oidString(delta.old_file.id),
-            newBlobID: oidString(delta.new_file.id),
+            newBlobID: source.isWorkingTree ? workdirNew?.oid : oidString(delta.new_file.id),
             oldBlobUTF16: blobUTF16(repo: repo, oid: delta.old_file.id, caps: streamCaps),
-            newBlobUTF16: source.isWorkingTree ? nil : blobUTF16(repo: repo, oid: delta.new_file.id, caps: streamCaps),
+            newBlobUTF16: source.isWorkingTree
+              ? workdirNew?.utf16 : blobUTF16(repo: repo, oid: delta.new_file.id, caps: streamCaps),
             generation: generation)))
     }
     emit(.finished(generation: generation))
@@ -867,6 +872,27 @@ extension Libgit2Diff {
     if git_oid_is_zero(&oid) == 1 { return nil }
     guard let cString = git_oid_tostr_s(&oid) else { return nil }
     return String(cString: cString)
+  }
+
+  /// The WORKING-DIRECTORY content of a delta's NEW side for a working-tree diff,
+  /// whose `new_file.id` is a zero OID because the content lives on disk, not in the
+  /// object DB. Returns the git blob OID (deterministic content identity → the parse
+  /// cache key, same shape as `oidString`) plus decoded UTF-16, or `nil` for a missing
+  /// file (a deletion), an over-`byteCap` file, or non-UTF-8 content. WITHOUT this the
+  /// new side of every uncommitted diff has no grammar input and renders plain — all
+  /// white — which is most of what a working-tree review shows.
+  private nonisolated static func workdirBlobUTF16(
+    repo: OpaquePointer, path: UnsafePointer<CChar>?, caps: Caps
+  ) -> (oid: String, utf16: [UInt16])? {
+    guard let path, let workdirC = git_repository_workdir(repo) else { return nil }
+    let fullPath = String(cString: workdirC) + String(cString: path)
+    guard let data = FileManager.default.contents(atPath: fullPath) else { return nil }
+    if data.count > caps.byteCap { return nil }
+    guard let text = String(data: data, encoding: .utf8) else { return nil }  // non-UTF-8 → highlighter skips
+    var oid = git_oid()
+    let hashed = data.withUnsafeBytes { git_odb_hash(&oid, $0.baseAddress, data.count, GIT_OBJECT_BLOB) }
+    guard hashed == 0, let oidC = git_oid_tostr_s(&oid) else { return nil }
+    return (String(cString: oidC), Array(text.utf16))
   }
 
   /// Decode a blob to Sendable UTF-16 (value copy). `nil` for a zero OID, a

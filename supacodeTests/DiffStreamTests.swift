@@ -142,13 +142,12 @@ struct DiffStreamTests {
     let change = try #require(batch(events, id: "a.txt"))
     // The OLD side is a real blob for every diff kind.
     #expect(change.oldBlobID != nil)
-    // The working-tree NEW side is the workdir (zero OID → nil); tree/base diffs
-    // carry a real new blob.
+    // The NEW side is a real content blob for BOTH kinds: a tree/base diff reads it
+    // from the object DB, and a working-tree diff reads the workdir file from disk
+    // (the Phase-4 fix — without it the new side never highlights, i.e. all white).
+    #expect(change.newBlobID != nil)
     if source.isWorkingTree {
-      #expect(change.newBlobID == nil)
-      #expect(change.newBlobUTF16 == nil)
-    } else {
-      #expect(change.newBlobID != nil)
+      #expect(change.newBlobUTF16 == Array("a\nB\nc2\n".utf16), "working-tree new side is the on-disk content")
     }
   }
 

@@ -100,8 +100,8 @@ struct DiffSeamSwapReducerTests {
 
     // A visible-range change bumps the generation + records the range. Both blobs
     // are nil (plain file) so no highlight effect is issued — deterministic.
-    await store.send(.highlightVisibleRangeChanged(key: key, range: 0..<40))
-    #expect(store.state.openDiffs[key]?.visibleLines == 0..<40)
+    await store.send(.highlightVisibleRangeChanged(key: key, window: VisibleLineWindow(old: 0..<40, new: 0..<40)))
+    #expect(store.state.openDiffs[key]?.visibleLineWindow == VisibleLineWindow(old: 0..<40, new: 0..<40))
     #expect(store.state.openDiffs[key]?.highlightGeneration == 6)
 
     // A stale `.highlightsReady` (superseded generation) is dropped (pierre

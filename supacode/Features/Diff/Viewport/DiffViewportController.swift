@@ -53,6 +53,7 @@ final class DiffViewportController: NSObject {
     oldStyleRuns = old
     newStyleRuns = new
     syntaxVersion &+= 1
+    Self.logger.info("[hl] setSyntax received old=\(old.count) new=\(new.count) lines, v=\(syntaxVersion)")
     layoutVisibleChunks()
   }
 
@@ -96,7 +97,11 @@ final class DiffViewportController: NSObject {
   /// anchor pick (pierre `getScrollAnchor`) and the nearest-surviving fallback.
   private var materialized: [(identity: ScrollAnchor.Identity, yOrigin: CGFloat)] = []
 
-  private var lastVisible = ChunkRange(rows: 0..<0)
+  /// Dedupe baseline for `fireVisibleRange` — the last per-side line window fired
+  /// out. `nil` means "never fired" so the FIRST resolved window always fires, even
+  /// when it is empty→populated (the initial-render highlight query that the old
+  /// `0..<0 == lastVisible` guard silently swallowed until a manual scroll).
+  private var lastVisibleWindow: VisibleLineWindow?
   private nonisolated(unsafe) var boundsObserver: NSObjectProtocol?
 
   /// Re-entrancy guard: our own `setBoundsOrigin` during a restore / clamp must
@@ -129,7 +134,7 @@ final class DiffViewportController: NSObject {
   private static let logger = SupaLogger("DiffViewport")
 
   // Callbacks OUT — no `store.*` mutation (`DiffTableController.swift:35` precedent).
-  var onVisibleRangeChanged: ((ChunkRange) -> Void)?
+  var onVisibleRangeChanged: ((VisibleLineWindow) -> Void)?
   var onHit: ((DiffHit) -> Void)?
 
   override init() {
@@ -172,6 +177,10 @@ final class DiffViewportController: NSObject {
     tree = newTree
     mode = newMode
     measurePass = 0
+    // Fresh content ⇒ force the next layout to re-fire its visible-line window even
+    // if it coincides with the prior document's, so a newly-opened / re-diffed file
+    // always issues its initial highlight query once the scroll view is sized.
+    lastVisibleWindow = nil
     resizeDocument()
     clampScrollOrigin()
     layoutVisibleChunks()
@@ -311,38 +320,16 @@ final class DiffViewportController: NSObject {
   /// accounts for any measured deltas of the rows above the window); the leaf then
   /// typesets only these rows and estimates the rest.
   private func lineRenderWindow(_ placement: Placement) -> (rows: Range<Int>, top: CGFloat) {
-    let top = placement.top
-    let rowCount = top.chunk.baseSummary(metrics: tree.metrics).count(mode)
-    guard rowCount > 0 else { return (0..<0, 0) }
-    let leafTop = top.yOrigin
-    let leafBottom = leafTop + placement.height
-    let windowTop = max(placement.window.minY, leafTop)
-    let windowBottom = min(placement.window.maxY, leafBottom)
-    guard windowBottom > windowTop else { return (0..<0, 0) }  // leaf not actually in the window
-    let clampedBottom = min(windowBottom, leafBottom - 0.001)
-
-    // Fast path — a leaf with NO measured height deltas has uniform (base) row
-    // heights, so the window resolves by arithmetic with ZERO tree seeks. This keeps
-    // the per-layout seek budget O(log n × window), not O(window) seeks: without it,
-    // a mode toggle / scroll over many small leaves would add two seeks per leaf.
-    let rowHeight = tree.metrics.lineHeight
-    if rowHeight > 0, tree.nodesByID[top.id]?.heightDeltas?.isEmpty ?? true {
-      let startLocal = min(max(0, Int((windowTop - leafTop) / rowHeight)), rowCount - 1)
-      let endRow = min(rowCount - 1, Int((clampedBottom - leafTop) / rowHeight))
-      let end = min(rowCount, max(startLocal, endRow) + 1)
-      return (startLocal..<end, CGFloat(startLocal) * rowHeight)
-    }
-
-    // Variable-height leaf (some rows wrapped): resolve the window via two O(log n)
-    // seeks so `bufferBefore` accounts for the measured deltas of the rows above it.
-    let startHit = tree.seek(y: windowTop, mode: mode)
-    let startLocal = min(max(0, startHit?.localRow ?? 0), rowCount - 1)
-    let startY = startHit?.yOrigin ?? leafTop
-    let endHit = tree.seek(y: clampedBottom, mode: mode)
-    let endLocal = min(rowCount, (endHit?.localRow ?? (rowCount - 1)) + 1)
-    let start = min(startLocal, rowCount)
-    let end = min(max(start, endLocal), rowCount)
-    return (start..<end, startY - leafTop)
+    let rowCount = placement.top.chunk.baseSummary(metrics: tree.metrics).count(mode)
+    // WINDOWING DISABLED (2026-07-06) — the sub-window computation regressed the
+    // REAL-app initial render: rows landed at the leaf BOTTOM with an empty top,
+    // because the window depends on `visibleRect` at apply time (before the scroll
+    // view is sized), a condition the headless controller tests never reproduced.
+    // Reverted to whole-leaf typeset (the known-correct render, verified visually
+    // pre-windowing). Re-enable windowing ONLY behind a real-NSScrollView layout+draw
+    // integration test that asserts rows paint at the right y. Cost: initial typeset
+    // is O(leaf) again — the two DiffViewportScalePerfTests are back to withKnownIssue.
+    return (0..<rowCount, 0)
   }
 
   /// Mount (or recycle) the resolved `DiffWidget` model into a `WidgetHostChunkView`
@@ -387,10 +374,13 @@ final class DiffViewportController: NSObject {
   }
 
   private func fireVisibleRange() {
-    let range = tree.indexRange(in: visibleRect, mode: mode)
-    guard range != lastVisible else { return }
-    lastVisible = range
-    onVisibleRangeChanged?(range)
+    // The visible SOURCE-line window per side (NOT `indexRange`'s widget-shifted,
+    // side-shared rendered-row indices — those query the wrong blob region). Deduped
+    // so a pure scroll within the same lines does not re-issue an identical query.
+    let window = tree.visibleLineRange(in: visibleRect, mode: mode)
+    guard window != lastVisibleWindow else { return }
+    lastVisibleWindow = window
+    onVisibleRangeChanged?(window)
   }
 
   // MARK: - Scroll anchoring

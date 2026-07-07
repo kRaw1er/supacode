@@ -27,6 +27,20 @@ nonisolated struct ChunkRange: Equatable, Sendable {
   var upperBound: Int { rows.upperBound }
 }
 
+/// The 1-based SOURCE-line ranges visible on screen, split by blob side — the ONLY
+/// coordinate a blob highlighter may be queried with, and the space the row lookup
+/// keys off (`DiffLine.old/newLineNumber`). Deliberately NOT a `ChunkRange`: rendered
+/// row indices are shifted by every widget / expander / collapsed gap and are shared
+/// across both sides, so handing them to a per-blob highlighter queries the wrong
+/// region of the wrong file (the "all text white" bug). An empty side means no rows
+/// of that blob are on screen (e.g. an all-addition hunk shows no old lines).
+nonisolated struct VisibleLineWindow: Equatable, Sendable {
+  var old: Range<Int>
+  var new: Range<Int>
+
+  static let empty = VisibleLineWindow(old: 0..<0, new: 0..<0)
+}
+
 /// Whether a within-leaf resolve is targeting a rendered-row index or a y-offset.
 nonisolated enum ChunkTreeLocalTarget: Sendable {
   case index(Int)
@@ -242,6 +256,39 @@ final class ChunkTree {
       return ChunkRange(rows: 0..<0)
     }
     return ChunkRange(rows: top.rowIndex..<(bottom.rowIndex + 1))
+  }
+
+  /// The 1-based source-line ranges actually visible in `rect`, per blob side — the
+  /// highlight-query window. Resolves the visible RENDERED rows (which `indexRange`
+  /// returns as widget-shifted, side-shared indices — the wrong coordinate for a blob
+  /// query) back to the `DiffLine.old/newLineNumber` space the highlighter and the row
+  /// lookup share. Walks only the rows intersecting `rect` (bounded by the viewport,
+  /// O(visible-rows · log n)); widget / marker rows contribute no line number.
+  func visibleLineRange(in rect: CGRect, mode: DiffViewMode) -> VisibleLineWindow {
+    guard let top = seek(y: rect.minY, mode: mode) else { return .empty }
+    var oldLo = Int.max
+    var oldHi = Int.min
+    var newLo = Int.max
+    var newHi = Int.min
+    var hit: ChunkHit? = top
+    while let current = hit, current.yOrigin < rect.maxY {
+      let rendered = current.chunk.renderedRows(mode)
+      if current.localRow >= 0, current.localRow < rendered.count {
+        let row = rendered[current.localRow]
+        if let old = row.oldNumber {
+          oldLo = min(oldLo, old)
+          oldHi = max(oldHi, old)
+        }
+        if let new = row.newNumber {
+          newLo = min(newLo, new)
+          newHi = max(newHi, new)
+        }
+      }
+      hit = successor(of: current, mode: mode)
+    }
+    return VisibleLineWindow(
+      old: oldLo <= oldHi ? oldLo..<(oldHi + 1) : 0..<0,
+      new: newLo <= newHi ? newLo..<(newHi + 1) : 0..<0)
   }
 
   /// Seek to a file's leading `.widget(fileHeader)`. O(log n) via the file index.

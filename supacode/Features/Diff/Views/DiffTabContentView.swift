@@ -151,9 +151,9 @@ struct DiffTabContentView: View {
           wordDiffEnabled: !document.wordDiffDisabled,
           oldStyleRuns: document.oldStyleRuns,
           newStyleRuns: document.newStyleRuns,
-          syntaxVersion: document.highlightGeneration,
-          onVisibleRangeChanged: { range in
-            store.send(.highlightVisibleRangeChanged(key: key, range: range))
+          syntaxVersion: document.styleRunsVersion,
+          onVisibleRangeChanged: { window in
+            store.send(.highlightVisibleRangeChanged(key: key, window: window))
           },
           onExpandGap: { gap, step, direction in
             store.send(.expandGap(key: key, gap: gap, step: step, direction: direction))

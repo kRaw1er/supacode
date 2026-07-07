@@ -35,8 +35,10 @@ struct DiffViewerRepresentable: NSViewRepresentable {
   var newStyleRuns: [Int: [StyleRun]] = [:]
   var syntaxVersion: Int = 0
 
-  /// Viewport scrolled/resized → windowed highlight (re)issue (Phase 4 driver).
-  var onVisibleRangeChanged: (Range<Int>) -> Void = { _ in }
+  /// Viewport scrolled/resized → windowed highlight (re)issue (Phase 4 driver). The
+  /// payload is the per-side 1-based visible SOURCE-line window, not rendered-row
+  /// indices — the coordinate the highlighter queries + the row lookup keys off.
+  var onVisibleRangeChanged: (VisibleLineWindow) -> Void = { _ in }
   /// An expander widget's reveal button → the reducer's incremental `expandGap`.
   var onExpandGap: (_ gap: Int, _ step: ExpansionState.Step, _ direction: ExpansionState.Direction) -> Void = {
     _, _, _ in
@@ -49,8 +51,8 @@ struct DiffViewerRepresentable: NSViewRepresentable {
   func makeNSView(context: Context) -> NSScrollView {
     let coordinator = context.coordinator
     let controller = coordinator.controller
-    controller.onVisibleRangeChanged = { [weak coordinator] range in
-      coordinator?.onVisibleRangeChanged(range.rows)
+    controller.onVisibleRangeChanged = { [weak coordinator] window in
+      coordinator?.onVisibleRangeChanged(window)
     }
     syncCallbacks(coordinator)
     controller.wordDiffEnabled = wordDiffEnabled
@@ -136,7 +138,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
   @MainActor
   final class Coordinator {
     let controller = DiffViewportController()
-    var onVisibleRangeChanged: (Range<Int>) -> Void = { _ in }
+    var onVisibleRangeChanged: (VisibleLineWindow) -> Void = { _ in }
     var onExpandGap: (Int, ExpansionState.Step, ExpansionState.Direction) -> Void = { _, _, _ in }
     var onEditComment: (UUID) -> Void = { _ in }
     var lastSignature: Signature?

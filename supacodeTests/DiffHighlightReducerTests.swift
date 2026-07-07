@@ -53,13 +53,13 @@ struct DiffHighlightReducerTests {
     }
 
     // First range: debounce pending, nothing applied yet.
-    await store.send(.highlightVisibleRangeChanged(key: key, range: 0..<10)) {
-      $0.openDiffs[key]?.visibleLines = 0..<10
+    await store.send(.highlightVisibleRangeChanged(key: key, window: VisibleLineWindow(old: 0..<10, new: 0..<10))) {
+      $0.openDiffs[key]?.visibleLineWindow = VisibleLineWindow(old: 0..<10, new: 0..<10)
       $0.openDiffs[key]?.highlightGeneration = 1
     }
     // Supersede BEFORE the debounce elapses → the first effect is cancelled.
-    await store.send(.highlightVisibleRangeChanged(key: key, range: 5..<20)) {
-      $0.openDiffs[key]?.visibleLines = 5..<20
+    await store.send(.highlightVisibleRangeChanged(key: key, window: VisibleLineWindow(old: 5..<20, new: 5..<20))) {
+      $0.openDiffs[key]?.visibleLineWindow = VisibleLineWindow(old: 5..<20, new: 5..<20)
       $0.openDiffs[key]?.highlightGeneration = 2
     }
 
@@ -69,6 +69,7 @@ struct DiffHighlightReducerTests {
     await store.receive(\.highlightsReady) {
       $0.openDiffs[key]?.oldStyleRuns = Self.cannedRuns
       $0.openDiffs[key]?.newStyleRuns = [:]  // working-tree new side (workdir) not decoded
+      $0.openDiffs[key]?.styleRunsVersion = 1  // runs ARRIVED → the view-delivery revision bumps
     }
   }
 
@@ -109,8 +110,8 @@ struct DiffHighlightReducerTests {
     }
 
     // Only the visible range updates; no effect, no `highlightsReady`, no runs.
-    await store.send(.highlightVisibleRangeChanged(key: key, range: 0..<10)) {
-      $0.openDiffs[key]?.visibleLines = 0..<10
+    await store.send(.highlightVisibleRangeChanged(key: key, window: VisibleLineWindow(old: 0..<10, new: 0..<10))) {
+      $0.openDiffs[key]?.visibleLineWindow = VisibleLineWindow(old: 0..<10, new: 0..<10)
     }
   }
 }

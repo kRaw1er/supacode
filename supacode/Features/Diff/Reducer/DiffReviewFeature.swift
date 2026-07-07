@@ -48,8 +48,9 @@ struct DiffDocument: Equatable, Sendable {
   /// The new-side blob (branch tip for a base diff), or `nil` on a deleted file /
   /// the working-tree new side (workdir, not decoded).
   var newBlob: HighlightBlobInput?
-  /// The last visible rendered-line range the highlighter was asked about.
-  var visibleLines: Range<Int> = 0..<0
+  /// The last per-side visible SOURCE-line window the highlighter was asked about
+  /// (1-based line numbers, split by blob side — NOT rendered-row indices).
+  var visibleLineWindow: VisibleLineWindow = .empty
   /// Set once by the size gate at load; short-circuits the highlight driver so a
   /// 200k-line / >2.5M-unit file renders plain with a header affordance, no stall.
   var highlightingDisabled: Bool = false
@@ -68,9 +69,15 @@ struct DiffDocument: Equatable, Sendable {
   /// `line → runs` for the NEW side of the visible window.
   var newStyleRuns: [Int: [StyleRun]] = [:]
   /// Monotonic guard for the in-flight highlight query. Bumped on every
-  /// visible-range change; a returning `.highlightsReady` whose token no longer
-  /// matches is dropped (pierre `isCurrentRequest`).
+  /// visible-range change (the REQUEST); a returning `.highlightsReady` whose token
+  /// no longer matches is dropped (pierre `isCurrentRequest`).
   var highlightGeneration: Int = 0
+  /// Monotonic revision bumped whenever the STORED runs change (a highlight ARRIVES,
+  /// or a re-diff clears them). This — NOT `highlightGeneration` (which bumps on the
+  /// request, before the runs exist) — is what the view observes to push fresh runs
+  /// into the viewport: gating delivery on `highlightGeneration` skipped the arriving
+  /// colors because the request had already advanced the token.
+  var styleRunsVersion: Int = 0
 
   enum LoadState: Equatable, Sendable {
     case loading
@@ -344,9 +351,10 @@ struct DiffReviewFeature {
     case diffExpandContext(fileID: FileChange.ID, delta: Int)
 
     // MARK: Phase 4 — neon syntax highlighting driver
-    /// Viewport scrolled/resized → (re)issue a windowed highlight for `range`,
-    /// debounced with the injected clock, superseding any in-flight pass.
-    case highlightVisibleRangeChanged(key: DiffDocumentKey, range: Range<Int>)
+    /// Viewport scrolled/resized → (re)issue a windowed highlight for the per-side
+    /// visible SOURCE-line `window`, debounced with the injected clock, superseding
+    /// any in-flight pass.
+    case highlightVisibleRangeChanged(key: DiffDocumentKey, window: VisibleLineWindow)
     /// Both sides' windowed runs came back; applied when `generation` is still live.
     case highlightsReady(
       key: DiffDocumentKey, old: [Int: [StyleRun]], new: [Int: [StyleRun]], generation: Int)
@@ -684,6 +692,7 @@ struct DiffReviewFeature {
         }
         document.oldStyleRuns = [:]
         document.newStyleRuns = [:]
+        document.styleRunsVersion &+= 1  // cleared — the view repaints without stale colors
         // A re-diff re-materializes revealed slices; the declarative `expansion`
         // (gap-index keyed) survives the line shift (Phase 7).
         document.revealed.removeAll()
@@ -822,9 +831,9 @@ struct DiffReviewFeature {
 
       // MARK: Phase 4 — neon syntax highlighting driver
 
-      case .highlightVisibleRangeChanged(let key, let range):
+      case .highlightVisibleRangeChanged(let key, let window):
         guard var document = state.openDiffs[key] else { return .none }
-        document.visibleLines = range
+        document.visibleLineWindow = window
         // The size gate (set at load) short-circuits before any client is built or
         // any parse runs — a 200k-line / oversized file renders plain, no stall.
         guard !document.highlightingDisabled else {
@@ -839,10 +848,13 @@ struct DiffReviewFeature {
         // Nothing to highlight on either side (plain-text file / no bundled grammar):
         // still clear any stale runs, but skip the effect.
         guard old != nil || new != nil else { return .none }
+        // Each side is queried with ITS OWN visible line range (old / new line numbers
+        // differ). The client speaks 1-based line numbers in and out, so the returned
+        // runs are keyed exactly how `LineRowView` looks them up.
         return .run { send in
           try await clock.sleep(for: .milliseconds(16))  // coalesce scroll bursts (no Task.sleep)
-          let oldRuns = old == nil ? [:] : await diffHighlight.styleRuns(old!, range)
-          let newRuns = new == nil ? [:] : await diffHighlight.styleRuns(new!, range)
+          let oldRuns = old == nil || window.old.isEmpty ? [:] : await diffHighlight.styleRuns(old!, window.old)
+          let newRuns = new == nil || window.new.isEmpty ? [:] : await diffHighlight.styleRuns(new!, window.new)
           await send(.highlightsReady(key: key, old: oldRuns, new: newRuns, generation: generation))
         }
         .cancellable(id: CancelID.highlight(key), cancelInFlight: true)
@@ -853,6 +865,7 @@ struct DiffReviewFeature {
         guard var document = state.openDiffs[key], generation == document.highlightGeneration else { return .none }
         document.oldStyleRuns = old
         document.newStyleRuns = new
+        document.styleRunsVersion &+= 1  // runs ARRIVED — the view keys delivery off this
         state.openDiffs[key] = document
         return .none
 
