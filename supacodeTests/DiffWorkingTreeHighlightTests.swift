@@ -23,9 +23,11 @@ struct DiffWorkingTreeHighlightTests {
     var batches: [FileDiffBatch] = []
     let request = Libgit2Diff.WalkRequest(
       source: .workingTree, caps: Self.caps, contextLines: 3, generation: 1, ignoreWhitespace: false)
-    try Libgit2Diff.streamChangedFiles(at: root, request, isCancelled: { false }) { event in
-      if case .fileReady(let batch) = event { batches.append(batch) }
-    }
+    try Libgit2Diff.streamChangedFiles(
+      at: root, request, isCancelled: { false },
+      emit: { event in
+        if case .fileReady(let batch) = event { batches.append(batch) }
+      })
     return try #require(batches.first { $0.file.id == path }, "no working-tree batch for \(path)")
   }
 

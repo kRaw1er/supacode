@@ -847,7 +847,8 @@ extension Libgit2Diff {
       let file = makeFileChange(delta: delta, result: result)
       // For a working-tree diff the new side's content is on disk (zero OID), so read
       // it from the working directory — otherwise the new (right) side never highlights.
-      let workdirNew = source.isWorkingTree
+      let workdirNew =
+        source.isWorkingTree
         ? workdirBlobUTF16(repo: repo, path: delta.new_file.path, caps: streamCaps) : nil
       emit(
         .fileReady(
