@@ -52,6 +52,16 @@ actor LibGit2DiffProvider: DiffProvider {
     }
   }
 
+  /// The old + new highlight blob inputs for ONE file in the `source` diff. The
+  /// on-demand `.diffLoaded` load fetches these alongside the hunks so the production
+  /// path feeds the highlighter (the streaming path is gated off in production).
+  func highlightBlobs(
+    for file: FileChange, at worktreeURL: URL, source: DiffSource = .workingTree
+  ) async throws -> (old: HighlightBlobInput?, new: HighlightBlobInput?) {
+    try await ensureIndexUnlocked(worktreeURL)
+    return try Libgit2Diff.fileHighlightBlobs(for: file, at: worktreeURL, source: source, caps: caps)
+  }
+
   /// Streams the whole `source` diff as frozen, generation-stamped batches. The
   /// actor owns the walk: the whole libgit2 span runs on its serial executor
   /// (satisfying `GIT_THREADS=1`), decoupled from the MainActor consumer by the

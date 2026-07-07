@@ -312,7 +312,10 @@ struct DiffReviewFeature {
     case filesChanged(Worktree.ID)  // raw info-event tick (pre-debounce)
     case refreshTick  // post-debounce: re-load
     case openFile(path: String, source: DiffSource)  // row tap → open center diff tab
-    case diffLoaded(key: DiffDocumentKey, hunks: [DiffHunk], token: Int)  // per-file hunk load success
+    // per-file hunk load success; `old`/`new` are the highlight blob inputs fetched
+    // alongside the hunks so the production loader feeds the syntax highlighter.
+    case diffLoaded(
+      key: DiffDocumentKey, hunks: [DiffHunk], old: HighlightBlobInput?, new: HighlightBlobInput?, token: Int)
     case diffFailed(key: DiffDocumentKey, DiffError, token: Int)  // per-file hunk load failure
     // MARK: Phase 9 — streaming producer↔consumer
     case streamStarted(key: DiffDocumentKey, fileCount: Int, token: Int)  // `.started` → scaffold the consumer
@@ -616,11 +619,18 @@ struct DiffReviewFeature {
             diffClient: diffClient)
         return .merge(focusEffect, loadEffect)
 
-      case .diffLoaded(let key, let hunks, let token):
+      case .diffLoaded(let key, let hunks, let old, let new, let token):
         guard var document = state.openDiffs[key], document.generation == token else { return .none }
         document.hunks = hunks
         document.loadState = .loaded
         document.isStale = false
+        // Feed the highlighter on the PRODUCTION path (streaming is gated off) — the
+        // same blob + gate setup the streaming `.streamFileReady` path runs. Without
+        // this the viewer renders every file plain (the "all text white" bug).
+        Self.applyHighlightAndRenderGates(
+          &document, key: key,
+          loaded: LoadedFileDiff(file: document.file, hunks: hunks, oldBlob: old, newBlob: new),
+          diffHighlight: diffHighlight)
         // A re-diff re-materializes revealed slices against the fresh geometry; the
         // declarative `expansion` (gap-index keyed) persists across the re-diff.
         document.revealed.removeAll()
@@ -659,40 +669,14 @@ struct DiffReviewFeature {
         document.hunks = batch.hunks
         document.loadState = .loaded
         document.isStale = false
-        // Phase 4: capture the correct blob per side (fixes bug #1 — no on-disk read)
-        // and evaluate the size gate ONCE on counts, so a deep hunk in a huge file
-        // never triggers a contiguous parse. A re-diff changes blobs → drop stale
-        // runs; the next `.highlightVisibleRangeChanged` re-queries the fresh blobs.
+        // Capture the correct blob per side + evaluate the size / render gates. The
+        // SAME helper runs on the on-demand `.diffLoaded` path (the production loader —
+        // streaming is gated off), so both load paths feed the highlighter identically.
         let (oldBlob, newBlob) = DiffHighlightDriver.blobInputs(for: batch)
-        document.oldBlob = oldBlob
-        document.newBlob = newBlob
-        // Fully-changed-huge-file gate (Phase 13 `LargeFileRenderPolicy`) — the
-        // unified decision over the same per-side counts + the longest rendered line
-        // (protects the CTLine byte ceiling from a 2MB minified line). Produces the
-        // header affordance so a dropped feature is never silent.
-        let changedLines = max(batch.file.removedLines, batch.file.addedLines)
-        let longestLine = batch.hunks.reduce(0) { partial, hunk in
-          hunk.lines.reduce(partial) { max($0, $1.content.utf16.count) }
-        }
-        let renderDecision = LargeFileRenderPolicy.decide(
-          file: batch.file, changedLines: changedLines, maxLineLength: longestLine)
-        // Highlight off when the policy says plain OR the absolute blob-size gate
-        // trips (the ≈2.5M-UTF16-unit ceiling `LargeFileRenderPolicy` leaves to the
-        // size gate, which reads the decoded blob lengths).
-        document.highlightingDisabled =
-          !renderDecision.highlight
-          || diffHighlight.isPlain(
-            batch.file.removedLines, batch.file.addedLines, oldBlob?.utf16.count ?? 0, newBlob?.utf16.count ?? 0)
-        // Word-diff gate: the render path never invokes `WordDiff` for a
-        // massively-changed / long-lined file (only the row-level `+`/`-` tint).
-        document.wordDiffDisabled = !renderDecision.wordDiff
-        document.renderBannerKey = renderDecision.bannerKey
-        if let banner = renderDecision.bannerKey {
-          Self.logger.info("large-file render gate for \(key.path): \(String(describing: banner))")
-        }
-        document.oldStyleRuns = [:]
-        document.newStyleRuns = [:]
-        document.styleRunsVersion &+= 1  // cleared — the view repaints without stale colors
+        Self.applyHighlightAndRenderGates(
+          &document, key: key,
+          loaded: LoadedFileDiff(file: batch.file, hunks: batch.hunks, oldBlob: oldBlob, newBlob: newBlob),
+          diffHighlight: diffHighlight)
         // A re-diff re-materializes revealed slices; the declarative `expansion`
         // (gap-index keyed) survives the line shift (Phase 7).
         document.revealed.removeAll()
@@ -1068,6 +1052,47 @@ struct DiffReviewFeature {
     }
   }
 
+  /// Populate a freshly loaded diff document's highlight blobs + the size / render /
+  /// word-diff gates, and clear stale style runs (bumping the delivery revision so
+  /// the view repaints). Shared by BOTH load paths — the on-demand `.diffLoaded`
+  /// (production; streaming is gated off) and the streaming `.streamFileReady` — so
+  /// they can never drift on what the highlighter sees. `LargeFileRenderPolicy` + the
+  /// blob-size `isPlain` gate keep a huge / minified file off the contiguous parse.
+  /// A freshly loaded file diff's inputs to the highlight + render gates — bundled so
+  /// both load paths hand the gate helper one payload (parameter budget).
+  private struct LoadedFileDiff {
+    var file: FileChange
+    var hunks: [DiffHunk]
+    var oldBlob: HighlightBlobInput?
+    var newBlob: HighlightBlobInput?
+  }
+
+  private static func applyHighlightAndRenderGates(
+    _ document: inout DiffDocument, key: DiffDocumentKey, loaded: LoadedFileDiff, diffHighlight: DiffHighlightClient
+  ) {
+    let file = loaded.file
+    document.oldBlob = loaded.oldBlob
+    document.newBlob = loaded.newBlob
+    let changedLines = max(file.removedLines, file.addedLines)
+    let longestLine = loaded.hunks.reduce(0) { partial, hunk in
+      hunk.lines.reduce(partial) { max($0, $1.content.utf16.count) }
+    }
+    let renderDecision = LargeFileRenderPolicy.decide(
+      file: file, changedLines: changedLines, maxLineLength: longestLine)
+    document.highlightingDisabled =
+      !renderDecision.highlight
+      || diffHighlight.isPlain(
+        file.removedLines, file.addedLines, loaded.oldBlob?.utf16.count ?? 0, loaded.newBlob?.utf16.count ?? 0)
+    document.wordDiffDisabled = !renderDecision.wordDiff
+    document.renderBannerKey = renderDecision.bannerKey
+    if let banner = renderDecision.bannerKey {
+      Self.logger.info("large-file render gate for \(key.path): \(String(describing: banner))")
+    }
+    document.oldStyleRuns = [:]
+    document.newStyleRuns = [:]
+    document.styleRunsVersion &+= 1  // cleared — the view repaints without stale colors
+  }
+
   /// Fetches one file's hunks (generation-guarded, 8.1) and feeds them back as
   /// `.diffLoaded` (or `.diffFailed`). Cancellable per path so a re-diff replaces
   /// any in-flight request for the same file.
@@ -1090,7 +1115,14 @@ struct DiffReviewFeature {
           request.contextLines,
           request.key.source
         )
-        await send(.diffLoaded(key: request.key, hunks: hunks, token: request.token))
+        // Fetch the highlight blob inputs alongside the hunks so the production load
+        // path feeds the syntax highlighter (the streaming path, which carries blobs
+        // inline, is gated off). Non-fatal: a blob-read failure still renders (plain).
+        let blobs: (old: HighlightBlobInput?, new: HighlightBlobInput?) =
+          (try? await diffClient.highlightBlobs(
+            request.file, request.worktree.workingDirectory, request.key.source)) ?? (old: nil, new: nil)
+        await send(
+          .diffLoaded(key: request.key, hunks: hunks, old: blobs.old, new: blobs.new, token: request.token))
       } catch let error as DiffError {
         await send(.diffFailed(key: request.key, error, token: request.token))
       } catch {

@@ -161,7 +161,7 @@ struct DiffCommentReducerTests {
     let hunk = DiffFixture.hunk(
       (1...8).map { DiffFixture.line(.context, old: $0, new: $0, "ctx\($0)") }
         + [DiffFixture.line(.context, old: 9, new: 9, "target")])
-    await store.send(.diffLoaded(key: key, hunks: [hunk], token: 7))
+    await store.send(.diffLoaded(key: key, hunks: [hunk], old: nil, new: nil, token: 7))
     #expect(store.state.comments[id: targetID]?.startLine == 9)  // relocated
     #expect(store.state.comments[id: targetID]?.orphaned == false)
     #expect(store.state.comments[id: goneID]?.orphaned == true)  // pinned, never dropped

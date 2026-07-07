@@ -912,6 +912,87 @@ extension Libgit2Diff {
     guard let text = String(bytes: bytes, encoding: .utf8) else { return nil }  // non-UTF-8 → highlighter skips
     return Array(text.utf16)
   }
+
+  // MARK: - Highlight blob inputs (on-demand `.diffLoaded` parity with the stream)
+
+  /// The `(old, new)` `HighlightBlobInput` for ONE file in the `source` diff — the
+  /// on-demand (`.diffLoaded`) equivalent of the blob fields the streaming
+  /// `FileDiffBatch` carries, so the PRODUCTION load path (streaming is gated off)
+  /// feeds the highlighter too. Without this the viewer renders every file plain
+  /// (all white). Rebuilds the same diff the hunks path uses, finds the file's delta,
+  /// and reads its blobs (old from the object DB; the working-tree new side from the
+  /// workdir, whose `new_file.id` is a zero OID).
+  nonisolated static func fileHighlightBlobs(
+    for file: FileChange, at worktreeURL: URL, source: DiffSource, caps: Caps
+  ) throws -> (old: HighlightBlobInput?, new: HighlightBlobInput?) {
+    let repo = try openRepository(at: worktreeURL)
+    defer { git_repository_free(repo) }
+    switch source {
+    case .workingTree:
+      let isUnborn = git_repository_head_unborn(repo) == 1
+      let (diff, tree) = try makeDiff(repo: repo, isUnborn: isUnborn)
+      defer {
+        git_diff_free(diff)
+        if let tree { git_tree_free(tree) }
+      }
+      try findSimilar(diff)
+      return matchDeltaBlobs(diff: diff, repo: repo, file: file, source: source, caps: caps)
+    case .baseBranch(let ref):
+      if git_repository_head_unborn(repo) == 1 { return (nil, nil) }
+      let handles = try makeBaseDiff(repo: repo, baseRef: ref)
+      defer {
+        git_diff_free(handles.diff)
+        git_tree_free(handles.newTree)
+        git_tree_free(handles.oldTree)
+      }
+      try findSimilar(handles.diff)
+      return matchDeltaBlobs(diff: handles.diff, repo: repo, file: file, source: source, caps: caps)
+    }
+  }
+
+  private nonisolated static func matchDeltaBlobs(
+    diff: OpaquePointer, repo: OpaquePointer, file: FileChange, source: DiffSource, caps: Caps
+  ) -> (old: HighlightBlobInput?, new: HighlightBlobInput?) {
+    let count = git_diff_num_deltas(diff)
+    var idx = 0
+    while idx < count {
+      defer { idx += 1 }
+      guard let deltaPtr = git_diff_get_delta(diff, idx) else { continue }
+      let delta = deltaPtr.pointee
+      guard deltaMatches(delta, file: file) else { continue }
+      return highlightBlobs(repo: repo, delta: delta, source: source, caps: caps, file: file)
+    }
+    return (nil, nil)
+  }
+
+  /// Build both sides' `HighlightBlobInput` for a resolved delta. Mirrors the
+  /// old/new blob selection the streaming emit makes (old = object DB; working-tree
+  /// new = workdir file; base new = object DB) so the two load paths never diverge.
+  private nonisolated static func highlightBlobs(
+    repo: OpaquePointer, delta: git_diff_delta, source: DiffSource, caps: Caps, file: FileChange
+  ) -> (old: HighlightBlobInput?, new: HighlightBlobInput?) {
+    let oldPath = file.oldPath ?? file.newPath
+    let newPath = file.newPath ?? file.oldPath
+
+    var old: HighlightBlobInput?
+    if let oid = oidString(delta.old_file.id), let utf16 = blobUTF16(repo: repo, oid: delta.old_file.id, caps: caps),
+      let path = oldPath
+    {
+      old = HighlightBlobInput(blobOID: oid, utf16: utf16, path: path)
+    }
+
+    var new: HighlightBlobInput?
+    if source.isWorkingTree {
+      if let workdir = workdirBlobUTF16(repo: repo, path: delta.new_file.path, caps: caps), let path = newPath {
+        new = HighlightBlobInput(blobOID: workdir.oid, utf16: workdir.utf16, path: path)
+      }
+    } else if let oid = oidString(delta.new_file.id),
+      let utf16 = blobUTF16(repo: repo, oid: delta.new_file.id, caps: caps), let path = newPath
+    {
+      new = HighlightBlobInput(blobOID: oid, utf16: utf16, path: path)
+    }
+    return (old, new)
+  }
 }
 
 // MARK: - Blob range read for incremental expansion (Phase 7 — no `git_diff_*`)

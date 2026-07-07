@@ -22,6 +22,14 @@ struct DiffClient: Sendable {
   var diff:
     @Sendable (_ file: FileChange, _ worktreeURL: URL, _ contextLines: UInt32, _ source: DiffSource) async throws ->
       [DiffHunk]
+  /// The old + new highlight blob inputs for one file, fetched alongside `diff` on
+  /// the on-demand load so the production `.diffLoaded` path feeds the syntax
+  /// highlighter (the streaming `stream` path, which carries blobs inline, is gated
+  /// off in production). `(nil, nil)` on a side with no blob.
+  var highlightBlobs:
+    @Sendable (_ file: FileChange, _ worktreeURL: URL, _ source: DiffSource) async throws -> (
+      old: HighlightBlobInput?, new: HighlightBlobInput?
+    )
   /// Streams the whole `source` diff as generation-stamped `FileDiffBatch`es for
   /// progressive render + incremental re-diff (Phase 9). The `generation` is the
   /// CALLER's — passed through and stamped onto every batch — so no token is
@@ -39,6 +47,7 @@ extension DiffClient: DependencyKey {
     return DiffClient(
       changedFiles: { try await provider.changedFiles(source: $0, at: $1) },
       diff: { try await provider.diff(for: $0, at: $1, contextLines: $2, source: $3) },
+      highlightBlobs: { try await provider.highlightBlobs(for: $0, at: $1, source: $2) },
       stream: { provider.stream(source: $0, at: $1, contextLines: $2, generation: $3) }
     )
   }()
@@ -50,6 +59,7 @@ extension DiffClient: DependencyKey {
     DiffClient(
       changedFiles: { _, _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) },
       diff: { _, _, _, _ in [] },
+      highlightBlobs: { _, _, _ in (nil, nil) },
       // Empty stream by default; tests that exercise streaming override this
       // closure with a fixture-backed batch sequence.
       stream: { _, _, _, _ in AsyncThrowingStream { $0.finish() } }

@@ -569,8 +569,43 @@ struct DiffReviewFeatureTests {
       document.hunks = hunks
       document.loadState = .loaded
       document.isStale = false
+      // The load now feeds the highlighter (production path): with no stubbed blobs
+      // the gate helper still clears stale runs and bumps the delivery revision.
+      document.styleRunsVersion = 1
       $0.openDiffs[key] = document
     }
+  }
+
+  /// REGRESSION — the "all text white" second root cause: the on-demand (production)
+  /// load path must fetch the highlight blobs alongside the hunks, not leave them nil
+  /// (they were only wired to the streaming path, which is gated OFF in production).
+  @Test(.dependencies) func openFileLoadsHighlightBlobsOnProductionPath() async {
+    let worktree = gitLocalWorktree()
+    let file = makeFile("a.swift")
+    let hunks = [modifiedHunk()]
+    let oldInput = HighlightBlobInput(blobOID: "old", utf16: Array("let x = 1".utf16), path: "a.swift")
+    let newInput = HighlightBlobInput(blobOID: "new", utf16: Array("let y = 2".utf16), path: "a.swift")
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = worktree
+    initialState.files = [file]
+    initialState.loadState = .loaded
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.terminalClient.send = { _ in }
+      $0.diffClient.diff = { _, _, _, _ in hunks }
+      $0.diffClient.highlightBlobs = { _, _, _ in (old: oldInput, new: newInput) }
+    }
+    store.exhaustivity = .off
+
+    let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
+    await store.send(.openFile(path: "a.swift", source: .workingTree))
+    await store.receive(\.diffLoaded)
+
+    #expect(store.state.openDiffs[key]?.oldBlob == oldInput, "the production load path must populate the old blob")
+    #expect(store.state.openDiffs[key]?.newBlob == newInput, "the production load path must populate the new blob")
+    #expect(store.state.openDiffs[key]?.highlightingDisabled == false, "a normal file must stay highlightable")
   }
 
   // MARK: - mode toggle persists the global preference (dual-mode tree re-seek)
@@ -870,7 +905,7 @@ struct DiffReviewFeatureTests {
       oldStart: 1, oldCount: 3, newStart: 1, newCount: 5, header: "@@ -1,3 +1,5 @@",
       lines: [line(1, "a"), line(2, "b"), line(3, "c"), line(4, "d"), line(5, "target")]
     )
-    await store.send(.diffLoaded(key: key, hunks: [hunk], token: 5))
+    await store.send(.diffLoaded(key: key, hunks: [hunk], old: nil, new: nil, token: 5))
     #expect(store.state.comments[id: comment.id]?.startLine == 5)
     #expect(store.state.comments[id: comment.id]?.orphaned == false)
   }

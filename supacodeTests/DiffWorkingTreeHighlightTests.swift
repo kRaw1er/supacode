@@ -84,4 +84,24 @@ struct DiffWorkingTreeHighlightTests {
     let colors = try renderedTokenColor("struct Sample {", newLineNumber: 1, runs: runs, offset: 1)
     #expect(!CTRunColorProbe.sameColor(colors.token, colors.base), "the working-tree new side rendered white")
   }
+
+  /// The ON-DEMAND (`.diffLoaded` / production) blob read — `Libgit2Diff.fileHighlightBlobs`
+  /// — reads BOTH sides for a working-tree modified file: old from the object DB, new
+  /// from the workdir file. This is the path the app actually uses (streaming is off).
+  @Test func onDemandFileHighlightBlobsReadsBothSides() throws {
+    let root = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(root) }
+    try GitFixture.write("struct Sample {\n  let value = 1\n}\n", to: "Sample.swift", in: root)
+    try GitFixture.stage("Sample.swift", in: root)
+    try GitFixture.commit("init", in: root)
+    let workdir = "struct Sample {\n  let value = 2\n}\n"
+    try GitFixture.write(workdir, to: "Sample.swift", in: root)
+
+    Libgit2Diff.initialize()
+    let blobs = try Libgit2Diff.fileHighlightBlobs(
+      for: DiffFixture.file(path: "Sample.swift"), at: root, source: .workingTree, caps: Self.caps)
+    let new = try #require(blobs.new, "on-demand load must read the workdir new side")
+    #expect(new.utf16 == Array(workdir.utf16), "the new side is the on-disk workdir content")
+    #expect(blobs.old != nil, "the old side reads from the object DB")
+  }
 }
