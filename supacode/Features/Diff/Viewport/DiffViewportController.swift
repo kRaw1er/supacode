@@ -210,6 +210,31 @@ final class DiffViewportController: NSObject {
   /// scrolled off. O(log n) seek + O(chunks-in-window) walk — the view count is
   /// bounded by the window, independent of the tree size.
   func layoutVisibleChunks() {
+    // Converge measure↔layout WITHIN this pass. The first sweep positions each leaf from
+    // the tree's CURRENT row heights, but an unmeasured wrapped leaf still carries its
+    // 1-row ESTIMATE there while `LineRowView` draws it at its full (taller) MEASURED
+    // height — so adjacent leaves would overlap by the wrap delta. Historically the fix
+    // was requeued to a LATER AppKit `layout()`, which never catches up during a
+    // continuous scroll of a long-lined file: leaves scroll in mis-tiled and stay that way
+    // (the reported "only a few rows, overlapping, on page 2, changing each scroll" bug).
+    // So we write the measured heights back and RE-PLACE against them synchronously,
+    // bounded by `maxMeasurePasses`. A non-wrapping file measures == estimate on the first
+    // sweep, so it converges in one pass (no added cost for the 100k-line hot path).
+    measurePass = 0
+    while true {
+      let placed = placeVisibleChunksOnce()
+      guard applyMeasuredHeights(placed) else { break }
+      measurePass += 1
+      if measurePass >= maxMeasurePasses { break }
+    }
+    fireVisibleRange()
+  }
+
+  /// One placement sweep: seek the visible window (+ overscan), place one view per
+  /// intersecting chunk at its current tree `yOrigin`, recycle everything that scrolled
+  /// off. Returns the placed `(hit, reservedHeight)` pairs so the measure guard can write
+  /// their drawn heights back. O(log n) seek + O(chunks-in-window).
+  private func placeVisibleChunksOnce() -> [(hit: ChunkHit, reservedHeight: CGFloat)] {
     let visible = visibleRect
     let minY = max(0, visible.minY - Self.overscan)
     let maxY = visible.maxY + Self.overscan
@@ -234,8 +259,7 @@ final class DiffViewportController: NSObject {
     for (kind, pool) in pools {
       pool.enqueueViews(notInSet: live[kind] ?? [])
     }
-    runMeasureGuard(placed)
-    fireVisibleRange()
+    return placed
   }
 
   /// The chunk (leaf / widget) that contains `yOffset` — we seek the row at that
@@ -469,12 +493,14 @@ final class DiffViewportController: NSObject {
   // MARK: - Measure↔layout guard (C7; live in Phase 3)
 
   /// Phase 3 wires the C7 guard: each placed `LineRowView` reports its per-row
-  /// CoreText-typeset height; any row whose measured (possibly-wrapped) height
-  /// differs from the tree's current row height by more than `heightEpsilon` is
-  /// written back via `tree.setMeasuredHeight` (O(log n)) and an anchored relayout
-  /// is re-queued (bounded by `maxMeasurePasses`). A non-wrapping leaf measures
-  /// exactly one row height per row, so nothing differs and `measurePass` stays 0.
-  private func runMeasureGuard(_ placed: [(hit: ChunkHit, reservedHeight: CGFloat)]) {
+  /// CoreText-typeset height; any row whose measured (possibly-wrapped) height differs
+  /// from the tree's current row height by more than `heightEpsilon` is written back via
+  /// `tree.setMeasuredHeight` (O(log n)) and the document is grown to match. Returns
+  /// whether anything changed, so `layoutVisibleChunks` re-places against the reconciled
+  /// geometry in the SAME frame (no async requeue → no scroll-time overlap). A
+  /// non-wrapping leaf measures exactly one row height per row, so nothing differs, this
+  /// returns `false`, and the layout converges in a single sweep.
+  private func applyMeasuredHeights(_ placed: [(hit: ChunkHit, reservedHeight: CGFloat)]) -> Bool {
     var needsReflow = false
     for entry in placed {
       guard let view = pools[entry.hit.chunk.reuseKind]?.getView(forKey: entry.hit.id) else { continue }
@@ -489,13 +515,10 @@ final class DiffViewportController: NSObject {
         }
       }
     }
-    // A measured row grew / shrank the tree ⇒ grow the document so the scrollbar
-    // reflects the true height (pierre `computeApproximateSize` re-aggregate). Do
-    // this even at the pass cap so the final height is never left stale.
+    // A measured row grew / shrank the tree ⇒ grow the document so the scrollbar reflects
+    // the true height (pierre `computeApproximateSize` re-aggregate).
     if needsReflow { resizeDocument() }
-    guard needsReflow, measurePass < maxMeasurePasses else { return }
-    measurePass += 1
-    documentView.needsLayout = true
+    return needsReflow
   }
 
   /// Write each TYPESET (visible-window) row's measured height back into the tree,

@@ -202,6 +202,23 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     }
   }
 
+  /// One typeset row's leaf-local layout — its `top` (relative to this view) and `height`,
+  /// so a drawn row's DOCUMENT y is `view.frame.minY + top`.
+  struct RowFrameProbe: Equatable {
+    var localRow: Int
+    var top: CGFloat
+    var height: CGFloat
+  }
+
+  /// Test probe: each typeset row's leaf-local frame. Proves rows lay out CONTIGUOUSLY from
+  /// the view top (no gap, no bottom-anchoring) — the exact geometry the scroll layer
+  /// paints. Pairs with `visibleRowTexts` (content).
+  var typesetRowFrames: [RowFrameProbe] {
+    typesetWindow.compactMap { index in
+      index < rows.count ? RowFrameProbe(localRow: index, top: rows[index].top, height: rows[index].height) : nil
+    }
+  }
+
   /// The total typeset height covered so far (bufferBefore + Σ windowed row
   /// heights). The viewport grows this view's frame to at least this so a freshly
   /// wrapped windowed row is never clipped before the tree catches up; the leaf's
