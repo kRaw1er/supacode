@@ -35,12 +35,9 @@ struct DiffWindowedRenderTests {
     let view = try #require(soleLineView(controller), "exactly one line view for the single big leaf")
     let visible = view.visibleRowTexts
     #expect(!visible.isEmpty)
-    // WINDOWING IS CURRENTLY DISABLED (`lineRenderWindow` returns the whole leaf), so a
-    // single-leaf file typesets EVERY row from index 0 — not a mid-scroll sub-window. The
-    // load-bearing guard is the FIDELITY loop below (right text at the right leaf-local
-    // index); re-enabling windowing would flip these two counts back to a bounded window.
-    #expect(visible.count == 3_000)
-    #expect(visible.first!.localRow == 0)
+    // Windowed, not the whole leaf: a slice around the middle, far fewer than 3_000.
+    #expect(visible.count < 400)
+    #expect(visible.first!.localRow > 500)  // mid-window, not anchored at row 0
     #expect(visible.last!.localRow < 3_000)
     // FIDELITY: every visible row renders its own source line at its own index.
     for row in visible {
@@ -59,9 +56,8 @@ struct DiffWindowedRenderTests {
     let view = try #require(soleLineView(controller), "exactly one line view for the single big leaf")
     let visible = view.visibleRowTexts
     #expect(!visible.isEmpty)
-    // Windowing disabled ⇒ whole-leaf typeset (see the unified test's note).
-    #expect(visible.count == 3_000)
-    #expect(visible.first!.localRow == 0)
+    #expect(visible.count < 400)
+    #expect(visible.first!.localRow > 500)
     // In split a context row projects the SAME line into both panes.
     for row in visible {
       #expect(row.old == "line\(row.localRow)", "split OLD row \(row.localRow) wrong: \(row.old ?? "nil")")

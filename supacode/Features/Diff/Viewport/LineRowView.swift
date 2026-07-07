@@ -110,6 +110,12 @@ final class LineRowView: NSView, DiffViewportRecyclable {
   /// estimate height. A pure scroll that leaves this unchanged is a no-op.
   private var typesetWindow: Range<Int> = 0..<0
 
+  /// The `bufferBefore` (window-top offset relative to this view) the current window was
+  /// last laid out from. A same-window re-place whose `renderRangeTop` moved (the leaf
+  /// shifted, or measured deltas above the window changed) must RE-LAY-OUT so the rows
+  /// paint at their new y — comparing the window range alone would leave them stale.
+  private var typesetTop: CGFloat = 0
+
   /// Rendered-row count of the currently configured segment (O(1)). The viewport
   /// accumulates this per layout as its parallel-safe "rows (re)configured this
   /// frame" perf counter — a pure scroll of already-materialized chunks must not
@@ -271,7 +277,7 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     if configuredKey == key, !rows.isEmpty {
       self.context = context  // keep the fresh palette / word-diff generation for redraw
       let window = clampedRenderRange(context)
-      if window == typesetWindow { return 0 }  // pure scroll, window unchanged
+      if window == typesetWindow, context.renderRangeTop == typesetTop { return 0 }  // pure scroll, nothing moved
       let typeset = typesetRows(window: window, top: context.renderRangeTop)
       needsDisplay = true
       return typeset
@@ -304,6 +310,7 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     configuredChunkID = nil
     configuredKey = nil
     typesetWindow = 0..<0
+    typesetTop = 0
     totalHeight = 0
     needsDisplay = true
   }
@@ -369,6 +376,7 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     }
     totalHeight = top
     typesetWindow = window
+    typesetTop = bufferBefore
     return window.count
   }
 

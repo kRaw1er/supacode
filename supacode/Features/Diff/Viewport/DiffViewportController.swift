@@ -344,16 +344,38 @@ final class DiffViewportController: NSObject {
   /// accounts for any measured deltas of the rows above the window); the leaf then
   /// typesets only these rows and estimates the rest.
   private func lineRenderWindow(_ placement: Placement) -> (rows: Range<Int>, top: CGFloat) {
-    let rowCount = placement.top.chunk.baseSummary(metrics: tree.metrics).count(mode)
-    // WINDOWING DISABLED (2026-07-06) — the sub-window computation regressed the
-    // REAL-app initial render: rows landed at the leaf BOTTOM with an empty top,
-    // because the window depends on `visibleRect` at apply time (before the scroll
-    // view is sized), a condition the headless controller tests never reproduced.
-    // Reverted to whole-leaf typeset (the known-correct render, verified visually
-    // pre-windowing). Re-enable windowing ONLY behind a real-NSScrollView layout+draw
-    // integration test that asserts rows paint at the right y. Cost: initial typeset
-    // is O(leaf) again — the two DiffViewportScalePerfTests are back to withKnownIssue.
-    return (0..<rowCount, 0)
+    let top = placement.top
+    let rowCount = top.chunk.baseSummary(metrics: tree.metrics).count(mode)
+    guard rowCount > 0 else { return (0..<0, 0) }
+    let leafTop = top.yOrigin
+    let leafBottom = leafTop + placement.height
+    let windowTop = max(placement.window.minY, leafTop)
+    let windowBottom = min(placement.window.maxY, leafBottom)
+    guard windowBottom > windowTop else { return (0..<0, 0) }  // leaf not actually in the window
+    let clampedBottom = min(windowBottom, leafBottom - 0.001)
+
+    // Fast path — a leaf with NO measured height deltas has uniform (base) row heights,
+    // so the window resolves by arithmetic with ZERO tree seeks. Keeps the per-layout
+    // seek budget O(log n × window), not O(window) seeks (a scroll over many small
+    // leaves would otherwise add two seeks per leaf).
+    let rowHeight = tree.metrics.lineHeight
+    if rowHeight > 0, tree.nodesByID[top.id]?.heightDeltas?.isEmpty ?? true {
+      let startLocal = min(max(0, Int((windowTop - leafTop) / rowHeight)), rowCount - 1)
+      let endRow = min(rowCount - 1, Int((clampedBottom - leafTop) / rowHeight))
+      let end = min(rowCount, max(startLocal, endRow) + 1)
+      return (startLocal..<end, CGFloat(startLocal) * rowHeight)
+    }
+
+    // Variable-height leaf (some rows wrapped): resolve the window via two O(log n) seeks
+    // so `bufferBefore` accounts for the measured deltas of the rows above it.
+    let startHit = tree.seek(y: windowTop, mode: mode)
+    let startLocal = min(max(0, startHit?.localRow ?? 0), rowCount - 1)
+    let startY = startHit?.yOrigin ?? leafTop
+    let endHit = tree.seek(y: clampedBottom, mode: mode)
+    let endLocal = min(rowCount, (endHit?.localRow ?? (rowCount - 1)) + 1)
+    let start = min(startLocal, rowCount)
+    let end = min(max(start, endLocal), rowCount)
+    return (start..<end, startY - leafTop)
   }
 
   /// Mount (or recycle) the resolved `DiffWidget` model into a `WidgetHostChunkView`

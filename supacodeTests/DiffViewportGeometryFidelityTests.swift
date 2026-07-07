@@ -191,4 +191,31 @@ struct DiffViewportGeometryFidelityTests {
       }
     }
   }
+
+  // MARK: - Windowing: apply-before-sized must recompute the window (the disable regression)
+
+  /// THE exact regression that got windowing disabled (2026-07-06): `apply` runs BEFORE the
+  /// scroll view is sized, so the first window resolves against a degenerate `visibleRect`.
+  /// Once AppKit sizes the clip, the relayout must RECOMPUTE the window and paint the TOP
+  /// rows from `line0` at `y=0` — not a stale mid-leaf window with an empty top (the "rows
+  /// landed at the leaf bottom" symptom). The old headless tests sized BEFORE apply, so they
+  /// never reproduced this; here we deliberately apply first, then size.
+  @Test(arguments: [DiffViewMode.unified, .split])
+  func windowRecomputesWhenSizedAfterApply(mode: DiffViewMode) {
+    let controller = DiffViewportController()
+    controller.scrollView.scrollerStyle = .overlay  // unsized: visibleRect is ~zero at apply
+    controller.apply(tree: ChunkTreeFixture.uniform(rows: 8_000) { "line\($0)" }, mode: mode, scrollPreserving: false)
+
+    // Now the representable gets laid out → the clip is sized → the viewport relayouts.
+    controller.scrollView.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+    controller.scrollView.tile()
+    controller.layoutVisibleChunks()
+
+    let rows = band(controller, offset: 0, height: 600)
+    expectContiguousCover(rows, offset: 0, label: "[\(mode)] sized-after-apply")
+    let top = rows.first
+    #expect(top?.docTop == 0, "[\(mode)] sized-after-apply: top row at y=\(top?.docTop ?? -1), expected 0")
+    let content = mode == .unified ? top?.text.unified : top?.text.new
+    #expect(content == "line0", "[\(mode)] sized-after-apply: top row is \(content ?? "nil"), expected line0")
+  }
 }

@@ -38,10 +38,10 @@ struct DiffViewportScalePerfTests {
     controller.apply(tree: tree, mode: .unified, scrollPreserving: false)
 
     let typeset = controller.ctLineCache.buildCount
-    // Windowed render (pierre `renderRange`): the FIRST layout typesets ONLY the
-    // visible viewport window (+overscan), estimating off-screen line heights and
-    // reconciling as you scroll — NOT the whole 5_000-row leaf, and WITHOUT shrinking
-    // `maxLeafSpan` (which stays the height-index checkpoint interval).
+    // Windowed render (`lineRenderWindow`): the FIRST layout typesets ONLY the visible
+    // viewport window (+overscan), estimating off-screen line heights — NOT the whole
+    // 5_000-row leaf. Placement fidelity is proven by `DiffViewportGeometryFidelityTests`
+    // (each drawn row lands at its true document-y), so this is a hard pass again.
     #expect(
       typeset <= Self.windowBudget,
       """
@@ -63,8 +63,8 @@ struct DiffViewportScalePerfTests {
     }
     let small = typesetsForInitialLayout(1_000)
     let huge = typesetsForInitialLayout(100_000)
-    // Windowed render: initial typeset work is bounded by the visible window, so it is
-    // the same (≈ the viewport) whether the file is 1k or 100k lines — scale-invariant.
+    // Windowed render: initial typeset work is bounded by the visible window, so it is the
+    // same (≈ the viewport) whether the file is 1k or 100k lines — scale-invariant.
     #expect(
       huge <= small * 2,
       """
