@@ -125,18 +125,29 @@ final class LineRowView: NSView, DiffViewportRecyclable {
   /// The chunk currently configured onto this view — recycle diagnostics only.
   private(set) var configuredChunkID: ChunkID?
 
-  /// Everything about the current configuration that, if unchanged, means a re-place
-  /// is a pure scroll and no re-project / re-typeset is needed. Any field that alters
-  /// the typeset output (width→wrap, mode, syntax runs, appearance, word-diff) is here.
-  private struct ConfigKey: Equatable {
+  /// What invalidates the ROW MODEL (`project()` — the whole ≤maxLeafSpan leaf): the
+  /// leaf identity, the render mode (split vs unified changes the row structure), and
+  /// the word-diff gate (spans are computed in `project`). Deliberately EXCLUDES
+  /// width + syntax + appearance — those change only how the SAME rows TYPESET, not
+  /// which rows exist. Folding `syntaxVersion` in here re-walked the entire leaf on
+  /// every windowed-highlight arrival (≈ every scroll frame) — the O(leaf)-per-frame
+  /// scroll stall.
+  private struct ProjectKey: Equatable {
     var chunkID: ChunkID
-    var width: CGFloat
     var mode: DiffViewMode
-    var syntaxVersion: Int
-    var styleGeneration: Int
     var wordDiffEnabled: Bool
   }
-  private var configuredKey: ConfigKey?
+  /// What invalidates the TYPESET of the already-projected rows (re-wrap / re-colour
+  /// the visible window, NO re-project): the content width (→ wrap), the syntax-runs
+  /// generation (→ foreground baked into glyphs), and the appearance/Dynamic-Type
+  /// generation. A change here re-typesets the window; it never rebuilds the row model.
+  private struct TypesetKey: Equatable {
+    var width: CGFloat
+    var syntaxVersion: Int
+    var styleGeneration: Int
+  }
+  private var configuredProjectKey: ProjectKey?
+  private var configuredTypesetKey: TypesetKey?
 
   override var isFlipped: Bool { true }
   override var wantsDefaultClipping: Bool { true }
@@ -270,26 +281,33 @@ final class LineRowView: NSView, DiffViewportRecyclable {
   /// scroll re-placements.
   @discardableResult
   func configure(segment: LineSegment, chunkID: ChunkID, context: LineRowRenderContext) -> Int {
-    let key = ConfigKey(
-      chunkID: chunkID, width: context.width, mode: context.mode, syntaxVersion: context.syntaxVersion,
-      styleGeneration: context.styleGeneration, wordDiffEnabled: context.wordDiffEnabled)
+    let projectKey = ProjectKey(chunkID: chunkID, mode: context.mode, wordDiffEnabled: context.wordDiffEnabled)
+    let typesetKey = TypesetKey(
+      width: context.width, syntaxVersion: context.syntaxVersion, styleGeneration: context.styleGeneration)
+    self.context = context  // keep the fresh palette / word-diff / syntax generation for redraw
 
-    if configuredKey == key, !rows.isEmpty {
-      self.context = context  // keep the fresh palette / word-diff generation for redraw
-      let window = clampedRenderRange(context)
-      if window == typesetWindow, context.renderRangeTop == typesetTop { return 0 }  // pure scroll, nothing moved
-      let typeset = typesetRows(window: window, top: context.renderRangeTop)
-      needsDisplay = true
-      return typeset
+    // Re-PROJECT the row model only when the leaf structure changes — NOT on a syntax /
+    // width / appearance change. Rebuilding the whole ≤maxLeafSpan leaf on every
+    // windowed-highlight arrival was the O(leaf)-per-frame scroll stall.
+    var reprojected = false
+    if configuredProjectKey != projectKey || rows.isEmpty {
+      self.configuredChunkID = chunkID
+      self.configuredProjectKey = projectKey
+      self.rows = Self.project(segment: segment, mode: context.mode, wordDiffEnabled: context.wordDiffEnabled)
+      self.typesetWindow = 0..<0
+      isHidden = false
+      reprojected = true
     }
 
-    self.context = context
-    self.configuredChunkID = chunkID
-    self.configuredKey = key
-    self.rows = Self.project(segment: segment, mode: context.mode, wordDiffEnabled: context.wordDiffEnabled)
-    self.typesetWindow = 0..<0
-    let typeset = typesetRows(window: clampedRenderRange(context), top: context.renderRangeTop)
-    isHidden = false
+    let window = clampedRenderRange(context)
+    // Pure scroll of an unchanged window with unchanged typeset inputs ⇒ no work.
+    if !reprojected, configuredTypesetKey == typesetKey, window == typesetWindow,
+      context.renderRangeTop == typesetTop
+    {
+      return 0
+    }
+    self.configuredTypesetKey = typesetKey
+    let typeset = typesetRows(window: window, top: context.renderRangeTop)
     needsDisplay = true
     return typeset
   }
@@ -308,7 +326,8 @@ final class LineRowView: NSView, DiffViewportRecyclable {
   override func prepareForReuse() {
     rows = []
     configuredChunkID = nil
-    configuredKey = nil
+    configuredProjectKey = nil
+    configuredTypesetKey = nil
     typesetWindow = 0..<0
     typesetTop = 0
     totalHeight = 0
@@ -635,7 +654,15 @@ final class LineRowView: NSView, DiffViewportRecyclable {
 
   // MARK: - Projection (mirrors `SegmentProjection.renderedRows` order + count)
 
+  /// Perf spy (mirrors `CTLineCache.buildCount`): total `project()` calls — a full
+  /// row-model rebuild of a leaf (O(leaf)). A syntax / width / appearance change must
+  /// NOT grow this (only a leaf / mode / word-diff change does); the
+  /// `syntaxBumpDoesNotReprojectMaterializedLeaf` guard pins that a windowed-highlight
+  /// arrival re-typesets the window without re-projecting the whole ≤maxLeafSpan leaf.
+  static var projectCount = 0
+
   private static func project(segment: LineSegment, mode: DiffViewMode, wordDiffEnabled: Bool) -> [RowRender] {
+    projectCount += 1
     switch segment.classification {
     case .context, .contextExpanded:
       return projectContext(segment, mode: mode)

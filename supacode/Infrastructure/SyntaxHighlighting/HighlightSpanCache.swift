@@ -38,11 +38,14 @@ final class HighlightSpanCache {
   /// overwriting the lines the window covers (a re-query of the same window replaces
   /// its runs rather than duplicating them). Creates the entry on first write.
   func merge(_ window: [Int: [StyleRun]], into key: Key) {
-    var map = store[key] ?? [:]
+    // Mutate the entry IN PLACE via the `default:` subscript. The old `var map =
+    // store[key]; map[line] = …; store[key] = map` created a SECOND reference to the
+    // entry's storage, so the first mutation COW-copied the WHOLE accumulated map —
+    // O(lines-visited-so-far) per merge, growing without bound as a big file is
+    // scrolled (a main-actor stall that dragged every diff's scroll fps down).
     for (line, runs) in window {
-      map[line] = runs
+      store[key, default: [:]][line] = runs
     }
-    store[key] = map
     touch(key)
     while order.count > capacity, let evicted = order.first {
       order.removeFirst()

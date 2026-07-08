@@ -109,4 +109,22 @@ struct BoundedLRUTests {
     #expect(lru.isEmpty)
     #expect(lru.totalCost == 0)
   }
+
+  // MARK: - Perf guard: a hit is O(1), NOT O(cache size)
+
+  /// The scroll-fps regression: `touch` was `order.removeAll { $0 == key }` — O(cache
+  /// size) on EVERY hit — so a full CTLine cache cost ~O(cache) per visible row per
+  /// frame, degrading scroll as the cache filled. With the intrusive doubly-linked
+  /// list a hit is O(1). 50k hits on a full 4000-entry cache is a few ms at O(1); the
+  /// old O(n) path is ~2×10^8 element scans + array shifts (seconds), so the large
+  /// margin catches the regression without being machine-fragile.
+  @Test func hitIsConstantTimeNotLinearInCacheSize() {
+    var lru = BoundedLRU<Int, Int>(countLimit: 4_000)
+    for key in 0..<4_000 { lru.insert(key, forKey: key) }
+    let elapsed = ContinuousClock().measure {
+      for iteration in 0..<50_000 { _ = lru.value(forKey: iteration % 4_000) }
+    }
+    let millis = Double(elapsed.components.seconds) * 1_000 + Double(elapsed.components.attoseconds) / 1e15
+    #expect(millis < 1_000, "50k cache hits took \(millis)ms — `touch` is O(cache size) again, not O(1)")
+  }
 }

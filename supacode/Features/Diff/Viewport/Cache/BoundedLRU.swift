@@ -8,10 +8,15 @@ import Foundation
 /// (`WorkerPoolContext.tsx:30` desktop 100); the cost cap is the byte ceiling gap
 /// #1 wants for the CTLine cache.
 ///
-/// The array `order` keeps this readable — `touch` / `demote` are O(n) here; the
-/// plan flags an intrusive doubly-linked list as the O(1) follow-up (functional
-/// parity, not a correctness risk). Every mutation keeps `store`, `order`, and
-/// `totalCost` in lock-step.
+/// Recency is an intrusive doubly-linked list over the keys (`head` == LRU/evict
+/// first, `tail` == MRU/freshest), threaded through the `prevKey` / `nextKey`
+/// dictionaries so `touch` / `value(forKey:)` / `insert` / `drop` are all **O(1)** —
+/// NOT the old array `order.removeAll { $0 == key }`, which was O(n) on EVERY cache
+/// hit and made a full CTLine cache (4000 entries) cost ~O(cache) per visible row
+/// per frame (the scroll-fps-degrades-as-the-cache-fills stall). `orderedKeys`
+/// (diagnostics/tests) walks the list in O(n); `demote` / `trim` / `evictIfNeeded`
+/// are O(#affected). Every mutation keeps `store`, the list, and `totalCost` in
+/// lock-step.
 @MainActor
 struct BoundedLRU<Key: Hashable, Value> {
   private struct Entry {
@@ -20,8 +25,12 @@ struct BoundedLRU<Key: Hashable, Value> {
   }
 
   private var store: [Key: Entry] = [:]
-  /// LRU head (`order.first`, evicted first) … MRU tail (`order.last`, freshest).
-  private var order: [Key] = []
+  /// Intrusive doubly-linked recency list: `head` == LRU (evicted first), `tail` ==
+  /// MRU (freshest). A key is "linked" iff `store[key] != nil`.
+  private var head: Key?
+  private var tail: Key?
+  private var prevKey: [Key: Key] = [:]
+  private var nextKey: [Key: Key] = [:]
   private(set) var totalCost = 0
 
   /// Hard entry-count cap.
@@ -39,8 +48,17 @@ struct BoundedLRU<Key: Hashable, Value> {
   var count: Int { store.count }
   var isEmpty: Bool { store.isEmpty }
 
-  /// The current LRU→MRU key order (LRU head first). Test/diagnostic surface.
-  var orderedKeys: [Key] { order }
+  /// The current LRU→MRU key order (LRU head first). Test/diagnostic surface — O(n).
+  var orderedKeys: [Key] {
+    var out: [Key] = []
+    out.reserveCapacity(store.count)
+    var cursor = head
+    while let key = cursor {
+      out.append(key)
+      cursor = nextKey[key]
+    }
+    return out
+  }
 
   func contains(_ key: Key) -> Bool { store[key] != nil }
 
@@ -49,48 +67,51 @@ struct BoundedLRU<Key: Hashable, Value> {
   func peek(_ key: Key) -> Value? { store[key]?.value }
 
   /// Fetch + bump recency (the read path). A hit moves the key to the MRU tail so
-  /// it survives longer under pressure.
+  /// it survives longer under pressure. O(1).
   mutating func value(forKey key: Key) -> Value? {
     guard let entry = store[key] else { return nil }
-    touch(key)
+    moveToTail(key)
     return entry.value
   }
 
   /// Insert (or overwrite) `value` at `cost`. Overwriting an existing key replaces
-  /// its cost accounting, bumps recency, then evicts past either bound.
+  /// its cost accounting, bumps recency, then evicts past either bound. O(1) amortized.
   mutating func insert(_ value: Value, forKey key: Key, cost: Int = 0) {
     let cost = max(0, cost)
     if let old = store[key] { totalCost -= old.cost }
     store[key] = Entry(value: value, cost: cost)
     totalCost += cost
-    touch(key)
+    moveToTail(key)
     evictIfNeeded()
   }
 
   /// "Evict on scroll-off" (gap #1): demote the recycled keys to the LRU head so
   /// they drop FIRST under pressure WITHOUT evicting eagerly — a fling-back within
   /// cap is still an instant hit; the byte ceiling / count cap is the real trigger.
-  /// Preserves the relative order of the demoted keys.
+  /// Preserves the relative order of the demoted keys (`present[0]` becomes the LRU
+  /// head). O(#demoted).
   mutating func demote(_ keys: some Sequence<Key>) {
     let present = keys.filter { store[$0] != nil }
     guard !present.isEmpty else { return }
-    let demoted = Set(present)
-    // Keep any already-present demoted keys in the caller's order, drop the rest,
-    // then prepend the demoted block at the LRU head.
-    order.removeAll { demoted.contains($0) }
-    order.insert(contentsOf: present, at: 0)
+    // Unlink all, then re-insert at the head preserving the caller's order so
+    // `present[0]` ends up the LRU-most (matches the old `order.insert(…, at: 0)`).
+    for key in present { unlink(key) }
+    for key in present.reversed() { prependToHead(key) }
     evictIfNeeded()
   }
 
   /// Drop entries (LRU-first) until at most `target` remain — the memory-warning trim.
   mutating func trim(toCount target: Int) {
     let limit = max(0, target)
-    while store.count > limit, let lru = order.first { drop(lru) }
+    while store.count > limit, let lru = head { drop(lru) }
   }
 
   mutating func removeAll() {
     store.removeAll(keepingCapacity: true)
-    order.removeAll(keepingCapacity: true)
+    prevKey.removeAll(keepingCapacity: true)
+    nextKey.removeAll(keepingCapacity: true)
+    head = nil
+    tail = nil
     totalCost = 0
   }
 
@@ -101,15 +122,55 @@ struct BoundedLRU<Key: Hashable, Value> {
     return entry.value
   }
 
-  // MARK: - Order bookkeeping
+  // MARK: - Order bookkeeping (intrusive doubly-linked list, O(1))
 
-  private mutating func touch(_ key: Key) {
-    order.removeAll { $0 == key }
-    order.append(key)
+  /// Whether `key` is currently threaded into the recency list.
+  private func isLinked(_ key: Key) -> Bool {
+    head == key || prevKey[key] != nil || nextKey[key] != nil
+  }
+
+  /// Detach `key` from the list (O(1)); no-op if it is not linked.
+  private mutating func unlink(_ key: Key) {
+    guard isLinked(key) else { return }
+    let prev = prevKey[key]
+    let next = nextKey[key]
+    if let prev { nextKey[prev] = next } else if head == key { head = next }
+    if let next { prevKey[next] = prev } else if tail == key { tail = prev }
+    prevKey[key] = nil
+    nextKey[key] = nil
+  }
+
+  private mutating func appendToTail(_ key: Key) {
+    if let oldTail = tail {
+      nextKey[oldTail] = key
+      prevKey[key] = oldTail
+      tail = key
+    } else {
+      head = key
+      tail = key
+    }
+  }
+
+  private mutating func prependToHead(_ key: Key) {
+    if let oldHead = head {
+      prevKey[oldHead] = key
+      nextKey[key] = oldHead
+      head = key
+    } else {
+      head = key
+      tail = key
+    }
+  }
+
+  /// Move `key` to the MRU tail (freshest). O(1). `key` must already be in `store`.
+  private mutating func moveToTail(_ key: Key) {
+    if tail == key { return }  // already MRU
+    unlink(key)
+    appendToTail(key)
   }
 
   private mutating func drop(_ key: Key) {
-    order.removeAll { $0 == key }
+    unlink(key)
     if let entry = store.removeValue(forKey: key) { totalCost -= entry.cost }
   }
 
@@ -119,7 +180,7 @@ struct BoundedLRU<Key: Hashable, Value> {
   @discardableResult
   private mutating func evictIfNeeded() -> Int {
     var evicted = 0
-    while store.count > countLimit || totalCost > costLimit, let lru = order.first {
+    while store.count > countLimit || totalCost > costLimit, let lru = head {
       drop(lru)
       evicted += 1
     }

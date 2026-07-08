@@ -72,4 +72,24 @@ struct DiffHighlightCacheTests {
     #expect(cache.count == 2)
     #expect(cache[.init(blobOID: "oid-1", queryName: "swift", themeGen: 0)] == nil)  // evicted
   }
+
+  // MARK: - Perf guard: merge is O(window), NOT O(accumulated)
+
+  /// The scroll-fps regression: `merge` did `var map = store[key]; map[line] = …` which
+  /// COW-copied the WHOLE accumulated map on the first mutation — O(lines-visited) per
+  /// merge, so scrolling a big file's window across N lines was O(N²) on the main
+  /// actor. Merging in place keeps it O(window). 40k single-line windows into one key
+  /// is a few ms at O(window); the old O(N²) is ~8×10^8 element copies (seconds).
+  @Test func mergeIsConstantPerWindowNotLinearInAccumulatedSize() {
+    let cache = HighlightSpanCache(capacity: 4)
+    let key = HighlightSpanCache.Key(blobOID: "oid-1", queryName: "swift", themeGen: 0)
+    let run = [StyleRun(range: 0..<1, capture: "keyword")]
+    let elapsed = ContinuousClock().measure {
+      for line in 0..<40_000 { cache.merge([line: run], into: key) }
+    }
+    let millis = Double(elapsed.components.seconds) * 1_000 + Double(elapsed.components.attoseconds) / 1e15
+    #expect(cache[key]?.count == 40_000, "merge lost accumulated lines — the union is wrong")
+    #expect(
+      millis < 1_000, "merging 40k windows took \(millis)ms — `merge` COW-copies the whole accumulated map (O(n²))")
+  }
 }

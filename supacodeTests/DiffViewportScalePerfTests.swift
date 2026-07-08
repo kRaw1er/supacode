@@ -97,6 +97,27 @@ struct DiffViewportScalePerfTests {
     )
   }
 
+  // MARK: - Bug 3 — a syntax arrival re-typesets the window, it must NOT re-project the leaf
+
+  @Test func syntaxBumpDoesNotReprojectMaterializedLeaf() {
+    let controller = ViewportTestSupport.controller()
+    controller.apply(tree: ChunkTreeFixture.largeDistinct(rows: 5_000), mode: .unified, scrollPreserving: false)
+    let afterApply = LineRowView.projectCount
+    #expect(afterApply >= 1, "the visible leaf was never projected — the guard would be vacuous")
+    // A windowed-highlight arrival bumps `syntaxVersion` ≈ every scroll frame. Syntax
+    // colours are applied at TYPESET time, so a bump must re-typeset the visible window
+    // WITHOUT rebuilding the whole ≤maxLeafSpan row model (`project()`).
+    for line in 1...10 { controller.setSyntax(old: [:], new: [line: []]) }
+    #expect(
+      LineRowView.projectCount == afterApply,
+      """
+      10 syntax bumps re-projected the leaf \(LineRowView.projectCount - afterApply)× — syntaxVersion \
+      leaked back into the project key, so every windowed-highlight arrival re-walks the whole leaf \
+      (the O(leaf)-per-frame scroll stall).
+      """
+    )
+  }
+
   // MARK: - Scale guard — tree seeks per layout stay sublinear (O(log n × window))
 
   @Test func seekCountPerLayoutIsSublinear_100k() {

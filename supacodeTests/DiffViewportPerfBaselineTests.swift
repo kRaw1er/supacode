@@ -20,8 +20,8 @@ import Testing
 struct DiffViewportPerfBaselineTests {
   private static let clock = ContinuousClock()
 
-  private static func ms(_ d: Duration) -> Double {
-    Double(d.components.seconds) * 1_000 + Double(d.components.attoseconds) / 1e15
+  private static func ms(_ duration: Duration) -> Double {
+    Double(duration.components.seconds) * 1_000 + Double(duration.components.attoseconds) / 1e15
   }
 
   /// One all-additions "new file" hunk of `rows` distinct lines — the worst case
