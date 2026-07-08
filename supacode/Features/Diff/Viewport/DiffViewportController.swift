@@ -103,6 +103,17 @@ final class DiffViewportController: NSObject {
   /// `0..<0 == lastVisible` guard silently swallowed until a manual scroll).
   private var lastVisibleWindow: VisibleLineWindow?
   private nonisolated(unsafe) var boundsObserver: NSObjectProtocol?
+  /// Fires on a clip-view SIZE change (window / split-pane resize) — the scroll
+  /// observer above only fires on origin changes (scroll). Without it a width
+  /// change never re-tiles until the next scroll (every wrapped line stays wrapped
+  /// at the old width).
+  private nonisolated(unsafe) var frameObserver: NSObjectProtocol?
+
+  /// The clip width the last layout ran at. A `frameDidChange` that leaves the width
+  /// unchanged (a height-only resize, or a scroller show/hide) skips the
+  /// anchor-preserving re-wrap and just re-tiles — a pure vertical resize does not
+  /// re-typeset a single line.
+  private var lastLaidOutWidth: CGFloat = 0
 
   /// Re-entrancy guard: our own `setBoundsOrigin` during a restore / clamp must
   /// not re-trigger the `boundsDidChange → relayout` feedback loop.
@@ -152,6 +163,7 @@ final class DiffViewportController: NSObject {
     scrollView.drawsBackground = true
     scrollView.backgroundColor = .textBackgroundColor
     scrollView.contentView.postsBoundsChangedNotifications = true
+    scrollView.contentView.postsFrameChangedNotifications = true
     boundsObserver = NotificationCenter.default.addObserver(
       forName: NSView.boundsDidChangeNotification,
       object: scrollView.contentView,
@@ -159,11 +171,21 @@ final class DiffViewportController: NSObject {
     ) { [weak self] _ in
       MainActor.assumeIsolated { self?.viewportMoved() }
     }
+    frameObserver = NotificationCenter.default.addObserver(
+      forName: NSView.frameDidChangeNotification,
+      object: scrollView.contentView,
+      queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated { self?.viewportResized() }
+    }
   }
 
   deinit {
     if let boundsObserver {
       NotificationCenter.default.removeObserver(boundsObserver)
+    }
+    if let frameObserver {
+      NotificationCenter.default.removeObserver(frameObserver)
     }
   }
 
@@ -193,6 +215,7 @@ final class DiffViewportController: NSObject {
 
   private func resizeDocument() {
     let width = scrollView.contentSize.width
+    lastLaidOutWidth = width
     documentView.frame = CGRect(x: 0, y: 0, width: width, height: tree.totalHeight(mode))
   }
 
@@ -203,6 +226,35 @@ final class DiffViewportController: NSObject {
   private func viewportMoved() {
     guard !isAdjustingScroll else { return }
     documentView.needsLayout = true
+  }
+
+  /// The clip view resized (window drag / split-pane drag / inspector toggle). A
+  /// width change re-wraps every line and shifts the total height, so mirror
+  /// `styleDidChange`'s anchor-preserving relayout — capture the first visible line,
+  /// re-fit the document, re-tile, and re-land the anchor — rather than leaving the
+  /// old wrap until the next scroll. Runs in real time (on every `frameDidChange`),
+  /// not just at `viewDidEndLiveResize`, so the viewport re-flows AS the user drags.
+  /// A height-only resize keeps the same width and skips the re-wrap. `internal` so
+  /// the resize regression test can drive it directly (the `frameDidChange`
+  /// notification is delivered async on the main run loop, which a headless test
+  /// does not spin).
+  func viewportResized() {
+    guard !isAdjustingScroll else { return }
+    let newWidth = scrollView.contentSize.width
+    guard newWidth != lastLaidOutWidth else {
+      documentView.needsLayout = true  // height-only: just re-tile, no re-wrap
+      return
+    }
+    lastLaidOutWidth = newWidth
+    let anchor = captureAnchor()
+    measurePass = 0
+    resizeDocument()
+    clampScrollOrigin()
+    layoutVisibleChunks()
+    if let anchor {
+      restore(anchor)
+      layoutVisibleChunks()
+    }
   }
 
   /// Seek the visible window (+ overscan), diff desired vs live per pool, place
