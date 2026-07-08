@@ -119,6 +119,40 @@ struct LineTypesetterTests {
     #expect(CTLineGetStringIndexForPosition(line, CGPoint(x: emojiOffset, y: 0)) == 1)
   }
 
+  // MARK: - a C0 control (BEL / ESC) is retained as content and the typesetter is safe
+
+  @Test func c0ControlRetainedAsContentAndTypesetterSafe() {
+    // A VALID-UTF-8 C0 control byte embedded in a source line (ANSI-escape / BEL dumps,
+    // escape-sequence test files) must be RETAINED as content: it must not crash
+    // CoreText, drop from the string, or desync the offset table.
+    for control in ["\u{0007}", "\u{001B}"] {  // BEL, ESC
+      let content = "a\(control)b" as NSString  // 3 UTF-16 units, control at index 1
+      #expect(content.length == 3)
+
+      // The typesetter keeps every unit — the CTLine's string range spans all 3, so
+      // the control was neither stripped nor collapsed (offset table intact).
+      let line = CoreTextHarness.ctLine(content)
+      #expect(CTLineGetStringRange(line).length == 3)
+
+      // Offsets stay monotone non-decreasing across the control (no negative / NaN
+      // advance, no mis-offset), and the endpoints round-trip unambiguously.
+      var previous = -CGFloat.greatestFiniteMagnitude
+      for index in 0...3 {
+        let offset = CTLineGetOffsetForStringIndex(line, index, nil)
+        #expect(offset.isFinite)
+        #expect(offset >= previous)
+        previous = offset
+      }
+      #expect(CTLineGetStringIndexForPosition(line, CGPoint(x: 0, y: 0)) == 0)
+      let endOffset = CTLineGetOffsetForStringIndex(line, 3, nil)
+      #expect(CTLineGetStringIndexForPosition(line, CGPoint(x: endOffset, y: 0)) == 3)
+
+      // Soft-wrapping the control line does not crash and produces at least one line.
+      let wrapped = CoreTextHarness.wrapped(content, width: 4000)
+      #expect(wrapped.ctLines.count >= 1)
+    }
+  }
+
   // MARK: - LTR base (a leading RLO does not flip it)
 
   @Test func bidiForcesLTRBase() {

@@ -95,6 +95,25 @@ struct ChunkTreeTests {
     #expect(tree.totalHeight(.unified) == 60)
   }
 
+  @Test func seekReturnsNilOnEmptyTree() {
+    // The base-case guard the viewport seek path depends on every frame: an EMPTY
+    // tree (no root) returns nil from every seek variant — never a crash, never a
+    // bogus row/hit — and reports zero rows / zero height in both modes.
+    let tree = ChunkTree()
+    #expect(tree.root == nil)
+    #expect(tree.nodeCount == 0)
+    for mode in [DiffViewMode.unified, .split] {
+      #expect(tree.rowCount(mode) == 0)
+      #expect(tree.totalHeight(mode) == 0)
+      #expect(tree.seek(index: 0, mode: mode) == nil)
+      #expect(tree.seek(index: 5, mode: mode) == nil)
+      #expect(tree.seek(index: -1, mode: mode) == nil)
+      #expect(tree.seek(y: 0, mode: mode) == nil)
+      #expect(tree.seek(y: -50, mode: mode) == nil)
+      #expect(tree.seek(y: 10_000, mode: mode) == nil)
+    }
+  }
+
   // MARK: - Insert
 
   @Test func insertAfterKeepsInorderAndRBInvariants() {
@@ -153,13 +172,34 @@ struct ChunkTreeTests {
     #expect(ChunkTreeInvariants.check(tree).isEmpty)
   }
 
-  @Test func widgetLeafIsNotASegment() {
-    // `split` preconditions on a `.lineSegment`; assert a widget id is not one
-    // (the guard that would trap), without triggering the trap.
+  @Test func widgetCannotBeSplit() async {
+    // Pre-state: a widget leaf (expander / header / comment) is NOT a splittable
+    // `.lineSegment`, so `split` has nothing to partition.
     let tree = ChunkTree()
     let id = tree.insert(widget(0, height: 20), after: nil)
     #expect(tree.nodesByID[id]?.chunk.lineSegment == nil)
     #expect(tree.nodesByID[id]?.chunk.widget != nil)
+
+    // Calling `split` on that widget id must TRAP (`preconditionFailure: split
+    // requires a .lineSegment leaf`) rather than silently corrupt line numbers /
+    // tree structure. Exercised in a child process so the trap is observed, not
+    // fatal to the suite.
+    await #expect(processExitsWith: .failure) {
+      await MainActor.run {
+        let subtree = ChunkTree()
+        let widgetID = subtree.insert(
+          .widget(
+            Widget(
+              key: .expander(GapKey(hunkIndex: 0)),
+              estimatedHeight: 20,
+              payload: .expander(anchor: 0, range: 0..<1, hidden: 1)
+            )
+          ),
+          after: nil
+        )
+        _ = subtree.split(widgetID, atLocalRow: 1)
+      }
+    }
   }
 
   // MARK: - Measured height

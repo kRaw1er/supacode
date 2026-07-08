@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import Testing
 
 @testable import supacode
@@ -145,6 +146,59 @@ struct StickyHeaderOverlayTests {
       resolveModel: { FileHeaderWidget.Model(path: $0, statusText: "") })
     emptyOverlay.update(clipTop: 0, viewportWidth: 800)
     #expect(emptyOverlay.pinnedState.isHidden)
+  }
+
+  // MARK: - stickyOverlayIsAccessibilityHidden (NSVIEW) — no double VO announce
+
+  @Test func stickyOverlayIsAccessibilityHidden() throws {
+    let controller = ViewportTestSupport.controller(width: 800, clipHeight: 600)
+    let (tree, files) = threeFileTree()
+    controller.apply(tree: tree, mode: .unified, scrollPreserving: false)
+    let spy = ScrollSpyController(files: files, tree: tree, mode: .unified)
+    let overlay = StickyHeaderOverlay(
+      scrollView: controller.scrollView, spy: spy,
+      resolveModel: { FileHeaderWidget.Model(path: $0, statusText: "Modified") })
+    overlay.update(clipTop: 150, viewportWidth: 800)  // pin file B so the overlay is live
+    #expect(overlay.pinnedState.fileID == "B")
+
+    // The pinned overlay duplicates a file-header widget that already lives in the tree
+    // (a synthesized AX element), so the floating overlay subtree MUST be hidden from
+    // VoiceOver — otherwise the file header is announced twice while scrolling across a
+    // file boundary. Find the floating container by its hosted `StickyFileHeaderView`.
+    func descendants(of view: NSView) -> [NSView] {
+      view.subviews + view.subviews.flatMap(descendants)
+    }
+    let hosting = try #require(
+      descendants(of: controller.scrollView).compactMap { $0 as? NSHostingView<StickyFileHeaderView> }.first,
+      "the overlay must host a StickyFileHeaderView")
+    let container = try #require(hosting.superview, "the hosted header must live inside the overlay container")
+    #expect(container.isAccessibilityHidden())  // hidden from VO
+    #expect(container.isAccessibilityElement() == false)  // not itself an AX element
+  }
+
+  // MARK: - collapsedReportsHeaderHeight (PURE) — collapsed file reserves header-only
+
+  @Test func collapsedReportsHeaderHeight() {
+    let metrics = ChunkLayoutMetrics.production
+    // A file with NO body (rename-pure / identical / no content hunks) is the shipped
+    // analog of a whole-file collapse: only the header region is reserved and the body
+    // is NEVER typeset — no per-line rows enter the estimate and the trailing
+    // `paddingBottom` is skipped entirely.
+    let noBody = DiffFixture.file(status: .renamed)
+    let headerOnly = ChunkTreeBuilder.estimatedHeights(file: noBody, hunks: [])
+    let expected = metrics.diffHeaderHeight + metrics.paddingTop  // header + top pad; NO body, NO paddingBottom
+    #expect(headerOnly.unified == expected)
+    #expect(headerOnly.split == expected)
+    // The reserved header-only height is exactly the pinned overlay's header height.
+    #expect(headerOnly.unified == StickyHeaderOverlay.headerHeight + metrics.paddingTop)
+
+    // A file WITH a body reserves strictly MORE — proving the collapsed case really
+    // skipped typesetting the body rather than coincidentally matching header height.
+    let withBody = ChunkTreeBuilder.estimatedHeights(
+      file: DiffFixture.file(),
+      hunks: [DiffFixture.hunk([DiffFixture.line(.deletion, old: 1, "a"), DiffFixture.line(.addition, new: 1, "b")])])
+    #expect(withBody.unified > expected)
+    #expect(withBody.split > expected)
   }
 
   // MARK: - stickyOverlayMirrorsInFlowHeader

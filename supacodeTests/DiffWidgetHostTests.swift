@@ -118,6 +118,39 @@ struct DiffWidgetHostTests {
     #expect(host?.hosted?.frame.width == 800)
   }
 
+  // MARK: - coldRenderReservesHostSpace — attaching a comment host below the fold after a
+  //         cold render (then letting its measured height flow in) does NOT reflow the
+  //         viewport: the anchored on-screen line keeps its exact y (no scroll jump).
+
+  @Test func coldRenderReservesHostSpace() {
+    let controller = ViewportTestSupport.controller()
+    let tree = ChunkTree(metrics: .production)
+    var after: ChunkID?
+    for line in 1...400 { after = tree.insert(WidgetTreeFixture.contextLeaf(line), after: after) }
+    controller.apply(tree: tree, mode: .unified, scrollPreserving: false)
+    controller.scroll(toY: 1000)  // line 51 pinned at the clip top — the scroll anchor
+    let anchorY = controller.visibleRect.minY
+
+    // Cold render: attach a comment host FAR BELOW the fold (line 300 ≈ y 6000) after the
+    // initial layout. Because the host sits below the anchored line, the attach must not
+    // shove the anchored content — the on-screen y is byte-identical.
+    let anchorID = UUID()
+    let inserted = controller.insertCommentWidget(
+      side: .new, startLine: 300, endLine: 300, anchorID: anchorID, estimatedHeight: 60)
+    #expect(inserted != nil)
+    #expect(controller.visibleRect.minY == anchorY)  // attach alone: no jump
+
+    // Then the host's REAL measured height flows in (60 → 220). A measure-then-grow below
+    // the fold reaggregates the tree but must still keep the anchored line put — the
+    // deferred-reservation design's load-bearing "grow-below-anchor keeps anchor" contract.
+    let coalescer = LayoutCoalescer(host: controller)
+    coalescer.enqueueMeasuredHeight(key: .commentThread(anchorID: anchorID), width: 800, height: 220)
+    coalescer.tick()
+
+    #expect(controller.visibleRect.minY == anchorY)  // measure-then-grow below the fold: still no jump
+    #expect(tree.widgetNode(for: .commentThread(anchorID: anchorID))?.summary.height(.unified) == 220)  // reaggregated
+  }
+
   // MARK: - B §3/§20 — an occupied (.editing) host is not handed to another chunk;
   //          the autoscroller's display link stops on unmount
 

@@ -860,6 +860,47 @@ struct DiffReviewFeatureTests {
     #expect(sent.value.isEmpty)
   }
 
+  /// The batch-loss race (RP5): the pre-gate said YES up front, so `.sendBatchToAgent`
+  /// optimistically emits `.sendBatchFinished(.sent)` (clearing the comments) and
+  /// relies on a same-tick `TerminalClient.Event.textInjectionFailed` — routed by
+  /// `AppFeature` to `.sendBatchFinished(.noTerminal)` — to override the failure. The
+  /// send never landed; the override MUST re-surface the alert so the batch does not
+  /// vanish silently ("send did nothing but my comments are gone" with no signal).
+  @Test(.dependencies) func sendBatchThenTextInjectionFailedRestoresAlert() async {
+    let worktree = gitLocalWorktree()
+    let comment = reviewComment()
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = worktree
+    initialState.comments = [comment]
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.terminalClient.hasAgentTerminalSurface = { _ in true }  // gate says YES up front
+      $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
+    }
+
+    // Gate passes → optimistic `.sent` clears comments and unlocks the batch.
+    await store.send(.sendBatchToAgent) {
+      $0.batchLocked = true
+    }
+    await store.receive(.sendBatchFinished(.sent)) {
+      $0.comments.removeAll()
+      $0.batchLocked = false
+    }
+    #expect(store.state.comments.isEmpty)
+
+    // Same-tick failure event overrides to `.noTerminal`: the send never landed, so
+    // the user must be told (alert restored), not left with a silently-cleared batch.
+    await store.send(.sendBatchFinished(.noTerminal)) {
+      $0.alert = .noAgentTerminal
+    }
+    #expect(store.state.alert == .noAgentTerminal)
+    #expect(store.state.batchLocked == false)
+    await store.finish()
+  }
+
   @Test(.dependencies) func sendEmptyBatchIsNoop() async {
     let worktree = gitLocalWorktree()
     let sent = LockIsolated<[TerminalClient.Command]>([])

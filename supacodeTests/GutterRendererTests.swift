@@ -87,13 +87,31 @@ struct GutterRendererTests {
   // MARK: - gutter width measured once, patched in place, no drift
 
   @Test func gutterWidthMeasuredOncePatchedInPlace() {
-    #expect(
-      GutterRenderer.gutterWidth(maxDigits: 3, advance: 8) == GutterRenderer.gutterWidth(maxDigits: 3, advance: 8))
-    let three = GutterRenderer.gutterWidth(maxDigits: 3, advance: 8)
-    let four = GutterRenderer.gutterWidth(maxDigits: 4, advance: 8)
-    let five = GutterRenderer.gutterWidth(maxDigits: 5, advance: 8)
-    #expect(three <= four)
-    #expect(four <= five)
-    #expect(five - four == four - three)  // monotone, constant step — no drift
+    // The gutter is MEASURED once per visible window (largest rendered line number) and
+    // PATCHED into `DiffMetrics` in place via `withGutter(forMaxLineNumber:)`. Re-running
+    // the patch across successive re-layouts must NOT drift the width — a per-frame drift
+    // would shift the code column horizontally on every scroll.
+    let base = ViewportTestSupport.metrics(gutter: 48)  // charWidth 8
+    let advance = base.charWidth
+
+    // Measure once for a 3-digit max line number, then re-layout many times at the SAME
+    // max: the patched width is byte-identical every iteration, and re-patching an
+    // already-patched metrics is a fixed point (the patch reads `charWidth`, never the
+    // live `gutterWidth`, so it cannot accumulate).
+    let measured = base.withGutter(forMaxLineNumber: 100).gutterWidth
+    var metrics = base
+    for _ in 0..<8 {
+      metrics = metrics.withGutter(forMaxLineNumber: 100)
+      #expect(metrics.gutterWidth == measured)  // measured once, no accumulation across re-layouts
+    }
+
+    // The width changes ONLY when the digit count crosses a boundary; inside a digit band
+    // it is flat, and it steps by exactly one advance per extra digit — no jitter.
+    let threeLow = base.withGutter(forMaxLineNumber: 100).gutterWidth
+    let threeHigh = base.withGutter(forMaxLineNumber: 999).gutterWidth
+    let four = base.withGutter(forMaxLineNumber: 1000).gutterWidth
+    #expect(threeLow == threeHigh)  // no drift inside the 3-digit band
+    #expect(four - threeHigh == advance)  // +1 digit ⇒ +1 advance
+    #expect(base.withGutter(forMaxLineNumber: 1).gutterWidth == threeLow)  // floors at 3 digits
   }
 }

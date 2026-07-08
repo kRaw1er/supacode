@@ -204,6 +204,38 @@ struct DiffSearchControllerTests {
     #expect(subject.coverage.isCapped)
   }
 
+  // MARK: - listFilterSubstringNotSubsequence — the matcher is SUBSTRING, not subsequence
+
+  @Test func listFilterSubstringNotSubsequence() {
+    // "foobar" on one store line. A subsequence matcher would match "fb" (f…b); the
+    // shipped matcher is case-insensitive SUBSTRING (`.literal`), so only contiguous
+    // runs match — "fb" must NOT match, "oob"/"BAR" must.
+    let newStore = store("foobar\n")
+    let target = file(newStore: newStore)
+
+    // "fb" is an in-order SUBSEQUENCE of "foobar" (f…b) but not a substring ⇒ NO match.
+    let subsequence = controller()
+    subsequence.search("fb", files: [target])
+    #expect(subsequence.matches.isEmpty)
+
+    // A contiguous substring in the middle matches (case-insensitive).
+    let mid = controller()
+    mid.search("oob", files: [target])
+    #expect(mid.matches.count == 1)
+    #expect(mid.matches.first?.utf16Range == 1..<4)  // "oob" at offset 1
+
+    // Case-insensitive substring, not subsequence, at the tail.
+    let tail = controller()
+    tail.search("BAR", files: [target])
+    #expect(tail.matches.count == 1)
+    #expect(tail.matches.first?.utf16Range == 3..<6)  // "bar" at offset 3
+
+    // Reversed order ("rab") is neither a substring nor an in-order subsequence ⇒ none.
+    let reversed = controller()
+    reversed.search("rab", files: [target])
+    #expect(reversed.matches.isEmpty)
+  }
+
   // MARK: - D §6 SRCH invisibles searchable (no drop, no duplication)
 
   @Test func invisiblesSearchable() {

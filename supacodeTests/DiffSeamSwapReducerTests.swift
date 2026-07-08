@@ -284,6 +284,21 @@ struct DiffSeamSwapReducerTests {
     }
     #expect(conflictIndex == 1)  // action row anchored just after the header/start
     #expect(chunks.contains { $0.lineSegment != nil })  // the marker body lines render (line-type tint)
+
+    // FIX WEAK — placement alone would pass even if the insert double-counted the
+    // conflict widget or dropped a body row. Pin the row-count accounting too:
+    // the conflict action widget is inserted EXACTLY once …
+    let conflictWidgets = chunks.filter {
+      if case .placeholder(.conflict) = $0.widget?.payload { return true }
+      return false
+    }
+    #expect(conflictWidgets.count == 1)  // never duplicated / double-counted
+    // … every one of the hunk's marker/body lines survives as a rendered segment …
+    let renderedBodyLines = chunks.compactMap(\.lineSegment).reduce(0) { $0 + $1.window.count }
+    #expect(renderedBodyLines == hunk.lines.count)  // no body row dropped or duplicated
+    // … and the total structure is exactly 3 singleton widgets (file header + conflict
+    // action + hunk header) plus those body segments — no stray inserted rows.
+    #expect(chunks.compactMap(\.widget).count == 3)
   }
 
   // MARK: - E 13.2 — grep gate: the retired render symbols have zero live refs

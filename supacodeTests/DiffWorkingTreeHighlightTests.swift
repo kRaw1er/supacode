@@ -104,4 +104,50 @@ struct DiffWorkingTreeHighlightTests {
     #expect(new.utf16 == Array(workdir.utf16), "the new side is the on-disk workdir content")
     #expect(blobs.old != nil, "the old side reads from the object DB")
   }
+
+  /// Bug #1 end-to-end for a base-branch (three-dot) review: the OLD (base) side must
+  /// highlight the MERGE-BASE blob read from the object DB — NOT the on-disk workdir
+  /// file. A trap workdir (different from both merge-base and HEAD) is left uncommitted;
+  /// a regression that read the workdir would surface the trap content instead. Asserts
+  /// both sides carry the committed blob content and that a `struct` keyword span lands
+  /// on the base-side line (spans land on the base blob, not the workdir).
+  @Test func baseBranchHighlightReadsBaseBlob() async throws {
+    let root = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(root) }
+    // Merge-base content on main (the base side of the three-dot diff).
+    let baseSource = "struct Base {\n  let value = 1\n}\n"
+    try GitFixture.write(baseSource, to: "Sample.swift", in: root)
+    try GitFixture.stage("Sample.swift", in: root)
+    try GitFixture.commit("init", in: root)
+    // HEAD content on feature (the new side).
+    try GitFixture.checkout("feature", create: true, in: root)
+    let headSource = "struct Feature {\n  let value = 2\n  func run() {}\n}\n"
+    try GitFixture.write(headSource, to: "Sample.swift", in: root)
+    try GitFixture.stage("Sample.swift", in: root)
+    try GitFixture.commit("edit on feature", in: root)
+    // A DIFFERENT uncommitted workdir — the trap the wrong-blob bug would read.
+    let trapWorkdir = "enum Trap {\n  case boom\n}\n"
+    try GitFixture.write(trapWorkdir, to: "Sample.swift", in: root)
+
+    Libgit2Diff.initialize()
+    let blobs = try Libgit2Diff.fileHighlightBlobs(
+      for: DiffFixture.file(path: "Sample.swift"), at: root, source: .baseBranch(ref: "main"), caps: Self.caps)
+    let old = try #require(blobs.old, "base diff must read the merge-base old side")
+    let new = try #require(blobs.new, "base diff must read the HEAD new side")
+    // The base (old) side is the MERGE-BASE blob — NOT the on-disk workdir file.
+    #expect(old.utf16 == Array(baseSource.utf16), "base side must be the merge-base blob, not the workdir")
+    #expect(old.utf16 != Array(trapWorkdir.utf16), "base side must not read the uncommitted workdir file")
+    // The new side is the committed HEAD (three-dot) blob, also not the workdir.
+    #expect(new.utf16 == Array(headSource.utf16), "new side is the committed HEAD blob")
+    #expect(new.utf16 != Array(trapWorkdir.utf16))
+
+    // Highlight the base blob: keyword spans must land on the base-side lines — the
+    // highlighter parsed the MERGE-BASE blob (every run here is a base-side span,
+    // since `old` IS the base input). Pre-fix this side read the workdir instead.
+    let lineCount = baseSource.split(separator: "\n", omittingEmptySubsequences: false).count
+    let runs = await DiffHighlightClient.liveValue.styleRuns(old, 0..<lineCount)
+    #expect(
+      runs.contains { $0.value.contains { $0.capture.hasPrefix("keyword") } },
+      "the base blob must produce keyword spans on the base side")
+  }
 }

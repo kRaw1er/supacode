@@ -105,23 +105,59 @@ struct DiffCoreTextRenderTests {
     drawHeadless(changeView, height: 40)
     drawHeadless(contextView, height: 20)
 
-    // 3. Gutter substrate golden — the per-origin token pattern (assert rects, not
-    //    pixels): deletion ⇒ tint + dashed bar; addition ⇒ tint + solid bar;
-    //    context ⇒ nothing.
+    // 3. I5 render-model golden — the whole "file" as a deterministic, appearance-
+    //    independent snapshot: every rendered row (class · old/new · height · content)
+    //    IN ORDER plus the gutter substrate token pattern per origin (exact rects, not
+    //    pixels). Locks row order + gutter substrate; regenerate with UPDATE_GOLDEN=1
+    //    and review by hand.
     let gutter = GutterRenderer(metrics: ViewportTestSupport.metrics(gutter: 48), scale: 2, palette: .shared)
     let geometry = LineRowGeometry(rowRect: CGRect(x: 0, y: 0, width: 800, height: 20), barX: 52)
+    var digest = ""
+    digest += renderModelRows(changeView, segment: change)
+    digest += renderModelRows(contextView, segment: contextSegment)
+    for origin in [DiffLineOrigin.deletion, .addition, .context] {
+      digest += gutterSubstrate(gutter, geometry: geometry, origin: origin)
+    }
+    GoldenText.assert(digest, "renderSingleFixture")
+  }
 
-    let deletion = RecordingContext()
-    gutter.draw(row: geometry, origin: .deletion, in: deletion)
-    #expect(deletion.fills.count > 2)  // tint + multiple dash segments
+  /// One line per rendered row: `class · o<old>/n<new> · h<height> · "<content>"`, in
+  /// document order — content read back from the configured view, class/numbers from the
+  /// projected rows.
+  private func renderModelRows(_ view: LineRowView, segment: LineSegment) -> String {
+    let rows = segment.renderedRows(.unified)
+    var textByRow: [Int: String] = [:]
+    for text in view.visibleRowTexts { textByRow[text.localRow] = text.unified ?? "" }
+    return rows.indices
+      .map { index in
+        let row = rows[index]
+        let old = row.oldNumber.map(String.init) ?? "-"
+        let new = row.newNumber.map(String.init) ?? "-"
+        let height = view.measuredRowHeights[index]
+        return "row \(classLabel(row.origin)) · o\(old)/n\(new) · h\(height) · \"\(textByRow[index] ?? "")\"\n"
+      }
+      .joined()
+  }
 
-    let addition = RecordingContext()
-    gutter.draw(row: geometry, origin: .addition, in: addition)
-    #expect(addition.fills.count == 2)  // tint + one solid bar
+  /// The gutter substrate token pattern for one origin: `gutter <class>: <n> [rects]`
+  /// (exact recorded fill rects: deletion ⇒ tint + dashed; addition ⇒ tint + solid;
+  /// context ⇒ none).
+  private func gutterSubstrate(_ gutter: GutterRenderer, geometry: LineRowGeometry, origin: DiffLineOrigin) -> String {
+    let recorder = RecordingContext()
+    gutter.draw(row: geometry, origin: origin, in: recorder)
+    let rects = recorder.fills
+      .map { "\($0.minX),\($0.minY),\($0.width),\($0.height)" }
+      .joined(separator: ";")
+    return "gutter \(classLabel(origin)): \(recorder.fills.count) [\(rects)]\n"
+  }
 
-    let plain = RecordingContext()
-    gutter.draw(row: geometry, origin: .context, in: plain)
-    #expect(plain.fills.isEmpty)
+  private func classLabel(_ origin: DiffLineOrigin) -> String {
+    switch origin {
+    case .context: "ctx"
+    case .addition: "add"
+    case .deletion: "del"
+    case .noNewlineMarker: "nonl"
+    }
   }
 
   // MARK: - B §3 — a palette swap invalidates recycled views (no stale glyph cache)

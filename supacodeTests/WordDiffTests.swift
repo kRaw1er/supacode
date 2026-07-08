@@ -45,16 +45,33 @@ struct WordDiffTests {
     #expect(WordDiff.diff(old: old, new: new) == .empty)
   }
 
-  @Test func unifiedAndSplitUseIdenticalSpans() {
-    // The diff takes one (old, new) pair, so unified and split callers consume the
-    // exact same result — split routes oldSpans→left / newSpans→right, unified
-    // routes oldSpans→`-` / newSpans→`+`. Same spans either way.
-    let pair = ("value = compute(a)", "value = compute(b)")
-    let asUnified = WordDiff.diff(old: pair.0, new: pair.1)
-    let asSplit = WordDiff.diff(old: pair.0, new: pair.1)
-    #expect(asUnified == asSplit)
-    #expect(!asUnified.oldSpans.isEmpty)
-    #expect(!asUnified.newSpans.isEmpty)
+  /// `WordDiff.diff` returns two per-SIDE span lists: `oldSpans` index the OLD/left/`-`
+  /// string, `newSpans` index the NEW/right/`+` string. The routing layer is a 1:1
+  /// pass-through of that split — `LineRowView.projectSplitChange` sets
+  /// `oldWordSpans = result.oldSpans` (left pane) and `newWordSpans = result.newSpans`
+  /// (right pane), and unified routes `oldSpans` to the `-` row and `newSpans` to the
+  /// `+` row (private `project*`, mode-agnostic). So the meaningful, non-tautological
+  /// assertions are about the two SIDES — which an implementation could swap, collapse
+  /// onto one side, or push out of the string it indexes — NOT the two MODES, which
+  /// share one mode-agnostic `Result`.
+  @Test func asymmetricEditKeepsOldAndNewSidesDistinct() {
+    // An ASYMMETRIC change so the two sides carry genuinely DIFFERENT spans against
+    // DIFFERENT-length strings: 👍 (2 u16) → 👍🏽 (4 u16). Old/left is [1,3) in the
+    // 4-unit "a👍b"; new/right is [1,5) in the 6-unit "a👍🏽b".
+    let old = UnicodeFixtures.emojiThumb  // "a👍b"  (u16 len 4)
+    let new = "a\(UnicodeFixtures.thumbSkin)b"  // "a👍🏽b" (u16 len 6)
+    let result = WordDiff.diff(old: old, new: new)
+
+    // Concrete per-side ranges.
+    #expect(result.oldSpans == [WordDiff.Span(range: 1..<3)])
+    #expect(result.newSpans == [WordDiff.Span(range: 1..<5)])
+    // The two sides are genuinely distinct — an impl that mirrored one side onto both,
+    // or collapsed them, is caught (the ranges are not equal).
+    #expect(result.oldSpans != result.newSpans)
+    // Each side is bounded by the string it indexes. Swapping the sides would put the
+    // [1,5) span against the 4-unit OLD string (upperBound 5 > 4) — out of bounds.
+    #expect(result.oldSpans.allSatisfy { $0.range.upperBound <= (old as NSString).length })
+    #expect(result.newSpans.allSatisfy { $0.range.upperBound <= (new as NSString).length })
   }
 
   @Test func unicodeScalarBoundariesDoNotCrash() {
@@ -64,12 +81,13 @@ struct WordDiffTests {
     #expect(result.newSpans == [WordDiff.Span(range: 0..<4)])
   }
 
-  // MARK: - Phase 5: cross-mode meta-invariant
+  // MARK: - Phase 5: per-side routing correctness
 
-  /// C 5.1 / §5.10 — the same `(old, new)` pair yields identical spans whether the
-  /// caller is unified or split (the diff takes one pair, mode-agnostic), over a
-  /// spread of Unicode fixtures.
-  @Test func unifiedEqualsSplitOnUnicode() {
+  /// C 5.1 / §5.10 — each side's spans index its OWN string (old→left/`-`,
+  /// new→right/`+`) across a spread of Unicode fixtures. An impl that swapped or
+  /// mirrored the sides would push a span past the length of the string it indexes on
+  /// an asymmetric pair — this asserts the per-side bound, not a cross-mode equality.
+  @Test func oldNewSidesIndexTheirOwnStringAcrossUnicode() {
     let pairs: [(String, String)] = [
       (UnicodeFixtures.emojiThumb, UnicodeFixtures.emojiDown),
       (UnicodeFixtures.cjkExpr, "x = \u{65E5}\u{672C} + 1"),
@@ -78,10 +96,30 @@ struct WordDiffTests {
       ("f(a)", "f(a, b)"),
     ]
     for (old, new) in pairs {
-      let asUnified = WordDiff.diff(old: old, new: new)
-      let asSplit = WordDiff.diff(old: old, new: new)
-      #expect(asUnified == asSplit)
+      let result = WordDiff.diff(old: old, new: new)
+      let oldLen = (old as NSString).length
+      let newLen = (new as NSString).length
+      // Old-side spans stay within the OLD string; new-side within the NEW string.
+      for span in result.oldSpans {
+        #expect(
+          span.range.lowerBound >= 0 && span.range.upperBound <= oldLen,
+          "old-side span \(span.range) escapes old (len \(oldLen)) — sides swapped?")
+      }
+      for span in result.newSpans {
+        #expect(
+          span.range.lowerBound >= 0 && span.range.upperBound <= newLen,
+          "new-side span \(span.range) escapes new (len \(newLen)) — sides swapped?")
+      }
     }
+    // A pure INSERTION routes an EMPTY old/left side and a non-empty new/right side.
+    let insertion = WordDiff.diff(old: "f(a)", new: "f(a, b)")
+    #expect(insertion.oldSpans.isEmpty)
+    #expect(!insertion.newSpans.isEmpty)
+    // A pure DELETION is the mirror image: non-empty old/left, empty new/right. An
+    // impl that swapped the sides would fail exactly one of these two directions.
+    let deletion = WordDiff.diff(old: "f(a, b)", new: "f(a)")
+    #expect(!deletion.oldSpans.isEmpty)
+    #expect(deletion.newSpans.isEmpty)
   }
 
   // MARK: - Phase 5: UTF regressions G2 / G3 / G4
@@ -164,20 +202,65 @@ struct WordDiffTests {
   /// format invisibles are NOT White_Space; each is one UTF-16 unit and is handled
   /// grapheme-safely without crashing or splitting a cluster.
   @Test func nbspIsWhitespaceZwspIsOwnToken() {
+    // nbsp (U+00A0) IS White_Space → two adjacent nbsp coalesce into ONE whitespace
+    // gap token spanning both units: "a b" → "a\u{A0}\u{A0}b" ⇒ the changed span is
+    // the full [1,3), not two 1-unit spans.
     let nbsp = WordDiff.diff(old: "a b", new: "a\(UnicodeFixtures.nbsp)\(UnicodeFixtures.nbsp)b")
     #expect(nbsp.newSpans == [WordDiff.Span(range: 1..<3)])
-    for invisible in [
-      UnicodeFixtures.zwsp, UnicodeFixtures.zwnj, UnicodeFixtures.zwj, UnicodeFixtures.bom,
-      UnicodeFixtures.softHyphen,
-    ] {
-      #expect((invisible as NSString).length == 1)
-      let result = WordDiff.diff(old: "x\(invisible)", new: "y\(invisible)")
-      #expect(!result.newSpans.isEmpty)
+
+    // ZWSP (U+200B) is a true zero-width SPACE → a word SEPARATOR. Replacing the
+    // "foo bar" space (offset 3) with ZWSP keeps "foo"/"bar" as separate tokens, so
+    // the changed span is EXACTLY the 1-unit separator [3,4) on BOTH sides — its own
+    // gap token, not swallowed into a neighbour (the weak `<=2` bound could not see
+    // this granularity: a lone ZWSP is a 1-unit token).
+    let zwsp = WordDiff.diff(old: "foo bar", new: "foo\(UnicodeFixtures.zwsp)bar")
+    #expect(zwsp.oldSpans == [WordDiff.Span(range: 3..<4)])
+    #expect(zwsp.newSpans == [WordDiff.Span(range: 3..<4)])
+
+    // The zero-width JOINERS / format chars (ZWNJ, ZWJ, BOM/word-joiner, soft hyphen)
+    // are word-INTERNAL: the Unicode word segmenter fuses "foo<inv>bar" into one unit
+    // (correct segmentation, verified behaviour), so the edit is detected coarsely.
+    // The guard that matters against "symbols break": every recorded span stays
+    // grapheme-aligned and in bounds — the tokenizer never crashes or bisects a
+    // composed sequence around an invisible.
+    for invisible in [UnicodeFixtures.zwnj, UnicodeFixtures.zwj, UnicodeFixtures.bom, UnicodeFixtures.softHyphen] {
+      #expect((invisible as NSString).length == 1)  // a lone format char is one UTF-16 unit
+      let new = "foo\(invisible)bar" as NSString
+      let result = WordDiff.diff(old: "foo bar", new: new as String)
+      #expect(result != .empty)  // the invisible edit is detected
       for span in result.oldSpans + result.newSpans {
         #expect(span.range.lowerBound >= 0)
-        #expect(span.range.upperBound <= 2)
+        #expect(span.range.upperBound <= new.length)
+      }
+      for span in result.newSpans {
+        // No span bound bisects a composed sequence (grapheme-safe around the invisible).
+        for bound in [span.range.lowerBound, span.range.upperBound] where bound > 0 && bound < new.length {
+          #expect(new.rangeOfComposedCharacterSequence(at: bound).location == bound)
+        }
       }
     }
+  }
+
+  /// §1 regional-indicator caveat (word side) — a diff over an ODD RI run must place
+  /// spans on RI-PAIR boundaries (grapheme edges), never inside a flag pair. Removing
+  /// the odd trailing 🇺 from "a🇯🇵🇺b" changes only that lone flag: its cluster is
+  /// units 5..<7, and the outward grapheme snap guarantees no span bound bisects the
+  /// [🇯🇵] pair (offsets 2,3,4) or the [🇺] pair (offset 6).
+  @Test func regionalIndicatorWordDiffPairs2by2() {
+    // a=0, 🇯🇵=1..<5 (one flag, 2 RIs), 🇺=5..<7 (odd trailing RI), b=7.
+    let result = WordDiff.diff(old: "a\u{1F1EF}\u{1F1F5}\u{1F1FA}b", new: "a\u{1F1EF}\u{1F1F5}b")
+    #expect(result != .empty)
+    let midPairOffsets: Set<Int> = [2, 3, 4, 6]  // interiors of the two flag clusters
+    for span in result.oldSpans + result.newSpans {
+      #expect(
+        !midPairOffsets.contains(span.range.lowerBound),
+        "span lowerBound \(span.range.lowerBound) bisects a regional-indicator pair")
+      #expect(
+        !midPairOffsets.contains(span.range.upperBound),
+        "span upperBound \(span.range.upperBound) bisects a regional-indicator pair")
+    }
+    // The removed lone flag 🇺 is the change on the old side: its cluster [5,7).
+    #expect(result.oldSpans.contains { $0.range.lowerBound == 5 || $0.range.upperBound == 7 })
   }
 
   /// C 5.5 — the separator gap `" + "` sub-tokenizes into `[space, "+", space]`, so

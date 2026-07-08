@@ -70,6 +70,86 @@ struct DiffSplitModeTests {
     #expect(Set(buildA.pairs.map(\.pairID)).count == buildA.pairs.count)  // unique
   }
 
+  // MARK: - C 10.1 (property) — randomized pairing invariants over arbitrary counts
+
+  /// Property/fuzz over arbitrary `(delCount, addCount, contextCount)` triples: the
+  /// 4 fixed examples in `alignedPairLeftoversAndCounts` miss off-by-one leftover
+  /// pairing and pairID-collision bugs at counts they never hit (0-length sides with
+  /// context, large uneven blocks). Sweeps `AlignedPairing.pairChange` / `pairContext`
+  /// asserting the dual-mode counts, the leftovers-on-the-shorter-side policy, and
+  /// pairID uniqueness every iteration.
+  @Test func alignedPairPairingProperty() {
+    var rng = SeededRNG(seed: 0xA11_6ED_9A_11ED)
+    for _ in 0..<400 {
+      let delCount = Int.random(in: 0...14, using: &rng)
+      let addCount = Int.random(in: 0...14, using: &rng)
+      let contextCount = Int.random(in: 0...14, using: &rng)
+
+      // Globally-distinct old/new line numbers (a real diff never reuses a line
+      // number across deletions / additions / context), so line-derived pairIDs are
+      // collision-free by construction — which is exactly what we assert below.
+      var nextOld = 1
+      var nextNew = 1
+      let deletions = (0..<delCount).map { _ -> DiffLine in
+        defer { nextOld += 1 }
+        return DiffFixture.line(.deletion, old: nextOld, "d")
+      }
+      let additions = (0..<addCount).map { _ -> DiffLine in
+        defer { nextNew += 1 }
+        return DiffFixture.line(.addition, new: nextNew, "a")
+      }
+      let contextLines = (0..<contextCount).map { _ -> DiffLine in
+        defer {
+          nextOld += 1
+          nextNew += 1
+        }
+        return DiffFixture.line(.context, old: nextOld, new: nextNew)
+      }
+
+      // One shared sequencer across the whole hunk (as the real builder mints).
+      var seq = PairSequencer()
+      let change = AlignedPairing.pairChange(deletions: deletions, additions: additions, seq: &seq)
+      let context = AlignedPairing.pairContext(contextLines, seq: &seq)
+
+      // (1) dual-mode counts: split == max(del,add)+ctx, unified == del+add+ctx.
+      #expect(change.splitLineCount == max(delCount, addCount))
+      #expect(change.unifiedLineCount == delCount + addCount)
+      #expect(context.splitLineCount == contextCount)
+      #expect(context.unifiedLineCount == contextCount)
+      #expect(change.splitLineCount + context.splitLineCount == max(delCount, addCount) + contextCount)
+      #expect(change.unifiedLineCount + context.unifiedLineCount == delCount + addCount + contextCount)
+
+      // (2) pairing policy: a paired prefix of `min(del,add)`, then leftovers ALWAYS
+      // on the shorter side (surplus deletions ⇒ `(del,nil)`; surplus additions ⇒
+      // `(nil,add)`), never interleaved.
+      let paired = min(delCount, addCount)
+      for index in change.pairs.indices {
+        let pair = change.pairs[index]
+        if index < paired {
+          #expect(pair.isContext)  // both sides present on the paired row
+        } else if delCount > addCount {
+          #expect(pair.isPureDeletion)  // leftover deletion, buffer on the new column
+        } else {
+          #expect(pair.isPureAddition)  // leftover addition, buffer on the old column
+        }
+      }
+      #expect(change.emptyCount(on: .new) == max(0, delCount - addCount))
+      #expect(change.emptyCount(on: .old) == max(0, addCount - delCount))
+      #expect(change.hasContent(on: .old) == (delCount > 0))
+      #expect(change.hasContent(on: .new) == (addCount > 0))
+
+      // Context always occupies BOTH sides — no buffers.
+      let allContext = context.pairs.allSatisfy(\.isContext)
+      #expect(allContext)
+      #expect(context.emptyCount(on: .new) == 0)
+      #expect(context.emptyCount(on: .old) == 0)
+
+      // (3) pairIDs unique across the whole hunk (scroll-anchor identity).
+      let allIDs = change.pairs.map(\.pairID) + context.pairs.map(\.pairID)
+      #expect(Set(allIDs).count == allIDs.count)
+    }
+  }
+
   // MARK: - C 10.2 · E 4.1 — mode toggle is O(log #hunks), NOT an O(n) reproject
 
   @Test func modeToggleSeekCountBounded() {

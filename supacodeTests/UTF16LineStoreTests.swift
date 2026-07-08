@@ -133,6 +133,61 @@ struct UTF16LineStoreTests {
     #expect(astral.locate(offset: 3).line == 1)
   }
 
+  // MARK: - a leading / mid-line BOM (U+FEFF) does not desync the offset table (STORE §6)
+
+  @Test func midLineBOMDoesNotDesyncOffsetTable() {
+    // A leading BOM is common in Windows-authored source. It is CONTENT, not stripped:
+    // "\u{FEFF}ab\n" ⇒ BOM@0, a@1, b@2, \n@3, sentinel@4 — lineStarts == [0, 4].
+    let bomLine = UTF16LineStore(bridging: "\u{FEFF}ab\n")
+    #expect(bomLine.lineCount == 1)  // trailing "\n" ⇒ no phantom empty line
+    #expect(bomLine.nsString.length == 4)  // BOM counted as 1 unit (sentinel == 4)
+    #expect(bomLine.utf16Offset(ofLine: 0) == 0)
+    // lineStarts == [line-0 start, sentinel] == [0, 4].
+    let lineStarts: [Int] = [bomLine.utf16Offset(ofLine: 0), bomLine.nsString.length]
+    #expect(lineStarts == [0, 4])
+    // Reported range EXCLUDES the trailing "\n" but KEEPS the BOM: [0, 3).
+    #expect(bomLine.range(ofLine: 0) == NSRange(location: 0, length: 3))
+    #expect(bomLine.nsString.character(at: 0) == 0xFEFF)  // BOM retained at offset 0, not consumed
+    #expect(bomLine.string(ofLine: 0) == "\u{FEFF}ab")
+
+    // A MID-line BOM ("a\u{FEFF}b") stays counted as exactly one unit, so `locate`
+    // is monotone with no off-by-one: every offset maps to line 0, column == offset.
+    let midBOM = UTF16LineStore(bridging: "a\u{FEFF}b")
+    #expect(midBOM.lineCount == 1)
+    #expect(midBOM.nsString.length == 3)
+    #expect(midBOM.nsString.character(at: 1) == 0xFEFF)
+    var previousColumn = -1
+    for offset in 0..<3 {  // content offsets; offset == length is the exclusive sentinel
+      let located = midBOM.locate(offset: offset)
+      #expect(located.line == 0)
+      #expect(located.column == offset)  // BOM is a plain 1-unit column, no shift
+      #expect(located.column > previousColumn)  // monotone
+      previousColumn = located.column
+    }
+  }
+
+  // MARK: - odd regional-indicator run pairs 2-by-2, trailing RI alone (§1 caveat)
+
+  @Test func regionalIndicatorOddRunPairs2by2() {
+    // 🇯🇵🇺 == U+1F1EF U+1F1F5 U+1F1FA — three regional indicators (6 UTF-16 units).
+    // Segmentation pairs RIs 2-by-2: [🇯🇵] == units 0..<4 (one flag), [🇺] == units
+    // 4..<6 (the odd trailing RI, its own grapheme). snapToGrapheme (start-only)
+    // must snap every interior offset of the first flag back to 0 and land the
+    // second cluster's start exactly at 4 — never bisecting a flag pair at 2.
+    let store = UTF16LineStore(bridging: "\u{1F1EF}\u{1F1F5}\u{1F1FA}")
+    #expect(store.nsString.length == 6)
+    // The first flag [🇯🇵] is ONE cluster 0..<4: every interior offset snaps to 0.
+    #expect(store.snapToGrapheme(1) == 0)
+    #expect(store.snapToGrapheme(2) == 0)  // NOT a boundary — the two RIs pair into one flag
+    #expect(store.snapToGrapheme(3) == 0)
+    // The odd trailing [🇺] is its own cluster starting at 4 (pairs did not merge 3).
+    #expect(store.snapToGrapheme(4) == 4)
+    #expect(store.snapToGrapheme(5) == 4)
+    // NSString composed-sequence boundaries agree: [0,4) then [4,6), never a 3-RI blob.
+    #expect(NSEqualRanges(store.nsString.rangeOfComposedCharacterSequence(at: 0), NSRange(location: 0, length: 4)))
+    #expect(NSEqualRanges(store.nsString.rangeOfComposedCharacterSequence(at: 4), NSRange(location: 4, length: 2)))
+  }
+
   // MARK: - The fixture-facts probe (OS/toolchain composed-sequence guard)
 
   @Test func unicodeFixtureFactsProbe() {

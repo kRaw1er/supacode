@@ -155,17 +155,27 @@ struct DiffStreamConsumerTests {
 
   // MARK: - Rename re-keys in place (pierre updateItemId)
 
+  /// A rename must re-key the file's sub-tree IN PLACE — reuse the header instance
+  /// under the new id, re-splice the body, and RETARGET the ordering bookkeeping
+  /// (`fileOrder` slot) from old → new — not drop-and-append. The consumer owns no
+  /// selection / scrollTo state (those live in the reducer, decoupled from the
+  /// tree-backed engine), so the "retarget" this pins is the file-slot identity +
+  /// body re-splice, and the anchored scroll is preserved across the re-key (the
+  /// consumer applies `scrollPreserving: true`, so the caller's scroll position is
+  /// NOT perturbed by the rename).
   @Test func renameReusesAndRetargetsSelection() async throws {
     let root = try GitFixture.makeRepo()
     defer { GitFixture.cleanup(root) }
     let content = (1...20).map { "line \($0)\n" }.joined()
+    try GitFixture.write("front\n", to: "aa-front.txt", in: root)  // a stable sibling before a.txt
     try GitFixture.write(content, to: "a.txt", in: root)
-    try GitFixture.stage("a.txt", in: root)
+    try GitFixture.stage("aa-front.txt", "a.txt", in: root)
     try GitFixture.commit("init", in: root)
     try GitFixture.checkout("feature", create: true, in: root)
+    try GitFixture.write("front2\n", to: "aa-front.txt", in: root)  // modify sibling too
     try GitFixture.write(content + "extra\n", to: "a.txt", in: root)  // modify so it appears
-    try GitFixture.stage("a.txt", in: root)
-    try GitFixture.commit("edit a", in: root)
+    try GitFixture.stage("aa-front.txt", "a.txt", in: root)
+    try GitFixture.commit("edit both", in: root)
 
     let provider = LibGit2DiffProvider()
     let controller = ViewportTestSupport.controller()
@@ -176,8 +186,14 @@ struct DiffStreamConsumerTests {
     for batch in first { consumer.consume(batch) }
     consumer.finish()
     let headerBefore = try #require(consumer.tree.fileNode(id: "a.txt")).id
+    let orderIndexBefore = try #require(consumer.fileOrder.firstIndex(of: "a.txt"))
+    let splicesBefore = consumer.diagnostics.splices
+    let orderCountBefore = consumer.fileOrder.count
+    #expect(!lineSegmentIDs(consumer, fileID: "a.txt").isEmpty)  // the file has a materialized body
+    let scrollBefore = controller.scrollView.contentView.bounds.origin.y
 
-    // Rename a.txt → b.txt (git mv detects it), commit.
+    // Rename a.txt → b.txt (git mv detects it), commit. `git mv` gives it a fresh
+    // path but the SAME content-under-the-header, so the consumer re-keys in place.
     try GitFixture.rename("a.txt", "b.txt", in: root)
     try GitFixture.commit("rename", in: root)
 
@@ -187,10 +203,77 @@ struct DiffStreamConsumerTests {
     for batch in second { consumer.consume(batch) }
     consumer.finish()
 
-    // The old id is gone; the new id reuses the SAME header element/instance.
+    // The old id is gone EVERYWHERE — node, span, order, body segments.
     #expect(consumer.tree.fileNode(id: "a.txt") == nil)
-    #expect(consumer.fileOrder.contains("b.txt"))
+    #expect(consumer.tree.fileNodeSpan(fileID: "a.txt") == nil)
     #expect(!consumer.fileOrder.contains("a.txt"))
-    #expect(consumer.tree.fileNode(id: "b.txt")?.id == headerBefore)  // same instance under the new id
+    #expect(lineSegmentIDs(consumer, fileID: "a.txt").isEmpty)
+
+    // The new id reuses the SAME header instance and carries a re-spliced body.
+    #expect(consumer.tree.fileNode(id: "b.txt")?.id == headerBefore)
+    #expect(!lineSegmentIDs(consumer, fileID: "b.txt").isEmpty)
+
+    // The order slot RETARGETS in place (same index, same count) — not appended to the
+    // end, which would reorder the file below its sibling.
+    #expect(consumer.fileOrder.firstIndex(of: "b.txt") == orderIndexBefore)
+    #expect(consumer.fileOrder.count == orderCountBefore)
+
+    // The rename took the splice (re-key) path exactly once, not an append.
+    #expect(consumer.diagnostics.splices == splicesBefore + 1)
+
+    // The anchored scroll target is NOT mutated by the re-key.
+    #expect(controller.scrollView.contentView.bounds.origin.y == scrollBefore)
+  }
+
+  // MARK: - Content-identity cacheKey changes on mutation (no stale sub-tree reuse)
+
+  /// The complement of `consumerContentIdentityReuse`: when a file's content MUTATES
+  /// (a hunk accept/reject/both — here modeled as a further edit that produces a new
+  /// blob), its `(oldBlobID, newBlobID)` content-identity cacheKey must CHANGE so the
+  /// next re-diff does NOT reuse the pre-mutation sub-tree. A stale reuse would show
+  /// ghost content / a stale hunk with a stale measured height. Asserts the key
+  /// differs, the consumer splices (not reuses), and the injected pre-mutation height
+  /// does NOT survive.
+  @Test func cacheKeyIdentityChangesOnMutation() async throws {
+    let root = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(root) }
+    try GitFixture.write("a\nb\nc\nd\ne\n", to: "a.txt", in: root)
+    try GitFixture.stage("a.txt", in: root)
+    try GitFixture.commit("init", in: root)
+    try GitFixture.write("a\nB\nc\nd\ne\n", to: "a.txt", in: root)  // first uncommitted state
+
+    let provider = LibGit2DiffProvider()
+    let controller = ViewportTestSupport.controller()
+    let consumer = DiffStreamConsumer(viewport: controller)
+
+    let first = try await batches(provider, source: .workingTree, at: root, generation: 1)
+    let firstBatch = try #require(first.first { $0.file.id == "a.txt" })
+    consumer.begin(fileCount: first.count, mode: .unified, generation: 1)
+    for batch in first { consumer.consume(batch) }
+
+    // Pin a measured height on the file's first line segment (the "expensive" state a
+    // stale reuse would wrongly keep).
+    let segment = try #require(lineSegmentIDs(consumer, fileID: "a.txt").first)
+    consumer.tree.setMeasuredHeight(55, chunk: segment, localRow: 0, mode: .unified)
+    #expect(try #require(consumer.tree.nodesByID[segment]).summary.height(.unified) == 55)
+    let reusesBefore = consumer.diagnostics.reuses
+    let splicesBefore = consumer.diagnostics.splices
+
+    // MUTATE the content (a hunk resolve / further edit) → a NEW workdir blob OID.
+    try GitFixture.write("a\nB\nc\nD\ne\n", to: "a.txt", in: root)
+    let second = try await batches(provider, source: .workingTree, at: root, generation: 2)
+    let secondBatch = try #require(second.first { $0.file.id == "a.txt" })
+
+    // The load-bearing assertion: the content-identity cacheKey CHANGED on mutation.
+    #expect(secondBatch.identity != firstBatch.identity)
+
+    consumer.begin(fileCount: second.count, mode: .unified, generation: 2)
+    for batch in second { consumer.consume(batch) }
+
+    // The changed key forced a splice, NOT a reuse of the stale sub-tree.
+    #expect(consumer.diagnostics.reuses == reusesBefore)
+    #expect(consumer.diagnostics.splices == splicesBefore + 1)
+    // The pre-mutation sub-tree (and its injected 55px height) was spliced out.
+    #expect(consumer.tree.nodesByID[segment] == nil)
   }
 }

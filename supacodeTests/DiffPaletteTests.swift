@@ -53,9 +53,9 @@ struct DiffPaletteTests {
     #expect(palette.rowTint(for: .deletion) != nil)
 
     // Reference pierre hexes (style.css:23-28): added ~#0dbe4e, deleted #ff2e3f,
-    // modified #009fff. We derive from system colors instead, so the golden locks
-    // the SEMANTIC identity (green-ish add, red-ish del, distinct modified) that
-    // tracks light/dark, not a hard-pinned hex.
+    // modified #009fff. We derive from system colors instead, so the hue checks lock the
+    // SEMANTIC identity (green-ish add, red-ish del, distinct modified) that tracks
+    // light/dark.
     for appearance in [aqua, darkAqua] {
       let add = components(palette.addBase, appearance)
       let del = components(palette.delBase, appearance)
@@ -65,6 +65,47 @@ struct DiffPaletteTests {
       #expect(add != del)
       #expect(modified != add && modified != del)
     }
+
+    // Hue dominance alone would still pass a wrong-but-same-hue shade drift
+    // (`systemGreen` → `systemMint`) or an accent swap. Lock the CONCRETE resolved
+    // colors of every semantic token under BOTH appearances as a golden, so any shade /
+    // accent regression churns exactly this snapshot (review it, don't blindly regen).
+    GoldenText.assert(paletteColorDigest(palette), "palette-theme-colors")
+  }
+
+  /// Every semantic palette token resolved to a concrete `#RRGGBBAA` hex under aqua and
+  /// darkAqua — the "concrete colors, not just hue" lock.
+  private func paletteColorDigest(_ palette: DiffPalette) -> String {
+    var out: [String] = []
+    for (label, color) in namedPaletteColors(palette) {
+      for (appearanceName, appearance) in [("aqua", aqua), ("darkAqua", darkAqua)] {
+        out.append("\(label) \(appearanceName) \(hex(components(color, appearance)))")
+      }
+    }
+    return out.joined(separator: "\n") + "\n"
+  }
+
+  /// The ordered semantic tokens whose concrete colors the golden locks.
+  private func namedPaletteColors(_ palette: DiffPalette) -> [(String, NSColor)] {
+    [
+      ("addBase", palette.addBase),
+      ("delBase", palette.delBase),
+      ("modifiedBase", palette.modifiedBase),
+      ("codeForeground", palette.codeForeground),
+      ("searchBase", palette.searchBase),
+      ("searchCurrentBase", palette.searchCurrentBase),
+      ("rowTint.addition", palette.rowTint(for: .addition)!),
+      ("rowTint.deletion", palette.rowTint(for: .deletion)!),
+      ("changeBar.addition", palette.changeBar(for: .addition)!),
+      ("changeBar.deletion", palette.changeBar(for: .deletion)!),
+      ("numberColumnFill.addition", palette.numberColumnFill(for: .addition)!),
+      ("numberColumnFill.deletion", palette.numberColumnFill(for: .deletion)!),
+    ]
+  }
+
+  /// `[r,g,b,a]` (0…1) → `#RRGGBBAA`, rounded to 8-bit so the golden is stable.
+  private func hex(_ components: [CGFloat]) -> String {
+    "#" + components.map { String(format: "%02X", Int((min(max($0, 0), 1) * 255).rounded())) }.joined()
   }
 
   // MARK: - OKLab number-column fill (opaque, perceptual, per origin)

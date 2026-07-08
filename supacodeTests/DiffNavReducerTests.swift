@@ -3,6 +3,7 @@ import DependenciesTestSupport
 import Foundation
 import Testing
 
+@testable import SupacodeSettingsFeature
 @testable import supacode
 
 /// Phase 10 reducer surface — scroll-spy (`.diffActiveFileChanged`), jump-to-file
@@ -89,5 +90,75 @@ struct DiffNavReducerTests {
     }
     // delta == 0 is a no-op.
     await store.send(.diffExpandContext(fileID: "a.swift", delta: 0))
+  }
+}
+
+/// Deeplink guard around a surface-less diff tab. `.surface` and `.surfaceSplit` are
+/// SEPARATE `Deeplink.WorktreeAction` cases that both route through
+/// `validateSurface` (AppFeature). The existing `.surface` rejection lives in
+/// `AppFeatureCommandPaletteTests`; this pins the promised `.surfaceSplit` sibling so a
+/// future edit that guards only `.surface` can't let a split-surface deeplink mutate a
+/// diff tab and slip past coverage.
+@MainActor
+struct DiffTabSurfaceSplitDeeplinkTests {
+  private func makeWorktree(id: String, name: String, repoRoot: String) -> Worktree {
+    Worktree(
+      id: WorktreeID(id),
+      name: name,
+      detail: "detail",
+      workingDirectory: URL(fileURLWithPath: id),
+      repositoryRootURL: URL(fileURLWithPath: repoRoot)
+    )
+  }
+
+  private func makeRepository(id: String, worktrees: [Worktree]) -> Repository {
+    Repository(
+      id: RepositoryID(id),
+      rootURL: URL(fileURLWithPath: id),
+      name: "repo",
+      worktrees: IdentifiedArray(uniqueElements: worktrees)
+    )
+  }
+
+  @Test(.dependencies) func surfaceSplitDeeplinkTargetingDiffTabIsRejected() async {
+    // A `surfaceSplit` deeplink aimed at a surface-less diff tab must be rejected with a
+    // clear "Not a terminal tab" alert and must not mutate any terminal surface.
+    let worktree = makeWorktree(id: "/tmp/repo-diff/wt-1", name: "wt-1", repoRoot: "/tmp/repo-diff")
+    let repository = makeRepository(id: "/tmp/repo-diff", worktrees: [worktree])
+    var repositoriesState = RepositoriesFeature.State()
+    repositoriesState.repositories = [repository]
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: repositoriesState,
+        settings: SettingsFeature.State()
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.tabExists = { _, _ in true }
+      $0.terminalClient.isDiffTab = { _, _ in true }
+      $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
+    }
+    store.exhaustivity = .off
+
+    let tabID = UUID()
+    await store.send(
+      .deeplink(
+        .worktree(
+          id: worktree.id,
+          action: .surfaceSplit(
+            tabID: tabID, surfaceID: UUID(), direction: .horizontal, input: nil, id: nil))))
+    await store.finish()
+
+    // No surface-mutating command reached the terminal (a benign worktree selection
+    // may precede validation, but never a `.splitSurface`).
+    #expect(
+      sent.value.contains {
+        if case .splitSurface = $0 { return true }
+        return false
+      } == false
+    )
+    #expect(store.state.alert != nil)
   }
 }

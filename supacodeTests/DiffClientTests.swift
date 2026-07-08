@@ -372,4 +372,160 @@ struct DiffClientTests {
     #expect(change.oldPath == "a.txt")
     #expect(change.newPath == "b.txt")
   }
+
+  // MARK: - Unicode decode boundary (byte-preserving contract)
+
+  /// `decodeContent` must NOT Unicode-normalize. A café blob committed in NFC
+  /// (`0x65 0xC3 0xA9`) and edited to NFD (`0x65 0xCC 0x81`) must:
+  /// (1) stay decomposed — the added line's scalars carry U+0065 + U+0301 and
+  ///     NEVER the precomposed U+00E9;
+  /// (2) decode as text (`isBinary == false`), never mis-flagged binary; and
+  /// (3) produce a real hunk — NFC and NFD are byte-distinct content, so a
+  ///     normalizing decoder would collapse them and silently drop the diff.
+  /// This is the exact "symbols break" hazard at the data layer.
+  @Test func decodeContentPreservesNFDNotNormalized() async throws {
+    let root = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(root) }
+    // "café\n" precomposed (NFC): c a f é(0xC3 0xA9) \n
+    try GitFixture.writeBytes([0x63, 0x61, 0x66, 0x65, 0xC3, 0xA9, 0x0A], to: "cafe.txt", in: root)
+    try GitFixture.stage("cafe.txt", in: root)
+    try GitFixture.commit("init", in: root)
+    // "café\n" decomposed (NFD): c a f e(0x65) + combining acute(0xCC 0x81) \n
+    try GitFixture.writeBytes([0x63, 0x61, 0x66, 0x65, 0xCC, 0x81, 0x0A], to: "cafe.txt", in: root)
+
+    let provider = LibGit2DiffProvider()
+    let diff = try await provider.changedFiles(at: root)
+    let change = try #require(fileChange(diff, id: "cafe.txt"))
+    #expect(change.status == .modified)
+    #expect(change.isBinary == false)
+
+    let hunks = try await provider.diff(for: change, at: root)
+    let lines = hunks.flatMap(\.lines)
+    // A normalizing decoder would make both sides equal and emit NO hunk.
+    #expect(!lines.isEmpty)
+
+    let addition = try #require(lines.first { $0.origin == .addition })
+    let addScalars = Set(addition.content.unicodeScalars.map(\.value))
+    #expect(addScalars.contains(0x0065))  // base 'e'
+    #expect(addScalars.contains(0x0301))  // combining acute
+    #expect(!addScalars.contains(0x00E9))  // never precomposed 'é'
+
+    // The deleted side must still carry the precomposed NFC scalar, proving the
+    // two byte encodings were preserved distinctly (no normalization on either).
+    let deletion = try #require(lines.first { $0.origin == .deletion })
+    #expect(deletion.content.unicodeScalars.map(\.value).contains(0x00E9))
+  }
+
+  // MARK: - Long-line metadata
+
+  /// A file with a line longer than `longLineCap` (2000) must set
+  /// `hasLongLines == true` on its `FileChange`, so the renderer knows to
+  /// truncate rather than typeset a multi-thousand-char line (a scroll-hang
+  /// cause). A short sibling line must not spuriously flip the flag.
+  @Test func longLineSetsHasLongLinesMetadata() async throws {
+    let root = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(root) }
+    try GitFixture.write("short\n", to: "wide.txt", in: root)
+    try GitFixture.stage("wide.txt", in: root)
+    try GitFixture.commit("init", in: root)
+    // 3000-character single line — well over the 2000 cap, under byteCap/lineCap.
+    let longLine = String(repeating: "a", count: 3_000)
+    try GitFixture.write("short\n\(longLine)\n", to: "wide.txt", in: root)
+
+    let provider = LibGit2DiffProvider()
+    let diff = try await provider.changedFiles(at: root)
+    let change = try #require(fileChange(diff, id: "wide.txt"))
+    #expect(change.status == .modified)
+    #expect(change.isLargeFileCapped == false)
+    #expect(change.hasLongLines)
+
+    // A file whose only change is a short line must NOT report long lines.
+    try GitFixture.write("short one\nshort two\n", to: "narrow.txt", in: root)
+    try GitFixture.stage("narrow.txt", in: root)
+    let diff2 = try await provider.changedFiles(at: root)
+    let narrow = try #require(fileChange(diff2, id: "narrow.txt"))
+    #expect(narrow.hasLongLines == false)
+  }
+
+  // MARK: - Submodule (gitlink) classification
+
+  /// A real gitlink delta (`GIT_FILEMODE_COMMIT` / mode 160000) must classify as
+  /// `FileStatus.submodule`. libgit2 surfaces the gitlink as a synthetic
+  /// `"Subproject commit <sha>"` summary line — that SHA summary is exactly what
+  /// the placeholder renders — and must NOT be followed into the submodule: the
+  /// pointed-to repo's own file bodies (`lib.txt` → "lib") never leak into the
+  /// diff.
+  @Test func submoduleDeltaClassifiedAsSubmodule() async throws {
+    let inner = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(inner) }
+    try GitFixture.write("lib\n", to: "lib.txt", in: inner)
+    try GitFixture.stage("lib.txt", in: inner)
+    try GitFixture.commit("inner init", in: inner)
+    let innerHead = try GitFixture.head(in: inner)
+
+    let root = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(root) }
+    try GitFixture.write("base\n", to: "base.txt", in: root)
+    try GitFixture.stage("base.txt", in: root)
+    try GitFixture.commit("init", in: root)
+    // Add the local repo as a submodule at `sub` (a staged gitlink, uncommitted
+    // so it surfaces as an ADDED gitlink in the working-tree diff). The
+    // file-protocol allowance is required for a local-path submodule clone.
+    try GitFixture.run(
+      ["-c", "protocol.file.allow=always", "submodule", "add", inner.path(percentEncoded: false), "sub"],
+      in: root
+    )
+
+    let provider = LibGit2DiffProvider()
+    let diff = try await provider.changedFiles(at: root)
+    let change = try #require(fileChange(diff, id: "sub"))
+    #expect(change.status == .submodule)
+
+    let contents = try await provider.diff(for: change, at: root).flatMap(\.lines).map(\.content)
+    // Surfaced as a subproject-commit SHA summary, pointing at the inner HEAD.
+    #expect(contents.contains { $0.hasPrefix("Subproject commit") && $0.contains(innerHead) })
+    // NOT followed: the submodule's own file body never leaks into the diff.
+    #expect(!contents.contains { $0.contains("lib") })
+  }
+
+  // MARK: - Symlink (diff the target string, never follow)
+
+  /// A changed symlink (mode 120000) must diff its TARGET STRING, not the
+  /// content of the file it points at. Repointing `link` from `target-a.txt` to
+  /// `target-b.txt` must surface those path strings in the hunk and must NEVER
+  /// leak the pointed-to files' bodies.
+  @Test func symlinkDiffsTargetStringWithoutFollowing() async throws {
+    let root = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(root) }
+    // Distinct bodies so a "followed the link" bug would surface these strings.
+    try GitFixture.write("SECRET-BODY-A-DO-NOT-DIFF\n", to: "target-a.txt", in: root)
+    try GitFixture.write("SECRET-BODY-B-DO-NOT-DIFF\n", to: "target-b.txt", in: root)
+    let linkURL = root.appending(path: "link")
+    try FileManager.default.createSymbolicLink(
+      atPath: linkURL.path(percentEncoded: false),
+      withDestinationPath: "target-a.txt"
+    )
+    try GitFixture.stage("target-a.txt", "target-b.txt", "link", in: root)
+    try GitFixture.commit("init", in: root)
+
+    // Repoint the symlink at the other target (still just a target-string edit).
+    try FileManager.default.removeItem(at: linkURL)
+    try FileManager.default.createSymbolicLink(
+      atPath: linkURL.path(percentEncoded: false),
+      withDestinationPath: "target-b.txt"
+    )
+
+    let provider = LibGit2DiffProvider()
+    let diff = try await provider.changedFiles(at: root)
+    let change = try #require(fileChange(diff, id: "link"))
+    #expect(change.status == .modified)
+    #expect(change.isBinary == false)
+
+    let hunks = try await provider.diff(for: change, at: root)
+    let contents = hunks.flatMap(\.lines).map(\.content)
+    // The diff is over the target STRINGS, not the pointed-to file bodies.
+    #expect(contents.contains { $0.contains("target-a.txt") })
+    #expect(contents.contains { $0.contains("target-b.txt") })
+    #expect(!contents.contains { $0.contains("SECRET-BODY") })
+  }
 }

@@ -332,6 +332,45 @@ struct ChunkTreeBuilderTests {
     #expect(heights.split == expectedSplit)
   }
 
+  /// pierre `computeEstimatedDiffHeights` case 1: a no-body file (identical /
+  /// no-hunk / empty-hunk / rename-pure) estimates to the TOP REGION ONLY — it must
+  /// NOT reserve a phantom `paddingBottom`, or its height (and the multi-file
+  /// scrollbar offset for every file below it) drifts by `paddingBottom`.
+  @Test func estZeroHunkFileSkipsPaddingBottom() {
+    let metrics = ChunkLayoutMetrics.production
+    // With the file header enabled, the top region is header + paddingTop.
+    let topRegion = metrics.diffHeaderHeight + metrics.paddingTop
+    #expect(metrics.paddingBottom > 0)  // guards the assertion below is non-trivial
+
+    // (1) no-hunk file (identical / no changes).
+    let noHunk = ChunkTreeBuilder.estimatedHeights(file: DiffFixture.file(), hunks: [])
+    #expect(noHunk.unified == topRegion)
+    #expect(noHunk.split == topRegion)
+    #expect(noHunk.unified != topRegion + metrics.paddingBottom)  // paddingBottom NOT reserved
+
+    // (2) an empty-line hunk collapses to the same no-body estimate.
+    let emptyHunk = ChunkTreeBuilder.estimatedHeights(file: DiffFixture.file(), hunks: [DiffFixture.hunk([])])
+    #expect(emptyHunk.unified == topRegion)
+    #expect(emptyHunk.split == topRegion)
+
+    // (3) rename-pure (similarity 100, zero content hunks) — same skip.
+    let renamed = FileChange(
+      oldPath: "old/name.swift", newPath: "new/name.swift", status: .renamed,
+      addedLines: 0, removedLines: 0, isBinary: false, isLargeFileCapped: false,
+      hasLongLines: false, similarity: 100)
+    let renamePure = ChunkTreeBuilder.estimatedHeights(file: renamed, hunks: [])
+    #expect(renamePure.unified == topRegion)
+    #expect(renamePure.split == topRegion)
+
+    // Positive control: a real one-line hunk DOES reserve paddingBottom (so the skip
+    // above is a genuine case-1 carve-out, not paddingBottom being globally absent).
+    let withBody = ChunkTreeBuilder.estimatedHeights(
+      file: DiffFixture.file(), hunks: [DiffFixture.hunk([DiffFixture.line(.addition, new: 1, "a")])],
+      options: ChunkTreeBuilder.Options(expandUnchanged: true))
+    #expect(withBody.unified == topRegion + metrics.lineHeight + metrics.paddingBottom)
+    #expect(withBody.unified > noHunk.unified + metrics.paddingBottom)
+  }
+
   @Test func estExpandUnchangedRowsNoSeparators() {
     let hunk = DiffFixture.hunk(
       [
