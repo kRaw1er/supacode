@@ -1,4 +1,5 @@
 import AppKit
+import ComposableArchitecture
 import SwiftUI
 
 /// Resolves a tree `.widget` leaf's scalar payload into the concrete `DiffWidget`
@@ -29,6 +30,12 @@ struct DiffWidgetResolver {
   var onExpand: (GapKey, ExpansionState.Step, ExpansionState.Direction) -> Void = { _, _, _ in }
   var onEditComment: (UUID) -> Void = { _ in }
   var onResolveConflictInEditor: () -> Void = {}
+  /// The live inline-composer store for an anchor being composed / edited, or `nil`
+  /// when this anchor's thread is in display mode. Injected by the viewport seam
+  /// (`DiffViewerRepresentable.makeResolver`) from the reducer's presented
+  /// `\.composer` child store, so opening the composer flips the widget to `.editing`
+  /// (pierre/GitHub inline comment — NO modal sheet).
+  var composerStore: (UUID) -> StoreOf<CommentComposer>? = { _ in nil }
 
   func resolve(_ widget: Widget, coalescer: LayoutCoalescer) -> (any DiffWidget)? {
     switch widget.payload {
@@ -69,7 +76,8 @@ struct DiffWidgetResolver {
       let thread = comments.filter { $0.id == anchorID }
       return CommentThreadWidget(
         key: widget.key, model: CommentThreadModel(anchorID: anchorID, comments: thread),
-        viewportHeight: viewportHeight, coalescer: coalescer, onEdit: onEditComment)
+        viewportHeight: viewportHeight, coalescer: coalescer, composerStore: composerStore(anchorID),
+        onEdit: onEditComment)
 
     case .plainFallback(let lineNumber, let text):
       return PlainFallbackWidget(key: widget.key, lineNumber: lineNumber, text: text, coalescer: coalescer)

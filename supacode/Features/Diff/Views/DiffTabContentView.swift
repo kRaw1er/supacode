@@ -33,9 +33,6 @@ struct DiffTabContentView: View {
       body(document: document)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .sheet(item: $store.scope(state: \.composer, action: \.composer)) { composerStore in
-      CommentComposerView(store: composerStore)
-    }
     .alert($store.scope(state: \.alert, action: \.alert))
     .confirmationDialog($store.scope(state: \.discardConfirm, action: \.discardConfirm))
   }
@@ -142,16 +139,28 @@ struct DiffTabContentView: View {
     case .loaded:
       if let document {
         let key = DiffDocumentKey(path: filePath, source: source)
+        // The presented inline-composer store, scoped to THIS tab only: a composer
+        // whose draft belongs to another file's diff must not flip a widget here or
+        // seed a transient editor in this tree.
+        let composerBelongsHere =
+          store.composer.map { $0.draft.filePath == filePath && $0.draft.source == source } ?? false
         DiffViewerRepresentable(
           file: document.file,
           hunks: document.hunks,
           comments: store.comments.filter { $0.filePath == filePath && $0.source == source },
           mode: store.diffViewMode,
           generation: document.generation,
+          filePath: filePath,
+          source: source,
+          expansion: document.expansion,
+          revealed: document.revealed,
+          composerStore: composerBelongsHere ? $store.scope(state: \.composer, action: \.composer).wrappedValue : nil,
+          composerDraft: composerBelongsHere ? store.composer?.draft : nil,
           wordDiffEnabled: !document.wordDiffDisabled,
           oldStyleRuns: document.oldStyleRuns,
           newStyleRuns: document.newStyleRuns,
           syntaxVersion: document.styleRunsVersion,
+          send: { store.send($0) },
           onVisibleRangeChanged: { window in
             store.send(.highlightVisibleRangeChanged(key: key, window: window))
           },
