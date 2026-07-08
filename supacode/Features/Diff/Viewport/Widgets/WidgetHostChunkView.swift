@@ -29,21 +29,19 @@ final class WidgetHostChunkView: NSView, DiffViewportRecyclable {
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+  /// The width the hosted SwiftUI content was last laid out at — so `layout()` only forces
+  /// a re-flow when our width actually changed, not on every pass.
+  private var laidOutWidth: CGFloat = -1
+
   /// Mount `widget`'s host view and connect its height reports to `coalescer`. The host is
   /// pinned to FILL us via Auto Layout (all four edges) so the layout engine proposes our
   /// size to SwiftUI (a plain `frame` set on an `NSHostingView(sizingOptions: [])` does not).
   ///
-  /// KNOWN-STILL-BROKEN (handoff note): the hunk-header / expander SwiftUI content still
-  /// renders collapsed at the LEFT. ROOT (proven by `[wframe]` logging): on the FIRST layout
-  /// after `apply`, the scroll view is not yet sized, so `DiffViewportController.place` frames
-  /// THIS container at `documentView.bounds.width == 0` → container=(x,y,0,h). The hosting
-  /// view lays its content out at width 0, and does NOT re-flow when the container later
-  /// grows to full width (confirmed: it never recovers on a later render). Line rows survive
-  /// because `LineRowView.draw` re-runs at the real width; a hosted SwiftUI view does not.
-  /// FIX DIRECTIONS for the next pass: (a) don't materialize / skip `place` while
-  /// `documentView.bounds.width == 0` so the first render is already full-width; or (b) force
-  /// the hosted view to re-flow when the container width changes (re-mount / swap `rootView`
-  /// in `configureWidget` when `width` differs from the mounted width).
+  /// The viewport owns the width (set on THIS container in `place`); the hosted SwiftUI view
+  /// reports only its height back through `HeightReporter`. A host first mounted while the
+  /// document was still 0-wide (an `apply` that ran before the scroll view was sized) would
+  /// otherwise stay collapsed at the left, because `NSHostingView(sizingOptions: [])` does not
+  /// re-flow its content when the container later grows — `layout()` below forces that re-flow.
   func mount(_ widget: some DiffWidget, key: WidgetKey, width: CGFloat, coalescer: LayoutCoalescer) {
     hosted?.removeFromSuperview()
     self.coalescer = coalescer
@@ -61,7 +59,28 @@ final class WidgetHostChunkView: NSView, DiffViewportRecyclable {
     hosted = host
     mountedKey = key
     isOccupied = widget.occupiesHostExclusively
+    laidOutWidth = -1  // force the first `layout()` to flow the SwiftUI content to our real width
     frame.size.height = widget.estimatedHeight
+  }
+
+  /// A manual `frame` set on a non-Auto-Layout `NSView` does NOT schedule `layout()` on its
+  /// own (AppKit, unlike UIKit). The viewport resizes this container in `place`, so invalidate
+  /// layout on a size change to drive the re-flow in `layout()`.
+  override func setFrameSize(_ newSize: NSSize) {
+    let widthChanged = newSize.width != frame.size.width
+    super.setFrameSize(newSize)
+    if widthChanged { needsLayout = true }
+  }
+
+  /// `super.layout()` solves the fill constraints so `hosted.frame` tracks our bounds, but an
+  /// `NSHostingView(sizingOptions: [])` does not re-propose a changed width to its SwiftUI
+  /// content on its own — so when our width changes, force it to re-flow. Without this a header
+  /// mounted at width 0 (pre-sizing `apply`) renders collapsed at the left forever.
+  override func layout() {
+    super.layout()
+    guard let hosted, bounds.width != laidOutWidth else { return }
+    laidOutWidth = bounds.width
+    hosted.layoutSubtreeIfNeeded()
   }
 
   /// Offer this already-mounted host to `widget` (a pool recycle). Returns whether

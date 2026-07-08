@@ -78,6 +78,46 @@ struct DiffWidgetHostTests {
     #expect(tree.widgetNode(for: .commentThread(anchorID: id))?.summary.height(.unified) == 40)  // reaggregated
   }
 
+  // MARK: - "hunk header collapsed at the LEFT on first open" — a viewport applied BEFORE
+  //         the scroll view is sized (width 0) must NOT mount a widget host at width 0; the
+  //         first real materialization happens once the viewport has a real width, so the
+  //         hosted SwiftUI content is laid out full-width from the start.
+
+  @Test func firstOpenBeforeSizingDefersMaterializationToRealWidth() {
+    // `apply` runs in `makeNSView` BEFORE SwiftUI sizes the representable — the scroll view is
+    // still 0-wide (the real first-open order that used to mount the header host collapsed).
+    let controller = ViewportTestSupport.controller(width: 0, clipHeight: 600)
+    controller.apply(tree: ViewportTestSupport.contextLeaves(Array(1...20)), mode: .unified, scrollPreserving: false)
+    let anchorID = UUID()
+    let widgetID = controller.insertCommentWidget(
+      side: .new, startLine: 3, endLine: 3, anchorID: anchorID, estimatedHeight: 60)
+    #expect(widgetID != nil)
+    controller.layoutVisibleChunks()
+
+    // Nothing materializes while the viewport is 0-wide — so NO host is ever mounted at width 0.
+    #expect(controller.documentView.bounds.width == 0)
+    #expect(controller.totalUsedViewCount == 0)
+    #expect(controller.pools[.widget(.commentThread)]?.getView(forKey: widgetID!) == nil)
+
+    // The scroll view gets its real size; the sizing-triggered layout re-fits the document and
+    // mounts the widget host at full width — the hosted SwiftUI view lays out full-width, never
+    // collapsed at the left.
+    controller.scrollView.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+    controller.scrollView.tile()
+    controller.layoutVisibleChunks()
+
+    #expect(controller.documentView.bounds.width == 800)
+    let host = controller.pools[.widget(.commentThread)]?.getView(forKey: widgetID!) as? WidgetHostChunkView
+    #expect(host != nil)
+    #expect(host?.frame.width == 800)  // the viewport gave the container the real width
+
+    // Flush a layout cycle (AppKit does this every frame; there is no run loop in a headless
+    // test) — the host's fill constraints solve and its `layout()` re-flows the hosted SwiftUI
+    // view to the container width, so the header content is full-width, not collapsed at 0.
+    controller.documentView.layoutSubtreeIfNeeded()
+    #expect(host?.hosted?.frame.width == 800)
+  }
+
   // MARK: - B §3/§20 — an occupied (.editing) host is not handed to another chunk;
   //          the autoscroller's display link stops on unmount
 

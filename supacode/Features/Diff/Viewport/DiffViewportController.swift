@@ -220,6 +220,19 @@ final class DiffViewportController: NSObject {
     // So we write the measured heights back and RE-PLACE against them synchronously,
     // bounded by `maxMeasurePasses`. A non-wrapping file measures == estimate on the first
     // sweep, so it converges in one pass (no added cost for the 100k-line hot path).
+    // Keep the document's width locked to the clip on every pass. `apply` can run in
+    // `makeNSView` BEFORE SwiftUI sizes the scroll view (documentView width == 0); nothing
+    // else re-fits the document on a pure resize, so without this the first real layout would
+    // place every chunk at a stale width. A `.widget` host mounted at width 0 renders its
+    // SwiftUI content collapsed at the left and never recovers, so we must reach real width
+    // BEFORE the first materialization (line rows recover on their own via re-typeset; a
+    // hosted SwiftUI view does not).
+    if documentView.bounds.width != scrollView.contentSize.width { resizeDocument() }
+    // Defer materialization until the viewport has a real width — the first placement then
+    // mounts every widget host at full width instead of at 0 (pierre never renders a 0-wide
+    // viewport). The scroll view's sizing fires a fresh `layout()` → `layoutVisibleChunks`.
+    guard documentView.bounds.width > 0 else { return }
+
     measurePass = 0
     while true {
       let placed = placeVisibleChunksOnce()
