@@ -77,4 +77,49 @@ struct DiffViewportPerfBaselineTests {
     // Not a gate — only fail on an absurd regression (e.g. an accidental O(n²)).
     #expect(Self.ms(scrollT) < 2_000, "a single scroll pass took \(Self.ms(scrollT))ms — that is not O(window)")
   }
+
+  /// The observed-in-the-app symptom: scroll FPS drops as the file grows (60 → 30 →
+  /// 15) and plateaus near the leaf-span cap. A single `scroll(toY:)` (baseline above)
+  /// does NOT reproduce it because it neither steps continuously NOR draws. This
+  /// simulates a real continuous drag — many small scroll steps, each followed by a
+  /// forced `draw(_:)` of the visible strip — for one-leaf trees of growing size. If
+  /// per-frame cost scales with the leaf size, the render path is NOT O(window).
+  @Test func continuousScrollFrameCostByLeafSize() {
+    for leafRows in [100, 500, 1_000, 2_500, 5_000] {
+      let tree = ChunkTreeFixture.largeDistinct(rows: leafRows)  // one leaf (≤ maxLeafSpan)
+      let controller = ViewportTestSupport.controller()  // 800×600
+      controller.apply(tree: tree, mode: .unified, scrollPreserving: false)
+      Self.forceDraw(controller)  // warm first-typeset out of the timed loop
+
+      // CONSTANT scroll velocity (fixed px/step), NOT "whole leaf in N steps" — else
+      // the step size would scale with leaf size and inflate newly-exposed typesets
+      // per frame (a benchmark artifact, not the real O(leaf) cost). A real drag moves
+      // ~constant px/s regardless of file size.
+      let steps = 60
+      let pxPerStep: CGFloat = 20  // one row per frame
+      var layoutMs = 0.0
+      var drawMs = 0.0
+      for step in 0..<steps {
+        layoutMs += Self.ms(Self.clock.measure { controller.scroll(toY: CGFloat(step) * pxPerStep) })
+        drawMs += Self.ms(Self.clock.measure { Self.forceDraw(controller) })
+      }
+      let perFrame = (layoutMs + drawMs) / Double(steps)
+      print(
+        String(
+          format: "[scroll-frame] leafRows=%5d  perFrame=%6.2fms (~%3.0f fps)  layout=%5.2fms  draw=%5.2fms",
+          leafRows, perFrame, perFrame > 0 ? min(60, 1_000 / perFrame) : 60,
+          layoutMs / Double(steps), drawMs / Double(steps)))
+    }
+    #expect(Bool(true))  // measurement only
+  }
+
+  /// Render the visible strip through the real `draw(_:)` path (into an offscreen
+  /// bitmap) so the per-frame cost includes drawing, not just layout.
+  private static func forceDraw(_ controller: DiffViewportController) {
+    let rect = controller.visibleRect
+    guard rect.width > 0, rect.height > 0,
+      let bitmap = controller.documentView.bitmapImageRepForCachingDisplay(in: rect)
+    else { return }
+    controller.documentView.cacheDisplay(in: rect, to: bitmap)
+  }
 }

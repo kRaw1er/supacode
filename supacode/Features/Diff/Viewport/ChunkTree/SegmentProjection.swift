@@ -67,6 +67,33 @@ extension LineSegment {
     )
   }
 
+  /// The FIRST rendered row in `mode` — the same value as `renderedRows(mode).first`
+  /// but WITHOUT building the whole ≤maxLeafSpan array (the leaf's canonical
+  /// deletions-then-additions order makes it O(1) for the common case). The scroll
+  /// anchor keys off this every place, so building the full array there was an
+  /// O(leaf)-per-frame cost.
+  func firstRenderedRow(_ mode: DiffViewMode) -> RenderedRow? {
+    switch classification {
+    case .context, .contextExpanded:
+      guard let line = windowedLines.first else { return nil }
+      return RenderedRow(
+        oldNumber: line.oldLineNumber, newNumber: line.newLineNumber, origin: .context, isMarker: false)
+    case .change:
+      // Lines are canonicalized deletions-then-additions, so `firstDel` is O(1).
+      let firstDel = windowedLines.first { $0.origin == .deletion }
+      let firstAdd = windowedLines.first { $0.origin == .addition }
+      if mode == .unified {
+        guard let line = firstDel ?? firstAdd else { return nil }
+        return RenderedRow(
+          oldNumber: line.oldLineNumber, newNumber: line.newLineNumber, origin: line.origin, isMarker: false)
+      }
+      guard firstDel != nil || firstAdd != nil else { return nil }
+      return RenderedRow(
+        oldNumber: firstDel?.oldLineNumber, newNumber: firstAdd?.newLineNumber,
+        origin: firstAdd != nil ? .addition : .deletion, isMarker: false)
+    }
+  }
+
   /// The ordered rendered rows in `mode`. `count == baseSummary().count(mode)`
   /// by construction. For the golden projection + the variable-height walk.
   func renderedRows(_ mode: DiffViewMode) -> [RenderedRow] {

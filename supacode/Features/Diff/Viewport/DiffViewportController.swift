@@ -313,7 +313,7 @@ final class DiffViewportController: NSObject {
     let window = LayoutWindow(minY: minY, maxY: maxY)
     var chunkTop = firstChunkTop(atOrBelow: minY)
     while let top = chunkTop, top.yOrigin < maxY {
-      let rowCount = top.chunk.baseSummary(metrics: tree.metrics).count(mode)
+      let rowCount = renderedRowCount(top)
       let next = tree.seek(index: top.rowIndex + rowCount, mode: mode)
       let height = (next?.yOrigin ?? tree.totalHeight(mode)) - top.yOrigin
       place(top, height: height, width: width, window: window, live: &live)
@@ -325,6 +325,14 @@ final class DiffViewportController: NSObject {
       pool.enqueueViews(notInSet: live[kind] ?? [])
     }
     return placed
+  }
+
+  /// Rendered-row count of a placed chunk in the current mode — O(1) from the tree's
+  /// cached `node.summary` (a leaf's base counts never change; only measured HEIGHTS
+  /// do). The old `chunk.baseSummary(...).count(mode)` re-filtered the whole
+  /// ≤maxLeafSpan leaf on EVERY place of EVERY frame — an O(leaf) scroll cost.
+  private func renderedRowCount(_ top: ChunkHit) -> Int {
+    tree.nodesByID[top.id]?.summary.count(mode) ?? top.chunk.baseSummary(metrics: tree.metrics).count(mode)
   }
 
   /// The chunk (leaf / widget) that contains `yOffset` — we seek the row at that
@@ -410,7 +418,7 @@ final class DiffViewportController: NSObject {
   /// typesets only these rows and estimates the rest.
   private func lineRenderWindow(_ placement: Placement) -> (rows: Range<Int>, top: CGFloat) {
     let top = placement.top
-    let rowCount = top.chunk.baseSummary(metrics: tree.metrics).count(mode)
+    let rowCount = renderedRowCount(top)
     guard rowCount > 0 else { return (0..<0, 0) }
     let leafTop = top.yOrigin
     let leafBottom = leafTop + placement.height
@@ -478,7 +486,7 @@ final class DiffViewportController: NSObject {
   /// rendered row's `(lineNumber, side)`; a widget keys off its `ChunkID`.
   static func anchorIdentity(for hit: ChunkHit, mode: DiffViewMode) -> ScrollAnchor.Identity {
     guard let segment = hit.chunk.lineSegment else { return .widget(hit.id) }
-    guard let first = segment.renderedRows(mode).first else { return .widget(hit.id) }
+    guard let first = segment.firstRenderedRow(mode) else { return .widget(hit.id) }
     if let new = first.newNumber { return .line(lineNumber: new, side: .new) }
     if let old = first.oldNumber { return .line(lineNumber: old, side: .old) }
     return .widget(hit.id)
@@ -707,7 +715,7 @@ final class DiffViewportController: NSObject {
     guard let rowIndex = tree.rowIndex(for: (chunk: id, localRow: 0), mode: mode),
       let top = tree.seek(index: rowIndex, mode: mode)
     else { return nil }
-    let rowCount = top.chunk.baseSummary(metrics: tree.metrics).count(mode)
+    let rowCount = renderedRowCount(top)
     let next = tree.seek(index: rowIndex + rowCount, mode: mode)
     let height = (next?.yOrigin ?? tree.totalHeight(mode)) - top.yOrigin
     return CGRect(x: 0, y: top.yOrigin, width: documentView.bounds.width, height: height)

@@ -271,10 +271,19 @@ final class ChunkTree {
     var newLo = Int.max
     var newHi = Int.min
     var hit: ChunkHit? = top
+    // Memoize the per-leaf rendered-row array across the walk: consecutive visible
+    // rows share a leaf, so rebuilding `renderedRows(mode)` PER ROW was O(visible ×
+    // leaf) — the dominant per-frame scroll cost on a big leaf. Rebuild only when the
+    // leaf changes ⇒ O(distinct visible leaves × leaf) + O(visible).
+    var cachedID: ChunkID?
+    var cachedRows: [RenderedRow] = []
     while let current = hit, current.yOrigin < rect.maxY {
-      let rendered = current.chunk.renderedRows(mode)
-      if current.localRow >= 0, current.localRow < rendered.count {
-        let row = rendered[current.localRow]
+      if current.id != cachedID {
+        cachedRows = current.chunk.renderedRows(mode)
+        cachedID = current.id
+      }
+      if current.localRow >= 0, current.localRow < cachedRows.count {
+        let row = cachedRows[current.localRow]
         if let old = row.oldNumber {
           oldLo = min(oldLo, old)
           oldHi = max(oldHi, old)
