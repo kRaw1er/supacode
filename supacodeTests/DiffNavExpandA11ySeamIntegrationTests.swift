@@ -29,11 +29,10 @@ import Testing
 ///   into the real reducer (the same path the gutter uses); VoiceOver focus mirrors into
 ///   the keyboard cursor and back through the wired `setKeyboardFocus` / `onFocusRow`.
 ///
-/// KNOWN BUG surfaced here (documented, not papered over): F69 — the KEYBOARD
-/// whole-file / context expands (`.diffExpandWholeFile` / `.diffExpandContext`) mutate
-/// `ExpansionState` but fire NO blob-slice effect (`DiffReviewFeature.swift:784-814`),
-/// so `state.revealed` stays empty and the viewport reveals nothing until a slice
-/// arrives — unlike the per-gap `.expandGap` path (which DOES slice).
+/// F69 (FIXED): the KEYBOARD whole-file / context expands (`.diffExpandWholeFile` /
+/// `.diffExpandContext`) now fire the eager blob slice — like the per-gap `.expandGap`
+/// path — so `state.revealed` populates and the viewport reveals the context. This
+/// suite drives that fix end to end (`keyboardExpandFileRevealsGapInteriorRoundTrip`).
 @MainActor
 struct DiffNavExpandA11ySeamIntegrationTests {
   // MARK: - Fixtures
@@ -241,15 +240,14 @@ struct DiffNavExpandA11ySeamIntegrationTests {
     #expect(coord.controller.tree === treeInstance)
   }
 
-  // MARK: - F2 / F69 — keyboard `o` expands ExpansionState but reveals nothing (no slice)
+  // MARK: - F2 / F7 / F69(fixed) — keyboard `o` (whole-file) expands AND reveals the gap
 
   /// Keyboard `o` (expandFile) routes through the WIRED nav to the real reducer, which
-  /// flips the document to `.full`. But `.diffExpandWholeFile` fires NO blob-slice
-  /// effect, so `state.revealed` stays empty and `syncExpansion` reveals nothing — the
-  /// gap interior never materializes. The reducer round trip (expansion == .full) is
-  /// asserted directly; the CORRECT viewport outcome (gap revealed) is wrapped in
-  /// `withKnownIssue` because it exposes the real F69 bug.
-  @Test func keyboardExpandFileFlipsFullButRevealsNothingF69() async throws {
+  /// flips the document to `.full` AND fires the eager blob slice (the F69 fix — this
+  /// path used to skip the slice, so `o` revealed nothing). `.gapSliceLoaded` populates
+  /// `state.revealed`; feeding that back through `syncExpansion` splices the gap interior
+  /// (new line 20) onto the tree — proven end to end, no `withKnownIssue`.
+  @Test func keyboardExpandFileRevealsGapInteriorRoundTrip() async throws {
     let coord = sizedCoordinator()
     let (file, hunks) = twoHunkFixture()
     var captured: [DiffReviewFeature.Action] = []
@@ -265,30 +263,27 @@ struct DiffNavExpandA11ySeamIntegrationTests {
     coord.keyboardNav?.perform(.expandFile)
     #expect(captured == [.diffExpandWholeFile(fileID: file.id)])
 
-    // The reducer round trip IS correct: the document flips to whole-file `.full`.
+    // Feed it into the REAL reducer: it flips to `.full` AND slices the newly-revealed
+    // gaps (F69 fix). twoHunkFixture reveals the inter-hunk gap (1) and the trailing gap.
     let key = DiffDocumentKey(path: file.id, source: .workingTree)
-    let store = makeStore(loadedState(file: file, hunks: hunks, worktree: gitWorktree()))
+    let store = makeStore(loadedState(file: file, hunks: hunks, worktree: gitWorktree())) { range in
+      range.map {
+        DiffLine(origin: .context, oldLineNumber: $0, newLineNumber: $0, content: "gap\($0)", noNewlineAtEof: false)
+      }
+    }
     await store.send(captured[0])
+    await store.receive(\.gapSliceLoaded)
+    await store.receive(\.gapSliceLoaded)
     await store.finish()
     #expect(store.state.openDiffs[key]?.expansion == .full)
-    // …but no blob slice was requested, so the handoff cache stays empty (the bug).
-    #expect(store.state.openDiffs[key]?.revealed.isEmpty == true)
+    // F69 fixed: the slice ran, so the reducer's handoff cache is populated.
+    let revealed = store.state.openDiffs[key]?.revealed ?? [:]
+    #expect(revealed[1]?.isEmpty == false)
 
-    // CORRECT behaviour: a whole-file expand should reveal the gap interior in the
-    // viewport. It does NOT, because `revealed` is empty and `syncExpansion` only
-    // splices a gap once its slice is present — documented F69.
-    coord.syncExpansion(
-      expansion: .full, revealed: store.state.openDiffs[key]?.revealed ?? [:], hunks: hunks, file: file,
-      rebuilt: false)
-    withKnownIssue(
-      """
-      BUG F69: .diffExpandWholeFile (DiffReviewFeature.swift:784-794) flips ExpansionState to .full but fires \
-      no blob-slice effect, so state.revealed stays empty and syncExpansion reveals nothing — the keyboard \
-      whole-file expand shows no context until a slice arrives.
-      """
-    ) {
-      #expect(renderedNewNumbers(coord.controller.tree).contains(20))
-    }
+    // Round-trip the reducer's expansion + revealed back through the coordinator: the
+    // gap interior (new line 20) now materializes in the viewport.
+    coord.syncExpansion(expansion: .full, revealed: revealed, hunks: hunks, file: file, rebuilt: false)
+    #expect(renderedNewNumbers(coord.controller.tree).contains(20))
   }
 
   // MARK: - F2 — revealFirstChange lands the first change row AND scrolls the viewport

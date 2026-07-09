@@ -782,36 +782,73 @@ struct DiffReviewFeature {
         return .none
 
       case .diffExpandWholeFile(let fileID):
-        // Declarative whole-file reveal (Phase-7 `ExpansionState.full`). The ChunkTree
-        // viewport is a projection of `expansion` (the source of truth) and windows the
-        // revealed lines lazily on scroll, so no eager blob slice is needed here — the
-        // per-gap `.expandGap` path owns the incremental slice.
+        // Declarative whole-file reveal (Phase-7 `ExpansionState.full`) AND the eager
+        // blob slice that materializes it. Flipping the state is NOT enough: the
+        // viewport splices the gap interior from `document.revealed`, which only a slice
+        // populates — this path used to skip it, so `o` revealed nothing (F69). Mirrors
+        // `.expandGap`, but across every gap; bounded per gap to `maxEagerSliceLines`
+        // (the rest windows in on scroll). The token bumps ONLY when a slice actually
+        // fires, so a no-gap file stays a pure `.full` state flip.
+        var wholeFileEffects: [Effect<Action>] = []
         for key in state.openDiffs.keys where key.path == fileID {
           guard var document = state.openDiffs[key], document.expansion != .full else { continue }
+          let previous = document.expansion
           document.expansion = .full
+          let plan = Self.expandSlicePlan(document: document, previous: previous)
+          if let worktree = state.selectedWorktree, !plan.isEmpty {
+            state.diffLoadToken &+= 1
+            let token = state.diffLoadToken
+            document.generation = token
+            wholeFileEffects += plan.map { entry in
+              Self.sliceEffect(
+                SliceRequest(
+                  key: key, gap: entry.gap, file: document.file, source: key.source, worktree: worktree,
+                  ranges: entry.ranges, oldLineDelta: document.gapOldLineDelta(entry.gap), token: token),
+                blobSliceClient: blobSliceClient)
+            }
+          }
           state.openDiffs[key] = document
         }
-        return .none
+        return wholeFileEffects.isEmpty ? .none : .merge(wholeFileEffects)
 
       case .diffExpandContext(let fileID, let delta):
+        var contextEffects: [Effect<Action>] = []
         for key in state.openDiffs.keys where key.path == fileID {
           guard var document = state.openDiffs[key] else { continue }
           if delta > 0 {
             // Grow every gap's context by one fine step, both ends (`.full` is
-            // all-or-nothing and a no-op under `expand`).
+            // all-or-nothing and a no-op under `expand`), then eager-slice the newly
+            // revealed lines so the viewport actually shows them (F69).
+            let previous = document.expansion
             for gap in 0...document.hunks.count {
               document.expansion.expand(gap: gap, by: .fine, direction: .both)
             }
+            let plan = Self.expandSlicePlan(document: document, previous: previous)
+            if let worktree = state.selectedWorktree, !plan.isEmpty {
+              state.diffLoadToken &+= 1
+              let token = state.diffLoadToken
+              document.generation = token
+              contextEffects += plan.map { entry in
+                Self.sliceEffect(
+                  SliceRequest(
+                    key: key, gap: entry.gap, file: document.file, source: key.source, worktree: worktree,
+                    ranges: entry.ranges, oldLineDelta: document.gapOldLineDelta(entry.gap), token: token),
+                  blobSliceClient: blobSliceClient)
+              }
+            }
           } else if delta < 0 {
-            // Re-hide: drop back to the collapsed default.
+            // Re-hide: drop back to the collapsed default and cancel any in-flight slice
+            // for this document's gaps (mirrors `.collapseGap`, so a late slice cannot
+            // repopulate the just-cleared `revealed`).
             document.expansion = .collapsed
             document.revealed.removeAll()
+            contextEffects += (0...document.hunks.count).map { Effect<Action>.cancel(id: CancelID.slice(key, $0)) }
           } else {
             continue
           }
           state.openDiffs[key] = document
         }
-        return .none
+        return contextEffects.isEmpty ? .none : .merge(contextEffects)
 
       // MARK: Phase 4 — neon syntax highlighting driver
 
@@ -1168,6 +1205,26 @@ struct DiffReviewFeature {
       }
     }
     .cancellable(id: CancelID.slice(request.key, request.gap), cancelInFlight: true)
+  }
+
+  /// The per-gap newly-revealed NEW-side ranges when a document's expansion grows
+  /// from `previous` → `document.expansion`, each bounded to `maxEagerSliceLines`.
+  /// Shared by the keyboard whole-file / context expands (which grow MANY gaps at
+  /// once, unlike the single-gap `.expandGap`). Empty ⇒ nothing to slice, so the
+  /// caller leaves the load token untouched (a pure declarative state flip).
+  private static func expandSlicePlan(
+    document: DiffDocument, previous: ExpansionState
+  ) -> [(gap: Int, ranges: [Range<Int>])] {
+    var plan: [(gap: Int, ranges: [Range<Int>])] = []
+    for gap in 0...document.hunks.count {
+      let size = document.gapRangeSize(gap)
+      let isTrailing = document.isTrailingGap(gap)
+      let before = previous.resolve(gap: gap, rangeSize: size, isTrailing: isTrailing)
+      let after = document.expansion.resolve(gap: gap, rangeSize: size, isTrailing: isTrailing)
+      let ranges = document.newlyRevealedRanges(gap: gap, before: before, after: after, cap: Self.maxEagerSliceLines)
+      if !ranges.isEmpty { plan.append((gap: gap, ranges: ranges)) }
+    }
+    return plan
   }
 
   /// The whole-`source` stream request for one open document (Phase 9). The
