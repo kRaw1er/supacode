@@ -53,7 +53,7 @@ struct DiffSeamSwapReducerTests {
       $0.continuousClock = TestClock()
       $0.date = .constant(Date(timeIntervalSince1970: 0))
       $0.terminalClient.send = { _ in }
-      $0.diffClient.diff = { _, _, _, _ in hunks }
+      $0.diffClient.diff = { _, _, _, _, _ in hunks }
     }
     store.exhaustivity = .off
 
@@ -138,7 +138,7 @@ struct DiffSeamSwapReducerTests {
       DiffReviewFeature()
     } withDependencies: {
       $0.continuousClock = TestClock()
-      $0.diffClient.diff = { _, _, _, _ in
+      $0.diffClient.diff = { _, _, _, _, _ in
         diffCalls.withValue { $0 += 1 }
         return []
       }

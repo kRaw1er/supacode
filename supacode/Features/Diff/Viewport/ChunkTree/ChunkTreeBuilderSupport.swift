@@ -95,6 +95,14 @@ extension ChunkTreeBuilder {
     default: .noChanges
     }
   }
+
+  /// The empty-content placeholder for a file, threading the concrete octal modes
+  /// onto a `.modeChangeOnly` so the resolver renders `"100644 → 100755"` instead of
+  /// the generic branch; every other status defers to the `FileStatus` overload.
+  static func emptyPlaceholder(for file: FileChange) -> FilePlaceholder {
+    guard file.status == .modeChanged else { return emptyPlaceholder(for: file.status) }
+    return .modeChangeOnly(oldMode: file.oldMode ?? "", newMode: file.newMode ?? "")
+  }
 }
 
 // MARK: - Comment post-pass (splits after the anchor row, S/Phase-6)

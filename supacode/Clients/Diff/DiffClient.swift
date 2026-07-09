@@ -19,9 +19,12 @@ struct DiffClient: Sendable {
   /// `contextLines` sets libgit2's `context_lines` (default 3); the viewer
   /// raises it to materialize an expanded inter-hunk gap. `source` selects the
   /// working-tree or base-branch diff.
+  /// `ignoreWhitespace` maps to `GIT_DIFF_IGNORE_WHITESPACE` — the header toggle
+  /// re-diffs the open document with it so a whitespace-only change drops out.
   var diff:
-    @Sendable (_ file: FileChange, _ worktreeURL: URL, _ contextLines: UInt32, _ source: DiffSource) async throws ->
-      [DiffHunk]
+    @Sendable (
+      _ file: FileChange, _ worktreeURL: URL, _ contextLines: UInt32, _ source: DiffSource, _ ignoreWhitespace: Bool
+    ) async throws -> [DiffHunk]
   /// The old + new highlight blob inputs for one file, fetched alongside `diff` on
   /// the on-demand load so the production `.diffLoaded` path feeds the syntax
   /// highlighter (the streaming `stream` path, which carries blobs inline, is gated
@@ -35,8 +38,9 @@ struct DiffClient: Sendable {
   /// CALLER's — passed through and stamped onto every batch — so no token is
   /// baked into the C-facing API (the struct-of-closures shape stays).
   var stream:
-    @Sendable (_ source: DiffSource, _ worktreeURL: URL, _ contextLines: UInt32, _ generation: Int) ->
-      AsyncThrowingStream<DiffStreamEvent, Error>
+    @Sendable (
+      _ source: DiffSource, _ worktreeURL: URL, _ contextLines: UInt32, _ generation: Int, _ ignoreWhitespace: Bool
+    ) -> AsyncThrowingStream<DiffStreamEvent, Error>
 }
 
 extension DiffClient: DependencyKey {
@@ -46,9 +50,9 @@ extension DiffClient: DependencyKey {
     let provider = LibGit2DiffProvider()
     return DiffClient(
       changedFiles: { try await provider.changedFiles(source: $0, at: $1) },
-      diff: { try await provider.diff(for: $0, at: $1, contextLines: $2, source: $3) },
+      diff: { try await provider.diff(for: $0, at: $1, contextLines: $2, source: $3, ignoreWhitespace: $4) },
       highlightBlobs: { try await provider.highlightBlobs(for: $0, at: $1, source: $2) },
-      stream: { provider.stream(source: $0, at: $1, contextLines: $2, generation: $3) }
+      stream: { provider.stream(source: $0, at: $1, contextLines: $2, generation: $3, ignoreWhitespace: $4) }
     )
   }()
 
@@ -58,11 +62,11 @@ extension DiffClient: DependencyKey {
   static var testValue: DiffClient {
     DiffClient(
       changedFiles: { _, _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) },
-      diff: { _, _, _, _ in [] },
+      diff: { _, _, _, _, _ in [] },
       highlightBlobs: { _, _, _ in (nil, nil) },
       // Empty stream by default; tests that exercise streaming override this
       // closure with a fixture-backed batch sequence.
-      stream: { _, _, _, _ in AsyncThrowingStream { $0.finish() } }
+      stream: { _, _, _, _, _ in AsyncThrowingStream { $0.finish() } }
     )
   }
 }

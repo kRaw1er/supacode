@@ -64,6 +64,44 @@ struct DiffViewerRepresentableWiringTests {
     return tree
   }
 
+  /// fileHeader + context + change block A + context + change block B → TWO distinct
+  /// (non-coalesced) change blocks so `n`/`p` step between them. Used to prove the menu
+  /// drain reaches the SAME `seekChange` the letter keys do.
+  private func twoChangeBlockTree() -> ChunkTree {
+    let tree = ChunkTree(metrics: .production)
+    var after: ChunkID? = tree.insert(
+      .widget(Widget(key: .fileHeader(fileID: "f"), estimatedHeight: 44, payload: .fileHeader(fileID: "f"))),
+      after: nil)
+    after = tree.insert(
+      .lineSegment(
+        LineSegment(
+          hunkID: HunkID(fileID: "f", index: 0), lines: (1...3).map { line(.context, old: $0, new: $0, "c\($0)") },
+          window: 0..<3, classification: .context)),
+      after: after)
+    let changeA =
+      (0..<2).map { line(.deletion, old: $0 + 4, new: nil, "dA") }
+      + (0..<2).map { line(.addition, old: nil, new: $0 + 4, "aA") }
+    after = tree.insert(
+      .lineSegment(
+        LineSegment(hunkID: HunkID(fileID: "f", index: 0), lines: changeA, window: 0..<4, classification: .change)),
+      after: after)
+    after = tree.insert(
+      .lineSegment(
+        LineSegment(
+          hunkID: HunkID(fileID: "f", index: 1),
+          lines: (10...11).map { line(.context, old: $0, new: $0, "c\($0)") }, window: 0..<2,
+          classification: .context)),
+      after: after)
+    let changeB =
+      (0..<2).map { line(.deletion, old: $0 + 12, new: nil, "dB") }
+      + (0..<2).map { line(.addition, old: nil, new: $0 + 12, "aB") }
+    _ = tree.insert(
+      .lineSegment(
+        LineSegment(hunkID: HunkID(fileID: "f", index: 1), lines: changeB, window: 0..<4, classification: .change)),
+      after: after)
+    return tree
+  }
+
   /// hunk 0 covers new lines 1…3; hunk 1 starts at new line 40 — the inter-hunk gap
   /// `GapKey(1)` is new lines 4…39 (36 lines).
   private func twoHunkFixture() -> (FileChange, [DiffHunk]) {
@@ -152,6 +190,31 @@ struct DiffViewerRepresentableWiringTests {
     // `o` (expand whole file) reaches the reducer for the focused row's file.
     coord.keyboardNav?.perform(.expandFile)
     #expect(sent.contains(.diffExpandWholeFile(fileID: "f")))
+  }
+
+  // MARK: - F10 — a menu-driven nav intent drains into the SAME DiffKeyboardNav
+
+  /// The "Diff" `CommandMenu` items route through `pendingNavCommand` →
+  /// `Coordinator.performMenuNav`, which forwards to the live `DiffKeyboardNav` — the
+  /// identical nav the single-letter keys drive. Fails if the drain is unwired.
+  @Test func menuNavDrainsIntoKeyboardNav() {
+    let coord = sizedCoordinator()
+    coord.installInteraction()
+    coord.controller.apply(tree: twoChangeBlockTree(), mode: .unified, scrollPreserving: false)
+    coord.rebuildKeyboardNav()
+    coord.keyboardNav?.revealFirstChange()  // lands the first change block's first row
+    let firstBlock = coord.keyboardNav?.focusedRowIndex ?? -1
+    #expect(firstBlock >= 0)
+
+    // A menu "Next Change" pick, drained via performMenuNav, steps to the SECOND change
+    // block exactly as pressing `n` would (the drain forwards to the live nav).
+    coord.performMenuNav(.nextChange)
+    let secondBlock = coord.keyboardNav?.focusedRowIndex ?? -1
+    #expect(secondBlock > firstBlock)
+
+    // "Previous Change" walks back to the first change block.
+    coord.performMenuNav(.prevChange)
+    #expect(coord.keyboardNav?.focusedRowIndex == firstBlock)
   }
 
   // MARK: - F5 — gutter overlay mounted; a commit opens the INLINE composer
@@ -292,5 +355,36 @@ struct DiffViewerRepresentableWiringTests {
     var display = DiffWidgetResolver(comments: [comment])
     display.composerStore = { $0 == other ? store : nil }
     #expect((display.resolve(widget, coalescer: coalescer) as? CommentThreadWidget)?.isEditing == false)
+  }
+
+  // MARK: - F23 — the resolver threads collapse state + a live toggle into the thread widget
+
+  /// The chevron was a dead button: the resolver built the thread widget without
+  /// `isCollapsed` (hardcoded false) or `onToggleCollapse` (defaulted `{}`). This proves
+  /// both are now wired — the model reflects `collapsedThreads`, and the chevron sink
+  /// forwards the anchor to `onToggleCommentThreadCollapsed`. Fails if the wiring reverts.
+  @Test func resolverThreadsCollapseStateAndToggle() {
+    let anchor = UUID()
+    let comment = ReviewComment(
+      id: anchor, filePath: "a.swift", source: .workingTree, side: .new, startLine: 5, endLine: 5,
+      anchorSnippet: "", contextBefore: "", body: "x")
+    let coalescer = LayoutCoalescer(host: sizedCoordinator().controller)
+    let widget = Widget(
+      key: .commentThread(anchorID: anchor), estimatedHeight: 100, payload: .commentThread(anchorID: anchor))
+
+    // Anchor in the collapsed set → the widget renders collapsed; the chevron forwards it.
+    var toggled: [UUID] = []
+    var collapsedResolver = DiffWidgetResolver(comments: [comment])
+    collapsedResolver.collapsedThreads = [anchor]
+    collapsedResolver.onToggleCommentThreadCollapsed = { toggled.append($0) }
+    let collapsed = collapsedResolver.resolve(widget, coalescer: coalescer) as? CommentThreadWidget
+    #expect(collapsed?.model.isCollapsed == true)
+    collapsed?.onToggleCollapse()  // the chevron action
+    #expect(toggled == [anchor])
+
+    // Anchor absent from the set → expanded (the default).
+    let expandedResolver = DiffWidgetResolver(comments: [comment])
+    let expanded = expandedResolver.resolve(widget, coalescer: coalescer) as? CommentThreadWidget
+    #expect(expanded?.model.isCollapsed == false)
   }
 }

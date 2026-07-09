@@ -51,9 +51,18 @@ struct DiffViewerRepresentable: NSViewRepresentable {
   var newStyleRuns: [Int: [StyleRun]] = [:]
   var syntaxVersion: Int = 0
 
+  /// A one-shot menu-driven nav intent (the "Diff" `CommandMenu` → viewport). Drained
+  /// here into `DiffKeyboardNav.perform` and cleared via `onNavCommandConsumed`, so a
+  /// menu pick reaches the SAME nav the single-letter keys drive even when the viewport
+  /// doesn't hold first responder. `nil` when nothing is pending.
+  var pendingNavCommand: DiffReviewFeature.MenuNavCommand?
+
   /// The reducer action sink for the interaction controllers (gutter comment,
   /// keyboard nav, a11y add-comment / expand).
   var send: (DiffReviewFeature.Action) -> Void = { _ in }
+  /// Fired once the pending menu nav intent has been forwarded to `DiffKeyboardNav`,
+  /// so the reducer clears `pendingNavCommand` (consume-once).
+  var onNavCommandConsumed: () -> Void = {}
   /// Viewport scrolled/resized → windowed highlight (re)issue (Phase 4 driver). The
   /// payload is the per-side 1-based visible SOURCE-line window, not rendered-row
   /// indices — the coordinate the highlighter queries + the row lookup keys off.
@@ -64,6 +73,12 @@ struct DiffViewerRepresentable: NSViewRepresentable {
   }
   /// A comment-thread widget row's edit tap → open it in the composer.
   var onEditComment: (UUID) -> Void = { _ in }
+  /// Anchors (head comment ids) whose thread is collapsed in this tab. Threaded into the
+  /// resolver so the widget renders its collapsed summary; part of the content signature
+  /// so a toggle re-projects the tree and the collapse takes visible effect.
+  var collapsedThreads: Set<UUID> = []
+  /// A comment-thread chevron tap → toggle that thread's collapsed state.
+  var onToggleCommentThreadCollapsed: (UUID) -> Void = { _ in }
 
   func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -141,6 +156,14 @@ struct DiffViewerRepresentable: NSViewRepresentable {
       }
     }
 
+    // Drain a menu-driven nav intent into the SAME `DiffKeyboardNav` the letter keys
+    // drive (the "Diff" menu path). Runs AFTER the tree/mode reconcile above so the nav
+    // is rebuilt over the current tree, then clears the one-shot in the reducer.
+    if let command = pendingNavCommand {
+      coordinator.performMenuNav(command)
+      onNavCommandConsumed()
+    }
+
     // Reconcile the transient INLINE editor for a not-yet-committed (new) comment.
     coordinator.reconcileTransientComposer(draft: composerDraft, comments: comments)
     coordinator.focusViewportIfNeeded(editing: composerDraft != nil)
@@ -174,6 +197,8 @@ struct DiffViewerRepresentable: NSViewRepresentable {
         coordinator?.onExpandGap(gap.hunkIndex, step, direction)
       },
       onEditComment: { [weak coordinator] id in coordinator?.onEditComment(id) },
+      collapsedThreads: collapsedThreads,
+      onToggleCommentThreadCollapsed: { [weak coordinator] id in coordinator?.onToggleCommentThreadCollapsed(id) },
       composerStore: { [weak coordinator] anchorID in
         guard let coordinator, let store = coordinator.composerStore, coordinator.composerAnchorID == anchorID
         else { return nil }
@@ -188,6 +213,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     coordinator.onVisibleRangeChanged = onVisibleRangeChanged
     coordinator.onExpandGap = onExpandGap
     coordinator.onEditComment = onEditComment
+    coordinator.onToggleCommentThreadCollapsed = onToggleCommentThreadCollapsed
     coordinator.file = file
     coordinator.filePath = filePath
     coordinator.source = source
@@ -203,7 +229,8 @@ struct DiffViewerRepresentable: NSViewRepresentable {
   /// vs expand token) and `expansion` are classified separately in `updateNSView`.
   private var signature: Coordinator.Signature {
     Coordinator.Signature(
-      comments: comments, wordDiffEnabled: wordDiffEnabled, composerAnchorID: composerDraft?.id)
+      comments: comments, wordDiffEnabled: wordDiffEnabled, composerAnchorID: composerDraft?.id,
+      collapsedThreads: collapsedThreads)
   }
 
   @MainActor
@@ -220,6 +247,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     var onVisibleRangeChanged: (VisibleLineWindow) -> Void = { _ in }
     var onExpandGap: (Int, ExpansionState.Step, ExpansionState.Direction) -> Void = { _, _, _ in }
     var onEditComment: (UUID) -> Void = { _ in }
+    var onToggleCommentThreadCollapsed: (UUID) -> Void = { _ in }
     var file: FileChange?
     var filePath: String = ""
     var source: DiffSource = .workingTree
@@ -246,6 +274,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
       var comments: [ReviewComment]
       var wordDiffEnabled: Bool
       var composerAnchorID: UUID?
+      var collapsedThreads: Set<UUID> = []
     }
 
     // MARK: - Install (once)
@@ -328,6 +357,18 @@ struct DiffViewerRepresentable: NSViewRepresentable {
       nav.onFocusRow = { [weak self] row in self?.controller.axProvider?.keyboardDidFocus(row) }
       keyboardNav = nav
       controller.documentView.keyboardNav = nav
+    }
+
+    /// Forward a menu-driven nav intent to the live `DiffKeyboardNav` — the SAME path
+    /// the single-letter `n`/`p`/`]`/`[` keys drive, so the "Diff" menu items and the
+    /// keys stay in lockstep. A no-op when no nav is built yet (no diff on screen).
+    func performMenuNav(_ command: DiffReviewFeature.MenuNavCommand) {
+      switch command {
+      case .nextChange: keyboardNav?.perform(.nextChange)
+      case .prevChange: keyboardNav?.perform(.prevChange)
+      case .nextFile: keyboardNav?.perform(.nextFile)
+      case .prevFile: keyboardNav?.perform(.prevFile)
+      }
     }
 
     /// Take first responder once the viewport is on-screen so single-letter nav works

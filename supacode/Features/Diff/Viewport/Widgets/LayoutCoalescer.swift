@@ -24,6 +24,11 @@ final class LayoutCoalescer {
   /// a headless test can assert the loop guard actually stopped the pump.
   private(set) var isPaused = true
 
+  /// Whether a live `NSView.displayLink` drives the pump (F#14). `false` in headless
+  /// tests that pass no `displayLinkView`; a test seam so the viewport wiring can
+  /// assert the production coalescer is actually link-driven, not tick-only.
+  var isDisplayLinkInstalled: Bool { link != nil }
+
   /// 0.5pt height-delta threshold below which a report is a no-op (plan §399).
   static let epsilon: CGFloat = 0.5
   /// Measure↔layout loop guard cap (CM6, C7): a persistent oscillation halts here.

@@ -35,6 +35,17 @@ nonisolated struct FileChange: Sendable, Equatable, Identifiable {
   var hasLongLines: Bool
   /// 0-100, meaningful for `.renamed` / `.copied`.
   var similarity: Int
+  /// Submodule (gitlink) commit SHAs on the old / new side. Populated ONLY for a
+  /// `.submodule` change (the delta's gitlink OIDs) so the `.submodule` placeholder
+  /// renders the concrete "Subproject commit <old> → <new>" pointer change; `nil`
+  /// for every non-submodule file.
+  var oldSubmoduleSHA: String?
+  var newSubmoduleSHA: String?
+  /// Octal file modes (e.g. `"100644"` → `"100755"`) on the old / new side, from
+  /// the git delta's `old_file.mode` / `new_file.mode`. Drive the `.modeChangeOnly`
+  /// placeholder's concrete mode transition; `nil` when a side has no mode (`0`).
+  var oldMode: String?
+  var newMode: String?
 }
 
 /// A single hunk of a file diff — the `@@ … @@` header plus its lines.

@@ -8,11 +8,12 @@ import Testing
 /// and produces ZERO hunks under the ignore-whitespace option, while a genuine content
 /// change in the same file still surfaces.
 ///
-/// Driven against a REAL temp git repo (`GitFixture`) through the only place the option is
-/// exposed in our stack — `Libgit2Diff.WalkRequest.ignoreWhitespace` (threaded to
-/// `GIT_DIFF_IGNORE_WHITESPACE`). NOTE: the flag is NOT plumbed through the `DiffProvider`
-/// protocol / `LibGit2DiffProvider` (its `stream()` hard-codes the default `false`, and
-/// `changedFiles` / `diff` do not accept the flag), so no app surface can request it today.
+/// Driven against a REAL temp git repo (`GitFixture`) at the streaming-walk seam —
+/// `Libgit2Diff.WalkRequest.ignoreWhitespace` (threaded to `GIT_DIFF_IGNORE_WHITESPACE`).
+/// The flag is now ALSO plumbed end to end through `DiffProvider.diff` / `.stream` →
+/// `DiffClient` → the reducer's ignore-whitespace toggle (see `DiffClientTests`
+/// `ignoreWhitespaceThreadedThroughDiffPath` + `DiffReviewFeatureTests`); this suite keeps
+/// the low-level walk coverage.
 @Suite(.serialized)
 struct DiffIgnoreWhitespaceTests {
   private static let caps = Libgit2Diff.Caps(byteCap: 8 * 1024 * 1024, lineCap: 50_000, longLineCap: 2_000)

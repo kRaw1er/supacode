@@ -13,6 +13,13 @@ struct DiffTabContentView: View {
   /// the same file stay distinct.
   let source: DiffSource
 
+  /// The measured viewer width, fed to `SplitColumnLayout.effectiveMode` so a stored
+  /// `.split` coerces to inline (unified) below the ~900pt breakpoint — view-only, the
+  /// stored `diffViewMode` flag is untouched (widening restores split). Seeded at the
+  /// breakpoint so the first frame (pre-measure) renders the stored mode, not a flash of
+  /// inline. Read GeometryReader-free via `onGeometryChange`.
+  @State private var availableWidth: CGFloat = SplitColumnLayout.inlineBreakpoint
+
   var body: some View {
     let document = store.openDiffs[DiffDocumentKey(path: filePath, source: source)]
     VStack(spacing: 0) {
@@ -33,9 +40,111 @@ struct DiffTabContentView: View {
       body(document: document)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .onGeometryChange(for: CGFloat.self) {
+      $0.size.width
+    } action: {
+      availableWidth = $0
+    }
+    .overlay(alignment: .center) {
+      if store.keyboardHelpVisible {
+        keyboardHelpOverlay
+      }
+    }
     .alert($store.scope(state: \.alert, action: \.alert))
     .confirmationDialog($store.scope(state: \.discardConfirm, action: \.discardConfirm))
+    // The four "Diff" menu items (`DiffNavigationCommands`) route to the SAME nav the
+    // single-letter keys drive: a menu pick sets a one-shot intent the viewport drains.
+    // Enabled only while a diff is loaded here; token stays `nil` — the closures capture
+    // only the store, and `FocusedAction` dedupes on `(isEnabled, token)`.
+    .focusedSceneAction(\.diffNextChangeAction, enabled: isDiffLoaded(document)) {
+      store.send(.diffMenuNav(.nextChange))
+    }
+    .focusedSceneAction(\.diffPrevChangeAction, enabled: isDiffLoaded(document)) {
+      store.send(.diffMenuNav(.prevChange))
+    }
+    .focusedSceneAction(\.diffNextFileAction, enabled: isDiffLoaded(document)) {
+      store.send(.diffMenuNav(.nextFile))
+    }
+    .focusedSceneAction(\.diffPrevFileAction, enabled: isDiffLoaded(document)) {
+      store.send(.diffMenuNav(.prevFile))
+    }
   }
+
+  /// The menu-nav publishers are live only when this tab actually shows a loaded diff —
+  /// during load / error the "Diff" menu items stay disabled (`@FocusedValue` resolves
+  /// a disabled action rather than `nil`).
+  private func isDiffLoaded(_ document: DiffDocument?) -> Bool {
+    document?.loadState == .loaded
+  }
+
+  // MARK: - Keyboard help overlay
+
+  /// The `?`-toggled keyboard-shortcuts cheat sheet (`store.keyboardHelpVisible`,
+  /// flipped by `.diffShowKeyboardHelp`). A sheet-free centered panel over a dimmed
+  /// scrim; dismisses on Esc (`onExitCommand`), a scrim tap, or its close button — all
+  /// re-send `.diffShowKeyboardHelp` to toggle it back off.
+  private var keyboardHelpOverlay: some View {
+    ZStack {
+      Button {
+        store.send(.diffShowKeyboardHelp)
+      } label: {
+        Rectangle()
+          .fill(.black.opacity(0.35))
+          .ignoresSafeArea()
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel("Dismiss keyboard shortcuts")
+      VStack(alignment: .leading, spacing: 12) {
+        HStack {
+          Label("Keyboard Shortcuts", systemImage: "keyboard")
+            .font(.headline)
+          Spacer(minLength: 24)
+          Button {
+            store.send(.diffShowKeyboardHelp)
+          } label: {
+            Image(systemName: "xmark.circle.fill")
+              .foregroundStyle(.secondary)
+          }
+          .buttonStyle(.plain)
+          .help("Close (Esc)")
+          .accessibilityLabel("Close keyboard shortcuts")
+        }
+        Divider()
+        Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 16, verticalSpacing: 8) {
+          ForEach(Self.keyboardHelpRows, id: \.keys) { row in
+            GridRow {
+              Text(row.keys)
+                .font(.callout.monospaced())
+                .gridColumnAlignment(.leading)
+              Text(row.label)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .gridColumnAlignment(.leading)
+            }
+          }
+        }
+      }
+      .padding(20)
+      .frame(maxWidth: 360)
+      .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+      .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.separator))
+    }
+    .onExitCommand { store.send(.diffShowKeyboardHelp) }
+    .transition(.opacity)
+  }
+
+  /// The rows shown in the `?` help overlay — the single-letter nav vocabulary
+  /// `DiffKeyboardNav` maps, plus the send-batch chord.
+  private static let keyboardHelpRows: [(keys: String, label: String)] = [
+    ("j / k", "Move down / up one line"),
+    ("n / p", "Next / previous change"),
+    ("] / [", "Next / previous file"),
+    ("o", "Expand the whole file"),
+    ("e / ⇧E", "More / less context"),
+    ("/", "Find in diff"),
+    ("⌘↩", "Send review comments to the agent"),
+    ("?", "Toggle this help"),
+  ]
 
   // MARK: - Header
 
@@ -67,6 +176,17 @@ struct DiffTabContentView: View {
       .labelsHidden()
       .fixedSize()
       .help("Toggle unified / split diff view")
+      Toggle(
+        isOn: Binding(
+          get: { store.ignoreWhitespace },
+          set: { store.send(.ignoreWhitespaceToggled($0)) }
+        )
+      ) {
+        Label("Ignore whitespace", systemImage: "pilcrow")
+      }
+      .toggleStyle(.button)
+      .labelStyle(.iconOnly)
+      .help("Ignore whitespace-only changes")
       sendToAgentButton
     }
     .padding(.horizontal, 12)
@@ -144,11 +264,15 @@ struct DiffTabContentView: View {
         // seed a transient editor in this tree.
         let composerBelongsHere =
           store.composer.map { $0.draft.filePath == filePath && $0.draft.source == source } ?? false
+        let tabComments: [ReviewComment] = store.comments.filter { $0.filePath == filePath && $0.source == source }
         DiffViewerRepresentable(
           file: document.file,
           hunks: document.hunks,
-          comments: store.comments.filter { $0.filePath == filePath && $0.source == source },
-          mode: store.diffViewMode,
+          comments: tabComments,
+          // View-only ~900pt breakpoint: a stored `.split` renders inline below it
+          // (`SplitColumnLayout.effectiveMode`); the stored flag stays put so widening
+          // restores split. Unified is never coerced.
+          mode: SplitColumnLayout.effectiveMode(stored: store.diffViewMode, availableWidth: availableWidth),
           generation: document.generation,
           filePath: filePath,
           source: source,
@@ -160,14 +284,18 @@ struct DiffTabContentView: View {
           oldStyleRuns: document.oldStyleRuns,
           newStyleRuns: document.newStyleRuns,
           syntaxVersion: document.styleRunsVersion,
+          pendingNavCommand: store.pendingNavCommand,
           send: { store.send($0) },
+          onNavCommandConsumed: { store.send(.diffNavCommandConsumed) },
           onVisibleRangeChanged: { window in
             store.send(.highlightVisibleRangeChanged(key: key, window: window))
           },
           onExpandGap: { gap, step, direction in
             store.send(.expandGap(key: key, gap: gap, step: step, direction: direction))
           },
-          onEditComment: { id in store.send(.editComment(id: id)) }
+          onEditComment: { id in store.send(.editComment(id: id)) },
+          collapsedThreads: store.collapsedCommentThreads.intersection(tabComments.map(\.id)),
+          onToggleCommentThreadCollapsed: { id in store.send(.toggleCommentThreadCollapsed(anchorID: id)) }
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
       }

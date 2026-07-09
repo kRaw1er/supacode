@@ -506,7 +506,7 @@ struct DiffReviewFeatureTests {
     } withDependencies: {
       $0.continuousClock = TestClock()
       $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
-      $0.diffClient.diff = { _, _, _, _ in [] }
+      $0.diffClient.diff = { _, _, _, _, _ in [] }
     }
     store.exhaustivity = .off
 
@@ -554,7 +554,7 @@ struct DiffReviewFeatureTests {
     } withDependencies: {
       $0.continuousClock = TestClock()
       $0.terminalClient.send = { _ in }
-      $0.diffClient.diff = { _, _, _, _ in hunks }
+      $0.diffClient.diff = { _, _, _, _, _ in hunks }
     }
 
     let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
@@ -594,7 +594,7 @@ struct DiffReviewFeatureTests {
     } withDependencies: {
       $0.continuousClock = TestClock()
       $0.terminalClient.send = { _ in }
-      $0.diffClient.diff = { _, _, _, _ in hunks }
+      $0.diffClient.diff = { _, _, _, _, _ in hunks }
       $0.diffClient.highlightBlobs = { _, _, _ in (old: oldInput, new: newInput) }
     }
     store.exhaustivity = .off
@@ -631,6 +631,45 @@ struct DiffReviewFeatureTests {
     // document's hunks are untouched (no per-doc row rebuild, no `revision`).
     #expect(store.state.diffViewMode == .split)
     #expect(store.state.openDiffs[key]?.hunks == hunks)
+  }
+
+  // MARK: - ignore-whitespace toggle re-diffs open tabs through the flag (F9/#20)
+
+  /// The header toggle flips `state.ignoreWhitespace` and re-diffs every open tab,
+  /// threading the flag all the way to `DiffClient.diff`. Reverting the wiring (the
+  /// request no longer carries `ignoreWhitespace`, or the handler no longer re-diffs)
+  /// makes this fail: the client receives `false` (or is never called).
+  @Test(.dependencies) func ignoreWhitespaceToggleReDiffsOpenTabsWithFlag() async {
+    let file = makeFile("a.swift")
+    var document = DiffDocument(file: file, loadState: .loaded, generation: 1)
+    document.hunks = [modifiedHunk()]
+    let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = gitLocalWorktree()
+    initialState.files = [file]
+    initialState.loadState = .loaded
+    initialState.openDiffs = [key: document]
+
+    let received = LockIsolated<[Bool]>([])
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.diffClient.diff = { _, _, _, _, ignoreWhitespace in
+        received.withValue { $0.append(ignoreWhitespace) }
+        return []
+      }
+    }
+    store.exhaustivity = .off  // @Shared ignoreWhitespace write + re-diff token churn asserted directly.
+
+    await store.send(.ignoreWhitespaceToggled(true))
+    #expect(store.state.ignoreWhitespace == true)
+    await store.receive(\.diffLoaded)
+    #expect(received.value == [true], "the re-diff must thread ignoreWhitespace=true to the client")
+
+    // Toggling to the same value is a no-op — no second re-diff.
+    await store.send(.ignoreWhitespaceToggled(true))
+    #expect(received.value == [true])
   }
 
   // MARK: - live update: vanished file goes stale, tab stays (3.2/3.3)
@@ -764,7 +803,7 @@ struct DiffReviewFeatureTests {
       DiffReviewFeature()
     } withDependencies: {
       $0.continuousClock = TestClock()
-      $0.diffClient.diff = { _, _, _, _ in
+      $0.diffClient.diff = { _, _, _, _, _ in
         diffCalls.withValue { $0 += 1 }
         return []
       }
@@ -778,6 +817,87 @@ struct DiffReviewFeatureTests {
     // Gap B (GapKey 2) is untouched, and NO `DiffClient.diff` fired (no re-diff).
     #expect(store.state.openDiffs[key]?.expansion == .regions([1: HunkExpansionRegion(fromStart: 20)]))
     #expect(diffCalls.value == 0)
+  }
+
+  /// A two-hunk file whose inter-hunk gap is far larger than `maxEagerSliceLines`
+  /// (500): hunk 0 covers new lines 1…3; hunk 1 starts at new line 800 — the gap is
+  /// new lines 4…799 (796 lines). Whole-file / large expands eager-slice only the
+  /// first 500; the rest must window in on scroll.
+  private func bigGapTwoHunkFile() -> (FileChange, [DiffHunk]) {
+    let file = makeFile("big.swift")
+    let hunk0 = DiffHunk(
+      oldStart: 1, oldCount: 3, newStart: 1, newCount: 3, header: "@@ -1,3 +1,3 @@",
+      lines: [
+        DiffLine(origin: .context, oldLineNumber: 1, newLineNumber: 1, content: "a", noNewlineAtEof: false),
+        DiffLine(origin: .deletion, oldLineNumber: 2, newLineNumber: nil, content: "b-old", noNewlineAtEof: false),
+        DiffLine(origin: .addition, oldLineNumber: nil, newLineNumber: 2, content: "b-new", noNewlineAtEof: false),
+        DiffLine(origin: .context, oldLineNumber: 3, newLineNumber: 3, content: "c", noNewlineAtEof: false),
+      ])
+    let hunk1 = DiffHunk(
+      oldStart: 800, oldCount: 1, newStart: 800, newCount: 1, header: "@@ -800,1 +800,1 @@",
+      lines: [
+        DiffLine(origin: .context, oldLineNumber: 800, newLineNumber: 800, content: "tail", noNewlineAtEof: false)
+      ])
+    return (file, [hunk0, hunk1])
+  }
+
+  /// Finding #11 (F69 tail): a `.whole` expand of a >500-line gap eager-slices only the
+  /// first `maxEagerSliceLines`; scrolling the viewport into the un-sliced region must
+  /// lazily window in the rest. A `.highlightVisibleRangeChanged` whose new-side window
+  /// falls beyond the eager slice fires ONE slice for exactly the missing sub-range; a
+  /// re-scroll over already-revealed lines fires none (dedup). Drives a single bounded
+  /// gap (not `.diffExpandWholeFile`) so the trailing EOF-unbounded gap's own eager
+  /// slice doesn't muddy the counts — the windowing wiring under test is per-gap and
+  /// identical on both paths.
+  @Test(.dependencies) func scrollingIntoUnslicedExpandedRegionWindowsInTheRest() async {
+    let (file, hunks) = bigGapTwoHunkFile()
+    let key = DiffDocumentKey(path: file.id, source: .workingTree)
+    let sliceCalls = LockIsolated(0)
+    var document = DiffDocument(file: file, loadState: .loaded, generation: 1)
+    document.hunks = hunks
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = gitLocalWorktree()
+    initialState.files = [file]
+    initialState.openDiffs = [key: document]
+    initialState.diffLoadToken = 1
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.blobSliceClient.slice = { _, _, _, range, delta in
+        sliceCalls.withValue { $0 += 1 }
+        return range.map {
+          DiffLine(
+            origin: .context, oldLineNumber: $0 + delta, newLineNumber: $0,
+            content: "context line \($0)", noNewlineAtEof: false)
+        }
+      }
+    }
+    store.exhaustivity = .off
+
+    // Expand gap 1 whole (796 lines): the eager slice is capped at 500 (new 4…503);
+    // 504…799 stay un-sliced. Exactly one slice fires.
+    await store.send(.expandGap(key: key, gap: 1, step: .whole, direction: .both))
+    await store.receive(\.gapSliceLoaded)
+    #expect(store.state.openDiffs[key]?.revealed[1]?.count == 500)
+    #expect(store.state.openDiffs[key]?.revealed[1]?.contains { $0.newLineNumber == 700 } == false)
+    #expect(sliceCalls.value == 1)
+
+    // Scroll into the un-sliced region (new 700…749): one windowing slice fires for
+    // exactly the missing sub-range and lands in `revealed`.
+    await store.send(
+      .highlightVisibleRangeChanged(key: key, window: VisibleLineWindow(old: 700..<750, new: 700..<750)))
+    await store.receive(\.gapSliceLoaded)
+    #expect(sliceCalls.value == 2)
+    #expect(store.state.openDiffs[key]?.revealed[1]?.contains { $0.newLineNumber == 700 } == true)
+    #expect(store.state.openDiffs[key]?.revealed[1]?.contains { $0.newLineNumber == 749 } == true)
+
+    // Re-scrolling over an ALREADY-revealed window (new 4…49, inside the eager slice)
+    // fires NO further slice — the dedup against `revealed[gap]` holds.
+    await store.send(
+      .highlightVisibleRangeChanged(key: key, window: VisibleLineWindow(old: 4..<50, new: 4..<50)))
+    #expect(sliceCalls.value == 2)
+    await store.finish()
   }
 
   // MARK: - Phase 5: comments + send-to-agent
@@ -1093,5 +1213,63 @@ struct DiffReviewFeatureTests {
       $0.discardConfirm = nil
     }
     #expect(store.state.comments == [comment])
+  }
+
+  // MARK: - confirm-on-switch (3.4) — a worktree change with an unsent batch confirms first
+
+  @Test(.dependencies) func switchingWorktreeWithUnsentCommentsConfirmsBeforeClearing() async {
+    let comment = reviewComment()
+    let current = gitLocalWorktree()
+    let next = folderWorktree()  // folder target keeps the re-dispatched switch effect trivial
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = current
+    initialState.comments = [comment]
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+    }
+
+    // Switching parks the pending selection + presents the dialog; the batch is NOT cleared
+    // and the current worktree stays selected until the user decides.
+    await store.send(.worktreeSelected(next, prBaseRefName: nil)) {
+      $0.pendingWorktreeSelection = .init(worktree: next, prBaseRefName: nil)
+      $0.discardConfirm = DiffReviewFeature.discardConfirmDialog(count: 1)
+    }
+    #expect(store.state.comments == [comment])
+    #expect(store.state.selectedWorktree == current)
+
+    // Discard → clear the batch, drop the park, and re-dispatch the parked switch, which now
+    // proceeds (empty batch) into the normal (folder) load path.
+    await store.send(.discardConfirm(.presented(.discard))) {
+      $0.discardConfirm = nil
+      $0.comments.removeAll()
+      $0.pendingWorktreeSelection = nil
+    }
+    await store.receive(.worktreeSelected(next, prBaseRefName: nil)) {
+      $0.generation = 1
+      $0.baseGeneration = 1
+      $0.selectedWorktree = next
+      $0.loadState = .unsupported(.folder)
+    }
+    await store.finish()  // drain the fire-and-forget persist effect (empty set)
+  }
+
+  // MARK: - comment-thread collapse toggle (F23)
+
+  @Test(.dependencies) func toggleCommentThreadCollapsedFlipsMembership() async {
+    let anchor = UUID()
+    let store = TestStore(initialState: DiffReviewFeature.State()) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+    }
+
+    await store.send(.toggleCommentThreadCollapsed(anchorID: anchor)) {
+      $0.collapsedCommentThreads.insert(anchor)
+    }
+    await store.send(.toggleCommentThreadCollapsed(anchorID: anchor)) {
+      $0.collapsedCommentThreads.remove(anchor)
+    }
   }
 }

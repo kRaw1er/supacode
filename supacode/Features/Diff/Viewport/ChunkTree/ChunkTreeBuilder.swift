@@ -114,7 +114,9 @@ enum ChunkTreeBuilder {
       return chunks
     }
     if file.status == .submodule {
-      chunks.append(placeholderWidget(.submodule(oldSHA: "", newSHA: ""), fileID, options))
+      chunks.append(
+        placeholderWidget(
+          .submodule(oldSHA: file.oldSubmoduleSHA ?? "", newSHA: file.newSubmoduleSHA ?? ""), fileID, options))
       return chunks
     }
     if file.status == .conflicted {
@@ -128,7 +130,7 @@ enum ChunkTreeBuilder {
       return chunks
     }
     if !hunks.contains(where: { !$0.lines.isEmpty }) {
-      chunks.append(placeholderWidget(emptyPlaceholder(for: file.status), fileID, options))
+      chunks.append(placeholderWidget(emptyPlaceholder(for: file), fileID, options))
       return chunks
     }
     appendHunks(

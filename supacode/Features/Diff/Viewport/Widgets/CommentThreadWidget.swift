@@ -36,7 +36,9 @@ final class CommentThreadWidget: DiffWidget {
   private unowned let coalescer: LayoutCoalescer
   /// Present only while this thread is being composed / edited (`.editing`).
   private let composerStore: StoreOf<CommentComposer>?
-  private let onToggleCollapse: () -> Void
+  /// Chevron tap sink. Internal (not `private`) so the widget-resolver wiring test can
+  /// assert the resolver forwards it (a dead `{}` default is exactly the bug this guards).
+  let onToggleCollapse: () -> Void
   private let onEdit: (UUID) -> Void
 
   /// `.editing` when the reducer has an open composer for this anchor.

@@ -71,11 +71,15 @@ final class DiffViewportController: NSObject {
 
   /// Per-frame widget height coalescer (Phase 6): applies `host.setMeasuredHeight`
   /// → O(log n) tree re-aggregate, anchor captured / restored once. Lazy so `self`
-  /// is a valid `WidgetLayoutHost` before it binds. Constructed WITHOUT a live
-  /// display link — fixed-height widgets (file / hunk header, expander, placeholder)
-  /// render at their reserved height, and display-link-driven dynamic coalescing
-  /// (variable comment / image widgets) is a documented follow-up.
-  private lazy var coalescer = LayoutCoalescer(host: self)
+  /// is a valid `WidgetLayoutHost` before it binds. Driven by `documentView`'s
+  /// `NSView.displayLink` so a variable-height widget (the Camp A inline comment
+  /// composer, an image-compare widget) reflows as it grows — the link stays paused
+  /// until a height is enqueued and re-pauses on settle (5-pass loop guard).
+  private lazy var coalescer = LayoutCoalescer(host: self, displayLinkView: documentView)
+
+  /// Test seam: the per-frame widget height coalescer, so the viewport-wiring test
+  /// can assert it is display-link-driven (F#14) and drive a height batch through it.
+  var widgetCoalescerForTesting: LayoutCoalescer { coalescer }
 
   /// Phase 12 — the accessibility tree owner. Installed by the viewport seam (it
   /// needs the reducer's comment / file-header side caches + the expand / comment /
@@ -198,6 +202,7 @@ final class DiffViewportController: NSObject {
     let anchor = scrollPreserving ? captureAnchor() : nil
     tree = newTree
     mode = newMode
+    adoptGutterForLineNumbers()
     measurePass = 0
     // Fresh content ⇒ force the next layout to re-fire its visible-line window even
     // if it coincides with the prior document's, so a newly-opened / re-diffed file
@@ -217,6 +222,15 @@ final class DiffViewportController: NSObject {
     let width = scrollView.contentSize.width
     lastLaidOutWidth = width
     documentView.frame = CGRect(x: 0, y: 0, width: width, height: tree.totalHeight(mode))
+  }
+
+  /// Widen the line-number gutter to fit the tree's largest line number (F#7). The
+  /// resolved default hardcodes ~5 digits, so a file whose line numbers exceed
+  /// 99,999 — or a long file below a short one in a multi-file diff — would clip its
+  /// numbers. `withGutter` recomputes the gutter from `charWidth`, so calling it on
+  /// an already-guttered metrics is idempotent; every content swap re-resolves it.
+  private func adoptGutterForLineNumbers() {
+    metrics = metrics.withGutter(forMaxLineNumber: tree.maxLineNumber)
   }
 
   // MARK: - The recycle loop
@@ -648,6 +662,7 @@ final class DiffViewportController: NSObject {
     DiffPalette.shared.styleDidChange()
     ctLineCache.invalidateStyle()
     metrics = DiffMetrics.resolve()
+    adoptGutterForLineNumbers()
     let anchor = captureAnchor()
     measurePass = 0
     resizeDocument()

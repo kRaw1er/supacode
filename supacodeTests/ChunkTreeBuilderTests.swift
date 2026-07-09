@@ -202,6 +202,33 @@ struct ChunkTreeBuilderTests {
     #expect(single(DiffFixture.file(status: .modified)) == .noChanges)
   }
 
+  /// F14/#3 — the submodule & mode placeholders thread the REAL git metadata
+  /// (`FileChange.oldSubmoduleSHA`/`newSubmoduleSHA`, `oldMode`/`newMode`) onto the
+  /// widget so the resolver renders the concrete pointer/mode change instead of the
+  /// generic branch. Reverting the FileChange→placeholder threading collapses these
+  /// back to the empty-SHA / empty-mode strings and this fails.
+  @Test func submoduleAndModePlaceholdersCarryGitMetadata() {
+    let submodule = FileChange(
+      oldPath: "vendor/lib", newPath: "vendor/lib", status: .submodule,
+      addedLines: 0, removedLines: 0, isBinary: false, isLargeFileCapped: false,
+      hasLongLines: false, similarity: 0, oldSubmoduleSHA: "aaaaaaa", newSubmoduleSHA: "bbbbbbb")
+    let subChunks = ChunkTreeBuilder.classify(file: submodule, hunks: [], expanded: [], options: headerless)
+    #expect(placeholders(subChunks).first == .submodule(oldSHA: "aaaaaaa", newSHA: "bbbbbbb"))
+    #expect(
+      FilePlaceholderWidget.text(for: .submodule(oldSHA: "aaaaaaa", newSHA: "bbbbbbb"))
+        == "Subproject commit aaaaaaa → bbbbbbb")
+
+    let modeChange = FileChange(
+      oldPath: "run.sh", newPath: "run.sh", status: .modeChanged,
+      addedLines: 0, removedLines: 0, isBinary: false, isLargeFileCapped: false,
+      hasLongLines: false, similarity: 0, oldMode: "100644", newMode: "100755")
+    let modeChunks = ChunkTreeBuilder.classify(file: modeChange, hunks: [], expanded: [], options: headerless)
+    #expect(placeholders(modeChunks).first == .modeChangeOnly(oldMode: "100644", newMode: "100755"))
+    #expect(
+      FilePlaceholderWidget.text(for: .modeChangeOnly(oldMode: "100644", newMode: "100755"))
+        .contains("100644 → 100755"))
+  }
+
   /// Phase 13 (C 15.10) — a rename-pure file (similarity 100, zero content hunks)
   /// emits exactly ONE file-header widget and ZERO `.line` (line-segment) chunks:
   /// the header shows `old → new`, there is nothing to diff in the body.

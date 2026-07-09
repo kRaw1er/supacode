@@ -528,4 +528,78 @@ struct DiffClientTests {
     #expect(contents.contains { $0.contains("target-b.txt") })
     #expect(!contents.contains { $0.contains("SECRET-BODY") })
   }
+
+  // MARK: - #1/#3 — submodule SHAs + mode octals surfaced on FileChange
+
+  /// A pure chmod (644 → 755) is reclassified `.modeChanged` and carries the concrete
+  /// octal modes so the placeholder renders `100644 → 100755` (not the generic branch).
+  @Test func chmodOnlyChangeCarriesOctalModes() async throws {
+    let root = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(root) }
+    try GitFixture.run(["config", "core.fileMode", "true"], in: root)
+    try GitFixture.write("#!/bin/sh\necho hi\n", to: "run.sh", in: root)
+    try GitFixture.setPermissions(0o644, to: "run.sh", in: root)
+    try GitFixture.stage("run.sh", in: root)
+    try GitFixture.commit("init", in: root)
+    try GitFixture.setPermissions(0o755, to: "run.sh", in: root)  // executable bit only
+
+    let change = try #require(fileChange(try await LibGit2DiffProvider().changedFiles(at: root), id: "run.sh"))
+    #expect(change.status == .modeChanged)
+    #expect(change.oldMode == "100644")
+    #expect(change.newMode == "100755")
+  }
+
+  /// A real submodule pointer change (sha1 → sha2) is classified `.submodule` and
+  /// carries both commit SHAs so the placeholder renders `Subproject commit …`.
+  @Test func submoduleChangeCarriesCommitSHAs() async throws {
+    let inner = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(inner) }
+    try GitFixture.write("one\n", to: "a.txt", in: inner)
+    try GitFixture.stage("a.txt", in: inner)
+    try GitFixture.commit("c1", in: inner)
+    let sha1 = try GitFixture.head(in: inner)
+
+    let outer = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(outer) }
+    // Local-path submodule add / fetch require the file-protocol allowance on modern git.
+    try GitFixture.run(
+      ["-c", "protocol.file.allow=always", "submodule", "add", inner.path(percentEncoded: false), "sub"], in: outer)
+    try GitFixture.commit("add sub", in: outer)
+
+    // Advance inner, then move the checked-out submodule HEAD forward so the OUTER
+    // working tree shows the gitlink pointer change sha1 → sha2.
+    try GitFixture.write("two\n", to: "b.txt", in: inner)
+    try GitFixture.stage("b.txt", in: inner)
+    try GitFixture.commit("c2", in: inner)
+    let sha2 = try GitFixture.head(in: inner)
+    let subDir = outer.appending(path: "sub")
+    try GitFixture.run(["-c", "protocol.file.allow=always", "fetch", "-q"], in: subDir)
+    try GitFixture.run(["checkout", "-q", sha2], in: subDir)
+
+    let change = try #require(fileChange(try await LibGit2DiffProvider().changedFiles(at: outer), id: "sub"))
+    #expect(change.status == .submodule)
+    #expect(change.oldSubmoduleSHA == sha1)
+    #expect(change.newSubmoduleSHA == sha2)
+  }
+
+  // MARK: - #20 — ignoreWhitespace threaded through the production `diff` path
+
+  /// A whitespace-only edit yields a hunk with the flag OFF and ZERO hunks with it ON,
+  /// proving the toggle reaches `GIT_DIFF_IGNORE_WHITESPACE` through `DiffProvider.diff`
+  /// (the production, non-streaming load path).
+  @Test func ignoreWhitespaceThreadedThroughDiffPath() async throws {
+    let root = try GitFixture.makeRepo()
+    defer { GitFixture.cleanup(root) }
+    try GitFixture.write("hello world\nfoo\n", to: "indent.txt", in: root)
+    try GitFixture.stage("indent.txt", in: root)
+    try GitFixture.commit("init", in: root)
+    try GitFixture.write("  hello world\nfoo\n", to: "indent.txt", in: root)  // indentation only
+
+    let provider = LibGit2DiffProvider()
+    let change = try #require(fileChange(try await provider.changedFiles(at: root), id: "indent.txt"))
+    let withFlagOff = try await provider.diff(for: change, at: root, ignoreWhitespace: false)
+    #expect(!withFlagOff.isEmpty)  // a real hunk without the flag
+    let withFlagOn = try await provider.diff(for: change, at: root, ignoreWhitespace: true)
+    #expect(withFlagOn.isEmpty)  // whitespace-only change drops out with the flag
+  }
 }

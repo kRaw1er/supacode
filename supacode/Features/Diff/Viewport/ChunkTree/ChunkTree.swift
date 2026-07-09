@@ -389,4 +389,32 @@ final class ChunkTree {
     appendInorderNodes(root, into: &out)
     return out
   }
+
+  /// The largest source line number (old or new) carried by any line segment in
+  /// the tree — the digit count the line-number gutter must fit so a 6+ digit file
+  /// (or a long file below a short one in a multi-file diff) never clips its
+  /// numbers. Line numbers rise monotonically within a segment, so only the last
+  /// non-nil number per side per segment is inspected: O(leaves) with a tiny
+  /// constant, not O(total lines). Keyed off `nodesByID` (order-independent — a max
+  /// needs no ordering) so no in-order array is materialized.
+  var maxLineNumber: Int {
+    var best = 0
+    for node in nodesByID.values {
+      guard let segment = node.chunk.lineSegment else { continue }
+      var foundOld = false
+      var foundNew = false
+      for line in segment.windowedLines.reversed() {
+        if !foundOld, let old = line.oldLineNumber {
+          best = max(best, old)
+          foundOld = true
+        }
+        if !foundNew, let new = line.newLineNumber {
+          best = max(best, new)
+          foundNew = true
+        }
+        if foundOld, foundNew { break }
+      }
+    }
+    return best
+  }
 }

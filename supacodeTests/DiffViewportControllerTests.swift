@@ -475,6 +475,62 @@ struct DiffViewportControllerTests {
     #expect(abs(controller.documentView.frame.height - tree.totalHeight(.unified)) < 0.5)
   }
 
+  // MARK: - F#7 — the line-number gutter adapts to the digit count
+
+  @Test func gutterWidensForSixDigitLineNumbers() {
+    let narrow = ViewportTestSupport.controller()
+    narrow.apply(tree: ViewportTestSupport.contextLeaves([99]), mode: .unified, scrollPreserving: false)
+    let narrowGutter = narrow.gutterWidth
+
+    let wide = ViewportTestSupport.controller()
+    wide.apply(tree: ViewportTestSupport.contextLeaves([999_999]), mode: .unified, scrollPreserving: false)
+    let wideGutter = wide.gutterWidth
+
+    // A 6-digit max line number reserves a STRICTLY wider gutter than a 2-digit one —
+    // this fails if the apply path never calls `withGutter(forMaxLineNumber:)` (the
+    // hardcoded ~5-digit default would size both files identically).
+    #expect(wideGutter > narrowGutter)
+
+    // And the wide gutter is wide enough that the number is not clipped: the number
+    // rect (`gutterWidth - 4`, LineRowView.drawNumber) clears the "999999" glyph run
+    // at the resolved monospaced char width.
+    let charWidth = DiffMetrics.resolve().charWidth
+    #expect(wideGutter - 4 >= charWidth * 6)
+  }
+
+  // MARK: - F#14 — the widget height coalescer is display-link-driven and applies
+
+  @Test func widgetCoalescerIsDisplayLinkDriven() {
+    let controller = ViewportTestSupport.controller()
+    // The production coalescer must own a live `NSView.displayLink` — without it an
+    // enqueued height never ticks and a variable-height widget (the Camp A inline
+    // comment composer) never reflows. Fails if the coalescer is built with a nil
+    // `displayLinkView`.
+    #expect(controller.widgetCoalescerForTesting.isDisplayLinkInstalled)
+  }
+
+  @Test func widgetCoalescerAppliesEnqueuedHeight() {
+    let controller = ViewportTestSupport.controller()
+    let anchorID = UUID()
+    let tree = ChunkTree(metrics: .production)
+    _ = tree.insert(ViewportTestSupport.commentWidget(id: anchorID, height: 100), after: nil)
+    controller.apply(tree: tree, mode: .unified, scrollPreserving: false)
+    let widgetKey = WidgetKey.commentThread(anchorID: anchorID)
+
+    // Never measured through the host path yet (apply's own frame write-back does not
+    // record a coalescer width).
+    #expect(controller.measuredHeight(forWidget: widgetKey) == nil)
+
+    // Enqueue a taller height through the SAME coalescer the widget host feeds, then
+    // drive one pass (headless: no live link fires off-window, so tick directly).
+    controller.widgetCoalescerForTesting.enqueueMeasuredHeight(key: widgetKey, width: 400, height: 160)
+    controller.widgetCoalescerForTesting.tick()
+
+    let measured = controller.measuredHeight(forWidget: widgetKey)
+    #expect(measured?.width == 400)
+    #expect(measured.map { abs($0.height - 160) < 0.5 } == true)
+  }
+
   // MARK: - Fixtures & oracles
 
   private func contextLeaf(_ line: Int) -> Chunk {

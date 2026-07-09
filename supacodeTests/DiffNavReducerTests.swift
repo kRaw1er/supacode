@@ -55,6 +55,22 @@ struct DiffNavReducerTests {
     await store.send(.diffBeginFind) { $0.findRequested = true }
   }
 
+  // MARK: - menu-driven nav intent (Diff menu → viewport, consume-once)
+
+  /// The "Diff" `CommandMenu` items publish `FocusedAction`s that send `.diffMenuNav`;
+  /// the reducer records a one-shot `pendingNavCommand` the viewport drains and clears
+  /// via `.diffNavCommandConsumed`. Fails if the menu → viewport plumbing is reverted.
+  @Test func menuNavSetsPendingCommandThenConsumed() async {
+    let store = TestStore(initialState: DiffReviewFeature.State()) { DiffReviewFeature() }
+    await store.send(.diffMenuNav(.nextChange)) { $0.pendingNavCommand = .nextChange }
+    // The viewport forwarded it to `DiffKeyboardNav` → one-shot cleared.
+    await store.send(.diffNavCommandConsumed) { $0.pendingNavCommand = nil }
+    // Latest pick wins if a second lands before the drain.
+    await store.send(.diffMenuNav(.prevFile)) { $0.pendingNavCommand = .prevFile }
+    await store.send(.diffMenuNav(.nextFile)) { $0.pendingNavCommand = .nextFile }
+    await store.send(.diffNavCommandConsumed) { $0.pendingNavCommand = nil }
+  }
+
   // MARK: - keyboard whole-file expand (Phase-7 declarative reuse)
 
   @Test func expandWholeFileSetsExpansionFull() async {

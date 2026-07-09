@@ -9,10 +9,11 @@ import SwiftUI
 /// the button still satisfies the tooltip+hotkey UX rule.
 ///
 /// Actions are `FocusedAction<Void>` (mirrors `SidebarCommands`) published from the
-/// diff host view once the ChunkTree viewport is wired (Phase-13 seam). Until a
-/// diff is focused, `@FocusedValue` resolves `nil` and every button is disabled — the
-/// menu structure + `FocusedAction` plumbing are complete; only the publisher rides
-/// in with the viewport.
+/// diff host view (`DiffTabContentView.focusedSceneAction`). Each menu pick sends
+/// `.diffMenuNav(...)`, which the reducer records as a one-shot `pendingNavCommand`
+/// the viewport drains into `DiffKeyboardNav` — so the menu items and the single-letter
+/// `n`/`p`/`]`/`[` keys drive the identical nav. Until a loaded diff is focused,
+/// `@FocusedValue` resolves a disabled action and every button is disabled.
 struct DiffNavigationCommands: Commands {
   @FocusedValue(\.diffNextChangeAction) private var nextChange
   @FocusedValue(\.diffPrevChangeAction) private var prevChange

@@ -103,7 +103,7 @@ struct DiffStreamReducerTests {
       $0.terminalClient.send = { _ in }
       $0.diffStreamingEnabled = true
       $0.diffStreamConsumer = StreamFixture.spyClient(spy)
-      $0.diffClient.stream = { _, _, _, gen in
+      $0.diffClient.stream = { _, _, _, gen, _ in
         AsyncThrowingStream { continuation in
           continuation.yield(.started(fileCount: 1, operation: .none, generation: gen))
           continuation.yield(
@@ -188,7 +188,7 @@ struct DiffStreamReducerTests {
       }
       // Whole-worktree stream: a.txt unchanged across generations; b.txt is the
       // edited file (its old-blob identity changes on the refresh, gen 2).
-      $0.diffClient.stream = { _, _, _, gen in
+      $0.diffClient.stream = { _, _, _, gen, _ in
         AsyncThrowingStream { continuation in
           continuation.yield(.started(fileCount: 2, operation: .none, generation: gen))
           continuation.yield(.fileReady(StreamFixture.batch("a.txt", hunks: [], oldBlobID: "a1", generation: gen)))
@@ -289,7 +289,7 @@ struct DiffStreamReducerTests {
       DiffReviewFeature()
     } withDependencies: {
       $0.continuousClock = TestClock()
-      $0.diffClient.diff = { _, _, _, _ in
+      $0.diffClient.diff = { _, _, _, _, _ in
         diffCalled.setValue(true)
         return []
       }

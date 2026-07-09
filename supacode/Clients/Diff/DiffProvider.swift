@@ -23,8 +23,12 @@ nonisolated protocol DiffProvider: Sendable {
   /// materialize an expanded gap. `source` selects the working-tree or
   /// base-branch diff (the latter throws `DiffError.baseRefUnresolved` when its
   /// ref does not resolve).
-  func diff(for file: FileChange, at worktreeURL: URL, contextLines: UInt32, source: DiffSource) async throws
-    -> [DiffHunk]
+  /// `ignoreWhitespace` maps to libgit2's `GIT_DIFF_IGNORE_WHITESPACE`: a
+  /// whitespace-only change drops out of the hunks entirely (the header toggle
+  /// re-diffs the open document through this flag).
+  func diff(
+    for file: FileChange, at worktreeURL: URL, contextLines: UInt32, source: DiffSource, ignoreWhitespace: Bool
+  ) async throws -> [DiffHunk]
 
   /// Streams the whole `source` diff as frozen, generation-stamped
   /// `FileDiffBatch`es: `.started(fileCount:)` first (a coarse scaffold), then
@@ -35,6 +39,7 @@ nonisolated protocol DiffProvider: Sendable {
   /// on arrival; consumer teardown cancels the walk at the next file boundary.
   /// Errors (`.indexLocked` / `.notARepository` / `.baseRefUnresolved` /
   /// `.libgit2`) surface via the stream's throw.
-  func stream(source: DiffSource, at worktreeURL: URL, contextLines: UInt32, generation: Int)
-    -> AsyncThrowingStream<DiffStreamEvent, Error>
+  func stream(
+    source: DiffSource, at worktreeURL: URL, contextLines: UInt32, generation: Int, ignoreWhitespace: Bool
+  ) -> AsyncThrowingStream<DiffStreamEvent, Error>
 }

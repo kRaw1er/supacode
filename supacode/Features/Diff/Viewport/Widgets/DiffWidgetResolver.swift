@@ -29,6 +29,13 @@ struct DiffWidgetResolver {
   var onCommentOnFile: (_ fileID: FileID) -> Void = { _ in }
   var onExpand: (GapKey, ExpansionState.Step, ExpansionState.Direction) -> Void = { _, _, _ in }
   var onEditComment: (UUID) -> Void = { _ in }
+  /// Anchors (head comment ids) whose comment thread is currently collapsed. The
+  /// resolver reads this so the thread widget renders its collapsed summary; injected by
+  /// `DiffViewerRepresentable.makeResolver` from the reducer's `collapsedCommentThreads`.
+  var collapsedThreads: Set<UUID> = []
+  /// A thread chevron tap → toggle that anchor's collapsed state (reducer
+  /// `.toggleCommentThreadCollapsed`). Off by default so a headless resolver is inert.
+  var onToggleCommentThreadCollapsed: (UUID) -> Void = { _ in }
   var onResolveConflictInEditor: () -> Void = {}
   /// The live inline-composer store for an anchor being composed / edited, or `nil`
   /// when this anchor's thread is in display mode. Injected by the viewport seam
@@ -75,8 +82,11 @@ struct DiffWidgetResolver {
     case .commentThread(let anchorID):
       let thread = comments.filter { $0.id == anchorID }
       return CommentThreadWidget(
-        key: widget.key, model: CommentThreadModel(anchorID: anchorID, comments: thread),
+        key: widget.key,
+        model: CommentThreadModel(
+          anchorID: anchorID, comments: thread, isCollapsed: collapsedThreads.contains(anchorID)),
         viewportHeight: viewportHeight, coalescer: coalescer, composerStore: composerStore(anchorID),
+        onToggleCollapse: { onToggleCommentThreadCollapsed(anchorID) },
         onEdit: onEditComment)
 
     case .plainFallback(let lineNumber, let text):
@@ -189,7 +199,7 @@ final class FilePlaceholderWidget: DiffWidget {
     case .modeChangeOnly(let oldMode, let newMode):
       oldMode.isEmpty || newMode.isEmpty ? "File mode changed" : "File mode changed \(oldMode) → \(newMode)"
     case .submodule(let oldSHA, let newSHA):
-      oldSHA.isEmpty || newSHA.isEmpty ? "Submodule changed" : "Submodule \(oldSHA) → \(newSHA)"
+      oldSHA.isEmpty || newSHA.isEmpty ? "Submodule changed" : "Subproject commit \(oldSHA) → \(newSHA)"
     case .imageCompare: "Image file"
     case .conflict: "Merge conflict"
     }

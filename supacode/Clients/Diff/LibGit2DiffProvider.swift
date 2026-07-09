@@ -41,14 +41,18 @@ actor LibGit2DiffProvider: DiffProvider {
     for file: FileChange,
     at worktreeURL: URL,
     contextLines: UInt32 = 3,
-    source: DiffSource = .workingTree
+    source: DiffSource = .workingTree,
+    ignoreWhitespace: Bool = false
   ) async throws -> [DiffHunk] {
     try await ensureIndexUnlocked(worktreeURL)
     switch source {
     case .workingTree:
-      return try Libgit2Diff.hunks(for: file, at: worktreeURL, caps: caps, contextLines: contextLines)
+      return try Libgit2Diff.hunks(
+        for: file, at: worktreeURL, caps: caps, contextLines: contextLines, ignoreWhitespace: ignoreWhitespace)
     case .baseBranch(let ref):
-      return try Libgit2Diff.baseHunks(for: file, at: worktreeURL, baseRef: ref, caps: caps, contextLines: contextLines)
+      return try Libgit2Diff.baseHunks(
+        for: file, at: worktreeURL, baseRef: ref, caps: caps, contextLines: contextLines,
+        ignoreWhitespace: ignoreWhitespace)
     }
   }
 
@@ -68,15 +72,17 @@ actor LibGit2DiffProvider: DiffProvider {
   /// continuation buffer. `onTermination` cancels the walk at the next file
   /// boundary when the consumer tears down (pierre `controller.abort`).
   nonisolated func stream(
-    source: DiffSource, at worktreeURL: URL, contextLines: UInt32, generation: Int
+    source: DiffSource, at worktreeURL: URL, contextLines: UInt32, generation: Int, ignoreWhitespace: Bool = false
   ) -> AsyncThrowingStream<DiffStreamEvent, Error> {
     AsyncThrowingStream { continuation in
       let task = Task {
         do {
           try await self.ensureIndexUnlocked(worktreeURL)  // actor hop BEFORE the walk (last-good guard)
           try await self.runStream(  // actor-isolated synchronous walk
-            source: source, at: worktreeURL, contextLines: contextLines,
-            generation: generation, continuation: continuation)
+            StreamParams(
+              source: source, worktreeURL: worktreeURL, contextLines: contextLines,
+              generation: generation, ignoreWhitespace: ignoreWhitespace),
+            continuation: continuation)
           continuation.finish()
         } catch {
           // .indexLocked / .notARepository / .baseRefUnresolved / .libgit2 surface here.
@@ -87,16 +93,28 @@ actor LibGit2DiffProvider: DiffProvider {
     }
   }
 
+  /// Grouped scalar inputs of one streaming walk — keeps `runStream` within the
+  /// parameter budget now that `ignoreWhitespace` rides along (the `caps` are read
+  /// from the actor inside `runStream`, so they stay off this value).
+  private struct StreamParams {
+    let source: DiffSource
+    let worktreeURL: URL
+    let contextLines: UInt32
+    let generation: Int
+    let ignoreWhitespace: Bool
+  }
+
   /// Actor-isolated, synchronous: no `await` inside, so the C handle never spans
   /// a suspension point. `Task.isCancelled` is polled at each file boundary by
   /// the walk; `continuation.yield` does not suspend, so the diff stays valid.
   private func runStream(
-    source: DiffSource, at worktreeURL: URL, contextLines: UInt32,
-    generation: Int, continuation: AsyncThrowingStream<DiffStreamEvent, Error>.Continuation
+    _ params: StreamParams, continuation: AsyncThrowingStream<DiffStreamEvent, Error>.Continuation
   ) throws {
     try Libgit2Diff.streamChangedFiles(
-      at: worktreeURL,
-      Libgit2Diff.WalkRequest(source: source, caps: caps, contextLines: contextLines, generation: generation),
+      at: params.worktreeURL,
+      Libgit2Diff.WalkRequest(
+        source: params.source, caps: caps, contextLines: params.contextLines, generation: params.generation,
+        ignoreWhitespace: params.ignoreWhitespace),
       isCancelled: { Task.isCancelled }, emit: { continuation.yield($0) })
   }
 

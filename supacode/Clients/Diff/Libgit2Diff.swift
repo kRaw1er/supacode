@@ -63,14 +63,15 @@ nonisolated enum Libgit2Diff {
     return WorktreeDiff(files: files, isUnbornHead: isUnborn, operation: operation)
   }
 
-  static func hunks(for file: FileChange, at worktreeURL: URL, caps: Caps, contextLines: UInt32 = 3) throws
-    -> [DiffHunk]
-  {
+  static func hunks(
+    for file: FileChange, at worktreeURL: URL, caps: Caps, contextLines: UInt32 = 3, ignoreWhitespace: Bool = false
+  ) throws -> [DiffHunk] {
     let repo = try openRepository(at: worktreeURL)
     defer { git_repository_free(repo) }
 
     let isUnborn = git_repository_head_unborn(repo) == 1
-    let (diff, tree) = try makeDiff(repo: repo, isUnborn: isUnborn, contextLines: contextLines)
+    let (diff, tree) = try makeDiff(
+      repo: repo, isUnborn: isUnborn, contextLines: contextLines, ignoreWhitespace: ignoreWhitespace)
     defer {
       git_diff_free(diff)
       if let tree { git_tree_free(tree) }
@@ -137,7 +138,8 @@ nonisolated enum Libgit2Diff {
     at worktreeURL: URL,
     baseRef: String,
     caps: Caps,
-    contextLines: UInt32 = 3
+    contextLines: UInt32 = 3,
+    ignoreWhitespace: Bool = false
   ) throws -> [DiffHunk] {
     let repo = try openRepository(at: worktreeURL)
     defer { git_repository_free(repo) }
@@ -147,7 +149,8 @@ nonisolated enum Libgit2Diff {
       return []
     }
 
-    let handles = try makeBaseDiff(repo: repo, baseRef: baseRef, contextLines: contextLines)
+    let handles = try makeBaseDiff(
+      repo: repo, baseRef: baseRef, contextLines: contextLines, ignoreWhitespace: ignoreWhitespace)
     defer {
       git_diff_free(handles.diff)
       git_tree_free(handles.newTree)
@@ -666,6 +669,10 @@ nonisolated enum Libgit2Diff {
       newPath = rawNew
     }
 
+    // Submodule gitlink OIDs only make sense for a `.submodule` change (for any
+    // other file `old_file.id`/`new_file.id` are blob OIDs, not commit SHAs), so
+    // gate them; the octal modes are meaningful metadata for every file.
+    let isSubmodule = status == .submodule
     return FileChange(
       oldPath: oldPath,
       newPath: newPath,
@@ -675,8 +682,18 @@ nonisolated enum Libgit2Diff {
       isBinary: result.isBinary,
       isLargeFileCapped: result.isLargeFileCapped,
       hasLongLines: result.hasLongLines,
-      similarity: Int(delta.similarity)
+      similarity: Int(delta.similarity),
+      oldSubmoduleSHA: isSubmodule ? oidString(delta.old_file.id) : nil,
+      newSubmoduleSHA: isSubmodule ? oidString(delta.new_file.id) : nil,
+      oldMode: octalMode(delta.old_file.mode),
+      newMode: octalMode(delta.new_file.mode)
     )
+  }
+
+  /// The git filemode as its octal string (`33188` → `"100644"`), or `nil` for a
+  /// `0` mode (the absent side of an add / delete).
+  private static func octalMode(_ mode: UInt16) -> String? {
+    mode == 0 ? nil : String(mode, radix: 8)
   }
 
   private static func fileStatus(from status: git_delta_t) -> FileStatus {

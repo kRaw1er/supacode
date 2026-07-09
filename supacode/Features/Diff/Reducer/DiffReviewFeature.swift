@@ -181,10 +181,82 @@ extension DiffDocument {
     }
     return ranges
   }
+
+  /// The NEW-side line-number sub-ranges of gap `gap` that the declarative
+  /// `expansion` claims are revealed AND fall inside the visible `window`, but which
+  /// are NOT yet materialized in `revealed[gap]`. Empty unless the viewport has
+  /// scrolled into an expanded-but-un-sliced region: a whole-file / large-context
+  /// expand eager-slices only the first `maxEagerSliceLines` per gap (F69), so the
+  /// tail must lazily window in on scroll (finding #11). Dedups against the slices
+  /// already cached, and caps the total so one scroll never slices a giant span (the
+  /// next scroll windows further). Returns maximal contiguous runs of missing lines.
+  func unrevealedVisibleRanges(gap: Int, window: VisibleLineWindow, cap: Int) -> [Range<Int>] {
+    guard cap > 0, !window.new.isEmpty else { return [] }
+    let size = gapRangeSize(gap)
+    guard size > 0 else { return [] }
+    let isTrailing = isTrailingGap(gap)
+    let region = expansion.resolve(gap: gap, rangeSize: size, isTrailing: isTrailing)
+    let start = gapNewLineStart(gap)
+    // The NEW-side spans the expansion says are revealed: top grows down from the gap
+    // start (`fromStart`); bottom grows up from the gap end (`fromEnd`, never for a
+    // trailing / unbounded gap). Overflow-safe for a `.full` / `.whole` (`fromStart`
+    // saturates to the gap size, which is `.max` for a trailing gap).
+    var targetSpans: [Range<Int>] = []
+    if region.fromStart > 0 {
+      let (upper, overflow) = start.addingReportingOverflow(region.fromStart)
+      targetSpans.append(start..<(overflow ? .max : upper))
+    }
+    if !isTrailing, size != .max, region.fromEnd > 0 {
+      let end = start + size  // one past the gap's last new line
+      targetSpans.append((end - region.fromEnd)..<end)
+    }
+    guard !targetSpans.isEmpty else { return [] }
+    let revealedNumbers = Set((revealed[gap] ?? []).compactMap(\.newLineNumber))
+    var ranges: [Range<Int>] = []
+    var remaining = cap
+    for span in targetSpans {
+      let lower = max(span.lowerBound, window.new.lowerBound)
+      let upper = min(span.upperBound, window.new.upperBound)
+      guard lower < upper else { continue }
+      var line = lower
+      while line < upper, remaining > 0 {
+        guard !revealedNumbers.contains(line) else {
+          line += 1
+          continue
+        }
+        let runStart = line
+        while line < upper, remaining > 0, !revealedNumbers.contains(line) {
+          line += 1
+          remaining -= 1
+        }
+        ranges.append(runStart..<line)
+      }
+    }
+    return ranges
+  }
 }
 
 @Reducer
 struct DiffReviewFeature {
+  /// A menu-driven diff navigation intent (the "Diff" `CommandMenu` → viewport). The
+  /// same four moves `DiffKeyboardNav` performs from single-letter keys, but reached
+  /// through the menu bar where the viewport may not hold first responder. Set as a
+  /// one-shot on `State.pendingNavCommand`, drained by `DiffViewerRepresentable` which
+  /// forwards it to `DiffKeyboardNav.perform` and then clears it.
+  enum MenuNavCommand: Equatable, Sendable {
+    case nextChange, prevChange, nextFile, prevFile
+  }
+
+  /// A worktree switch parked behind the discard-confirm dialog (3.4). When the user
+  /// changes worktree while an unsent, unlocked comment batch is present, the switch is
+  /// DEFERRED here and the dialog is shown: on discard the parked selection is re-dispatched
+  /// (now with an empty batch, so it proceeds); on keep it is dropped and the current
+  /// worktree stays selected. Carries the same payload `.worktreeSelected` receives.
+  struct PendingWorktreeSelection: Equatable {
+    var worktree: Worktree?
+    var prBaseRefName: String?
+  }
+
   @ObservableState
   struct State: Equatable {
     /// The worktree whose changes are shown, or nil when nothing is selected.
@@ -203,6 +275,10 @@ struct DiffReviewFeature {
     /// Unified vs split viewer preference (consumed in Phase 3; declared here so the
     /// panel owns the pref). Global.
     @Shared(.appStorage("diffViewMode")) var diffViewMode: DiffViewMode = .unified
+    /// Whitespace-insensitive diff toggle (`GIT_DIFF_IGNORE_WHITESPACE`). Global +
+    /// persisted, mirroring `diffViewMode`; when on, every (re)diff drops
+    /// whitespace-only hunks. The header toggle flips this and re-diffs open tabs.
+    @Shared(.appStorage("diffIgnoreWhitespace")) var ignoreWhitespace: Bool = false
 
     // MARK: Base-branch diff (second source) — committed `merge-base..HEAD` changes
     /// Committed branch changes vs the resolved base. Independent of `files`; a
@@ -232,6 +308,12 @@ struct DiffReviewFeature {
     /// Set true by `.diffBeginFind` (`/`) — the entry-point flag the Phase-11 find
     /// bar consumes to open itself. Cleared when find opens.
     var findRequested = false
+    /// A one-shot menu-driven nav intent (the "Diff" menu → viewport). Set by
+    /// `.diffMenuNav`, drained by `DiffViewerRepresentable` (which forwards it to
+    /// `DiffKeyboardNav`), cleared by `.diffNavCommandConsumed` (consume-once) — mirrors
+    /// `pendingScrollTarget`. The menu bar path is why this exists: a menu item can fire
+    /// while the viewport lacks first responder, so the letter-key path can't be reached.
+    var pendingNavCommand: MenuNavCommand?
 
     /// Open center diff tabs, keyed by `(path, source)`. Additive over the
     /// Phase 0 state (`DiffTabPayload` stays `filePath`-only; the document lives here).
@@ -244,6 +326,11 @@ struct DiffReviewFeature {
     /// (5.4/5.9). Session-only — not persisted (no `Codable` on `State`). Kept
     /// across a diff-tab close/reopen; cleared only on send or explicit discard.
     var comments: IdentifiedArrayOf<ReviewComment> = []
+    /// Comment threads the user has collapsed via the thread chevron, keyed by the
+    /// thread's anchor (head comment id). Session-only, spans every open diff tab; a
+    /// membership toggle flips the thread widget between its collapsed summary and the
+    /// expanded body. Absent ⇒ expanded (the default).
+    var collapsedCommentThreads: Set<UUID> = []
     /// The inline comment composer (new or edit), when open.
     @Presents var composer: CommentComposer.State?
     /// True while a send is in flight so a double-send can't duplicate (5.5).
@@ -252,6 +339,10 @@ struct DiffReviewFeature {
     @Presents var alert: AlertState<Action.Alert>?
     /// Confirm-on-close for a non-empty batch (3.4).
     @Presents var discardConfirm: ConfirmationDialogState<Action.DiscardConfirm>?
+    /// A worktree switch parked behind the discard-confirm dialog: set when a worktree
+    /// change is intercepted while an unsent batch exists, drained on discard (re-dispatch)
+    /// or cleared on keep. `nil` outside that intercepted window.
+    var pendingWorktreeSelection: PendingWorktreeSelection?
 
     /// Count of comments that would actually send (non-empty body); drives the
     /// send button's label + disabled state.
@@ -322,6 +413,7 @@ struct DiffReviewFeature {
     case streamFileReady(key: DiffDocumentKey, batch: FileDiffBatch, token: Int)  // `.fileReady` → feed + build rows
     case streamFinished(key: DiffDocumentKey, token: Int)  // `.finished` → mark loaded
     case diffModeChanged(DiffViewMode)  // unified/split toggle → rebuild all open docs
+    case ignoreWhitespaceToggled(Bool)  // whitespace-insensitive toggle → re-diff all open docs
     // MARK: Phase 7 — incremental collapse / expand (blob-slice, NO re-diff)
     /// Expander tap → mutate `ExpansionState` (pure) + fire a blob-slice effect for
     /// ONLY the newly-revealed delta range (one gap, incremental). Never re-diffs.
@@ -346,6 +438,11 @@ struct DiffReviewFeature {
     case diffShowKeyboardHelp
     /// `/` — request the find bar (Phase 11 entry point).
     case diffBeginFind
+    /// The "Diff" `CommandMenu` picked a nav move → record a one-shot intent the
+    /// viewport drains (menu-bar path; the viewport may not hold first responder).
+    case diffMenuNav(MenuNavCommand)
+    /// The viewport forwarded the pending nav intent to `DiffKeyboardNav` (consume-once).
+    case diffNavCommandConsumed
     /// `o` — reveal every collapsed gap of a file (declarative whole-file expand,
     /// reuses Phase-7 `ExpansionState.full`).
     case diffExpandWholeFile(fileID: FileChange.ID)
@@ -373,6 +470,7 @@ struct DiffReviewFeature {
     case commitComment(ReviewComment)  // upsert (replace by id on edit, else append)
     case editComment(id: UUID)  // open an existing thread to edit
     case deleteComment(id: UUID)  // remove a thread
+    case toggleCommentThreadCollapsed(anchorID: UUID)  // thread chevron → collapse / expand
     case sendBatchToAgent  // serialize + inject into the worktree terminal
     case sendBatchFinished(TextInjectionResult)  // clears lock; on `.sent` clears comments
     case requestDiscardBatch  // close-with-unsent → confirm
@@ -423,15 +521,24 @@ struct DiffReviewFeature {
       switch action {
 
       case .worktreeSelected(let worktree, let prBaseRefName):
-        // Any selection change invalidates in-flight results (8.1) for BOTH
-        // sources and cancels the load, base load, base resolve, and debounce.
-        state.generation &+= 1
-        state.baseGeneration &+= 1
         // Comments are per-worktree and disk-persisted (D2). A real worktree change
         // drops the prior in-memory batch so it never leaks across worktrees, then
         // the persisted set for the new worktree is loaded-then-relocated on open;
         // a re-select of the same worktree keeps the in-memory batch untouched.
         let worktreeChanged = state.selectedWorktree?.id != worktree?.id
+        // Confirm-on-switch (3.4): a worktree change while an unsent, unlocked batch is
+        // present PARKS the switch and shows the discard dialog first — the batch is not
+        // cleared until the user confirms. On discard the parked selection re-dispatches
+        // (with an empty batch, so it proceeds); on keep the current worktree stays.
+        if worktreeChanged, !state.comments.isEmpty, !state.batchLocked {
+          state.pendingWorktreeSelection = PendingWorktreeSelection(worktree: worktree, prBaseRefName: prBaseRefName)
+          state.discardConfirm = Self.discardConfirmDialog(count: state.comments.count)
+          return .none
+        }
+        // Any selection change invalidates in-flight results (8.1) for BOTH
+        // sources and cancels the load, base load, base resolve, and debounce.
+        state.generation &+= 1
+        state.baseGeneration &+= 1
         if worktreeChanged {
           state.comments.removeAll()
           state.composer = nil
@@ -612,10 +719,14 @@ struct DiffReviewFeature {
         let loadEffect: Effect<Action> =
           diffStreamingEnabled
           ? Self.streamEffect(
-            StreamRequest(key: key, worktree: worktree, source: source, contextLines: 3, token: token),
+            StreamRequest(
+              key: key, worktree: worktree, source: source, contextLines: 3, token: token,
+              ignoreWhitespace: state.ignoreWhitespace),
             diffClient: diffClient)
           : Self.diffEffect(
-            DiffRequest(key: key, file: file, worktree: worktree, contextLines: 3, token: token),
+            DiffRequest(
+              key: key, file: file, worktree: worktree, contextLines: 3, token: token,
+              ignoreWhitespace: state.ignoreWhitespace),
             diffClient: diffClient)
         return .merge(focusEffect, loadEffect)
 
@@ -697,6 +808,18 @@ struct DiffReviewFeature {
         // observes `diffViewMode` and drives `controller.toggleMode` (Phase 13 swap).
         state.$diffViewMode.withLock { $0 = mode }
         return .none
+
+      case .ignoreWhitespaceToggled(let value):
+        guard state.ignoreWhitespace != value else { return .none }
+        state.$ignoreWhitespace.withLock { $0 = value }
+        // Re-diff every open tab (both sources) through the new flag; unlike a
+        // list reload this keeps the file lists intact and only re-materializes hunks.
+        return .merge(
+          Self.refreshOpenDiffs(
+            &state, scope: .workingTree, diffClient: diffClient, streamingEnabled: diffStreamingEnabled),
+          Self.refreshOpenDiffs(
+            &state, scope: .base, diffClient: diffClient, streamingEnabled: diffStreamingEnabled)
+        )
 
       // MARK: Phase 7 — incremental collapse / expand (blob-slice, NO re-diff)
 
@@ -781,6 +904,17 @@ struct DiffReviewFeature {
         state.findRequested = true
         return .none
 
+      case .diffMenuNav(let command):
+        // Menu → viewport: stash the one-shot intent; `DiffViewerRepresentable` drains
+        // it into `DiffKeyboardNav` on its next `updateNSView` and clears it via
+        // `.diffNavCommandConsumed`. Latest wins if a second menu pick lands first.
+        state.pendingNavCommand = command
+        return .none
+
+      case .diffNavCommandConsumed:
+        state.pendingNavCommand = nil
+        return .none
+
       case .diffExpandWholeFile(let fileID):
         // Declarative whole-file reveal (Phase-7 `ExpansionState.full`) AND the eager
         // blob slice that materializes it. Flipping the state is NOT enough: the
@@ -855,11 +989,34 @@ struct DiffReviewFeature {
       case .highlightVisibleRangeChanged(let key, let window):
         guard var document = state.openDiffs[key] else { return .none }
         document.visibleLineWindow = window
+        // Lazy blob windowing (F69 tail / finding #11): if the visible window scrolled
+        // into an expanded gap region the eager slice never materialized (capped at
+        // `maxEagerSliceLines` per gap), slice the still-missing NEW-side sub-ranges
+        // now so the rest windows in on scroll. Shares the document's CURRENT
+        // `generation` token — this is the SAME expansion, not a supersede, so an
+        // in-flight eager slice's result is never dropped — and dedups against
+        // `revealed[gap]`. Runs before the highlight size gate: a huge file still
+        // expands even when syntax highlighting is disabled.
+        var windowingEffects: [Effect<Action>] = []
+        if let worktree = state.selectedWorktree, document.expansion != .collapsed {
+          let sliceToken = document.generation
+          for gap in 0...document.hunks.count {
+            let ranges = document.unrevealedVisibleRanges(
+              gap: gap, window: window, cap: Self.maxEagerSliceLines)
+            guard !ranges.isEmpty else { continue }
+            windowingEffects.append(
+              Self.sliceEffect(
+                SliceRequest(
+                  key: key, gap: gap, file: document.file, source: key.source, worktree: worktree,
+                  ranges: ranges, oldLineDelta: document.gapOldLineDelta(gap), token: sliceToken),
+                blobSliceClient: blobSliceClient))
+          }
+        }
         // The size gate (set at load) short-circuits before any client is built or
         // any parse runs — a 200k-line / oversized file renders plain, no stall.
         guard !document.highlightingDisabled else {
           state.openDiffs[key] = document
-          return .none
+          return windowingEffects.isEmpty ? .none : .merge(windowingEffects)
         }
         document.highlightGeneration &+= 1
         let generation = document.highlightGeneration
@@ -868,17 +1025,20 @@ struct DiffReviewFeature {
         state.openDiffs[key] = document
         // Nothing to highlight on either side (plain-text file / no bundled grammar):
         // still clear any stale runs, but skip the effect.
-        guard old != nil || new != nil else { return .none }
+        guard old != nil || new != nil else {
+          return windowingEffects.isEmpty ? .none : .merge(windowingEffects)
+        }
         // Each side is queried with ITS OWN visible line range (old / new line numbers
         // differ). The client speaks 1-based line numbers in and out, so the returned
         // runs are keyed exactly how `LineRowView` looks them up.
-        return .run { send in
+        let highlightEffect = Effect<Action>.run { send in
           try await clock.sleep(for: .milliseconds(16))  // coalesce scroll bursts (no Task.sleep)
           let oldRuns = old == nil || window.old.isEmpty ? [:] : await diffHighlight.styleRuns(old!, window.old)
           let newRuns = new == nil || window.new.isEmpty ? [:] : await diffHighlight.styleRuns(new!, window.new)
           await send(.highlightsReady(key: key, old: oldRuns, new: newRuns, generation: generation))
         }
         .cancellable(id: CancelID.highlight(key), cancelInFlight: true)
+        return windowingEffects.isEmpty ? highlightEffect : .merge([highlightEffect] + windowingEffects)
 
       case .highlightsReady(let key, let old, let new, let generation):
         // Drop a stale/superseded result (pierre isCurrentRequest) — a re-diff or a
@@ -961,6 +1121,17 @@ struct DiffReviewFeature {
         state.comments.remove(id: id)  // viewport removes the widget leaf; NO rebuildRows (S7)
         return Self.persistEffect(state, persistenceStore: persistenceStore)
 
+      case .toggleCommentThreadCollapsed(let anchorID):
+        // Session-only display toggle: flip the thread's collapsed membership. The
+        // resolver reads this set so the widget renders collapsed / expanded; not
+        // persisted (a reopened worktree starts every thread expanded).
+        if state.collapsedCommentThreads.contains(anchorID) {
+          state.collapsedCommentThreads.remove(anchorID)
+        } else {
+          state.collapsedCommentThreads.insert(anchorID)
+        }
+        return .none
+
       case .sendBatchToAgent:
         guard !state.batchLocked,
           let worktree = state.selectedWorktree,
@@ -1000,9 +1171,20 @@ struct DiffReviewFeature {
 
       case .discardConfirm(.presented(.discard)):
         state.comments.removeAll()
-        return Self.persistEffect(state, persistenceStore: persistenceStore)
+        let persist = Self.persistEffect(state, persistenceStore: persistenceStore)
+        // A parked worktree switch (confirm-on-switch) now proceeds: re-dispatch it with
+        // the batch emptied so it runs the normal load path instead of re-parking.
+        guard let pending = state.pendingWorktreeSelection else { return persist }
+        state.pendingWorktreeSelection = nil
+        return .merge(
+          persist,
+          .send(.worktreeSelected(pending.worktree, prBaseRefName: pending.prBaseRefName))
+        )
 
       case .discardConfirm:
+        // "Keep" / dismiss — abandon any parked switch and retain the batch on the
+        // current worktree (the `.discard` outcome is handled above).
+        state.pendingWorktreeSelection = nil
         return .none
 
       case .alert:
@@ -1141,6 +1323,7 @@ struct DiffReviewFeature {
     let worktree: Worktree
     let contextLines: UInt32
     let token: Int
+    var ignoreWhitespace: Bool = false
   }
 
   private static func diffEffect(_ request: DiffRequest, diffClient: DiffClient) -> Effect<Action> {
@@ -1150,7 +1333,8 @@ struct DiffReviewFeature {
           request.file,
           request.worktree.workingDirectory,
           request.contextLines,
-          request.key.source
+          request.key.source,
+          request.ignoreWhitespace
         )
         // Fetch the highlight blob inputs alongside the hunks so the production load
         // path feeds the syntax highlighter (the streaming path, which carries blobs
@@ -1236,6 +1420,7 @@ struct DiffReviewFeature {
     let source: DiffSource
     let contextLines: UInt32
     let token: Int
+    var ignoreWhitespace: Bool = false
   }
 
   /// Pumps `diffClient.stream` into `.streamStarted` / `.streamFileReady` /
@@ -1246,7 +1431,8 @@ struct DiffReviewFeature {
     .run { send in
       do {
         for try await event in diffClient.stream(
-          request.source, request.worktree.workingDirectory, request.contextLines, request.token)
+          request.source, request.worktree.workingDirectory, request.contextLines, request.token,
+          request.ignoreWhitespace)
         {
           switch event {
           case .started(let fileCount, _, _):
@@ -1280,6 +1466,7 @@ struct DiffReviewFeature {
   ) -> Effect<Action> {
     guard let worktree = state.selectedWorktree, !state.openDiffs.isEmpty else { return .none }
     let fileList = scope == .workingTree ? state.files : state.baseFiles
+    let ignoreWhitespace = state.ignoreWhitespace
     var effects: [Effect<Action>] = []
     for key in state.openDiffs.keys {
       let isWorkingTree = key.source == .workingTree
@@ -1303,14 +1490,18 @@ struct DiffReviewFeature {
       if streamingEnabled {
         effects.append(
           Self.streamEffect(
-            StreamRequest(key: key, worktree: worktree, source: key.source, contextLines: 3, token: token),
+            StreamRequest(
+              key: key, worktree: worktree, source: key.source, contextLines: 3, token: token,
+              ignoreWhitespace: ignoreWhitespace),
             diffClient: diffClient
           )
         )
       } else {
         effects.append(
           Self.diffEffect(
-            DiffRequest(key: key, file: file, worktree: worktree, contextLines: 3, token: token),
+            DiffRequest(
+              key: key, file: file, worktree: worktree, contextLines: 3, token: token,
+              ignoreWhitespace: ignoreWhitespace),
             diffClient: diffClient
           )
         )
