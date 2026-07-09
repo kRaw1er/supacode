@@ -106,4 +106,37 @@ struct DiffHighlightAsyncOrderingTests {
     // A straggler from the superseded gen 1 settles WITHOUT applying (no state change).
     await store.send(.highlightsReady(key: key, old: [:], new: [:], generation: 1))
   }
+
+  /// A visible-range change on a file with NOTHING to highlight (both blobs nil —
+  /// plain-text / no bundled grammar) must still CLEAR any previously-arrived style runs
+  /// AND bump the delivery revision so the view repaints plain. The handler's comment
+  /// always promised this; it used to only bump `highlightGeneration` and skip, leaving
+  /// stale colors keyed off the unchanged `styleRunsVersion`. No async effect fires.
+  @Test(.dependencies) func noBlobRangeChangeClearsStaleRunsAndBumpsDeliveryVersion() async {
+    let clock = TestClock()
+    var doc = Self.loadedDoc()
+    doc.oldBlob = nil  // nothing to highlight on either side
+    doc.newBlob = nil
+    doc.oldStyleRuns = Self.oldRuns  // stale runs from an earlier highlight still linger
+    doc.newStyleRuns = Self.newRuns
+    doc.styleRunsVersion = 7
+    var state = DiffReviewFeature.State()
+    state.openDiffs[key] = doc
+    let store = TestStore(initialState: state) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = clock
+      $0.diffHighlight = Self.stub()
+    }
+
+    await store.send(.highlightVisibleRangeChanged(key: key, window: window(1..<10))) {
+      $0.openDiffs[self.key]?.visibleLineWindow = self.window(1..<10)
+      $0.openDiffs[self.key]?.highlightGeneration = 1
+      $0.openDiffs[self.key]?.oldStyleRuns = [:]  // the promised clear now actually happens
+      $0.openDiffs[self.key]?.newStyleRuns = [:]
+      $0.openDiffs[self.key]?.styleRunsVersion = 8  // bumped so the view keys the plain repaint
+    }
+    // Both blobs nil ⇒ the async highlight effect is skipped entirely (nothing to receive).
+    await store.finish()
+  }
 }

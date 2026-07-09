@@ -778,6 +778,37 @@ struct DiffReviewFeatureTests {
     await store.finish()
   }
 
+  /// ⇧E (`.diffExpandContext` with delta < 0) is SYMMETRIC to `e`: it shrinks each gap
+  /// by ONE fine step, it does NOT wipe straight to collapsed. A two-step expand shrunk
+  /// once lands at one fine step (revealed kept — a partial shrink is capped by the
+  /// resolved region, not by trimming `revealed`); a further shrink prunes the gap to
+  /// no-region ⇒ `.collapsed` and only THEN clears `revealed[gap]`.
+  @Test(.dependencies) func lessContextShrinksOneStepNotAllTheWay() async {
+    let (file, hunks) = twoHunkFile()
+    let key = DiffDocumentKey(path: file.id, source: .workingTree)
+    let store = expansionStore(file: file, hunks: hunks)
+
+    // Two fine expands on gap 1 ⇒ fromStart 40.
+    await store.send(.expandGap(key: key, gap: 1, step: .fine, direction: .up))
+    await store.receive(\.gapSliceLoaded)
+    await store.send(.expandGap(key: key, gap: 1, step: .fine, direction: .up))
+    await store.receive(\.gapSliceLoaded)
+    #expect(store.state.openDiffs[key]?.expansion == .regions([1: HunkExpansionRegion(fromStart: 40)]))
+    #expect(store.state.openDiffs[key]?.revealed[1]?.isEmpty == false)
+
+    // ⇧E once: shrink one fine step ⇒ fromStart 20 (NOT collapsed); `revealed` kept
+    // (partial shrink — the resolved region caps display, revealed stays over-populated).
+    await store.send(.diffExpandContext(fileID: file.id, delta: -1))
+    #expect(store.state.openDiffs[key]?.expansion == .regions([1: HunkExpansionRegion(fromStart: 20)]))
+    #expect(store.state.openDiffs[key]?.revealed[1]?.isEmpty == false)
+
+    // ⇧E again: the last step prunes gap 1 to no-region ⇒ `.collapsed`, and NOW revealed clears.
+    await store.send(.diffExpandContext(fileID: file.id, delta: -1))
+    #expect(store.state.openDiffs[key]?.expansion == .collapsed)
+    #expect(store.state.openDiffs[key]?.revealed[1] == nil)
+    await store.finish()
+  }
+
   @Test(.dependencies) func oneGapOnlyExpands() async {
     // A three-hunk file → two inter-hunk gaps, GapKey(1) and GapKey(2).
     let file = makeFile("a.swift")

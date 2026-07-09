@@ -146,10 +146,49 @@ extension ExpansionState {
     self = .regions(map)
   }
 
+  /// The symmetric inverse of `expand` (⇧E / less-context): saturating-subtract one
+  /// step off the gap's revealed region so shrink is granular, not all-or-nothing.
+  /// When the region reaches `{0,0}` the entry is PRUNED back to no-region, so a fully
+  /// shrunk file equals `.collapsed` (`.regions([:])`). No-op on `.full` (whole-file is
+  /// all-or-nothing, matching `expand`) and on a gap with no region.
+  mutating func shrink(gap: Int, by step: Step, direction: Direction) {
+    guard case .regions(var map) = self, var region = map[gap] else { return }
+    switch step {
+    case .whole:
+      region.fromStart = 0
+      region.fromEnd = 0
+    case .lines(let amount):
+      let count = max(amount, 0)
+      if direction == .up || direction == .both { region.fromStart = Self.saturatingSubtract(region.fromStart, count) }
+      if direction == .down || direction == .both { region.fromEnd = Self.saturatingSubtract(region.fromEnd, count) }
+    }
+    // Prune to no-region when nothing is revealed on either end — a fully shrunk gap is
+    // indistinguishable from a never-expanded one, so the map stays canonical (`.collapsed`).
+    map[gap] = (region.fromStart == 0 && region.fromEnd == 0) ? nil : region
+    self = .regions(map)
+  }
+
+  /// Whether `gap` currently carries a revealed region. `.full` reveals every gap; a
+  /// missing `.regions` map entry is collapsed. Lets a caller detect the exact step a
+  /// `shrink` prunes a gap to no-region (so it can drop that gap's `revealed` slice).
+  func hasRevealedRegion(gap: Int) -> Bool {
+    switch self {
+    case .full: return true
+    case .regions(let map): return map[gap] != nil
+    }
+  }
+
   /// Saturating add so a `.whole` (`fromStart == .max`) followed by a `.lines`
   /// expand cannot overflow-trap — `resolve` clamps the ceiling anyway.
   private static func saturatingAdd(_ lhs: Int, _ rhs: Int) -> Int {
     let (sum, overflow) = lhs.addingReportingOverflow(rhs)
     return overflow ? .max : sum
+  }
+
+  /// Saturating subtract clamped at 0 — the shrink floor, mirroring `saturatingAdd`'s
+  /// ceiling. A `.whole`-expanded end (`fromStart == .max`) shrinks toward, never below, 0.
+  private static func saturatingSubtract(_ lhs: Int, _ rhs: Int) -> Int {
+    let (diff, overflow) = lhs.subtractingReportingOverflow(rhs)
+    return overflow ? 0 : max(diff, 0)
   }
 }

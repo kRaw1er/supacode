@@ -514,12 +514,21 @@ struct DiffClientTests {
       atPath: linkURL.path(percentEncoded: false),
       withDestinationPath: "target-b.txt"
     )
+    // Also touch a regular file so the same diff carries a NON-symlink control row
+    // (guards against `isSymlink` being hardwired true for every change).
+    try GitFixture.write("SECRET-BODY-A-DO-NOT-DIFF\nmore\n", to: "target-a.txt", in: root)
 
     let provider = LibGit2DiffProvider()
     let diff = try await provider.changedFiles(at: root)
     let change = try #require(fileChange(diff, id: "link"))
     #expect(change.status == .modified)
     #expect(change.isBinary == false)
+    // SpecFlow 2.6: a changed symlink (mode 120000) is flagged so the renderer can
+    // say "this diff is the link target, not file bytes". The content behaviour is
+    // unchanged — the target-string assertions below still hold.
+    #expect(change.isSymlink)
+    // A plain (non-symlink) file in the same diff must NOT be flagged.
+    #expect(fileChange(diff, id: "target-a.txt")?.isSymlink == false)
 
     let hunks = try await provider.diff(for: change, at: root)
     let contents = hunks.flatMap(\.lines).map(\.content)

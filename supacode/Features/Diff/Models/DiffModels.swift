@@ -46,6 +46,11 @@ nonisolated struct FileChange: Sendable, Equatable, Identifiable {
   /// placeholder's concrete mode transition; `nil` when a side has no mode (`0`).
   var oldMode: String?
   var newMode: String?
+  /// `true` when either side of the change is a git symlink (`GIT_FILEMODE_LINK`,
+  /// `0120000`). Metadata HINT only: the diff CONTENT is already the symlink TARGET
+  /// string (libgit2 diffs the target, never follows the link), so this just lets the
+  /// renderer flag "this diff is a symlink target, not file bytes" (SpecFlow 2.6).
+  var isSymlink: Bool = false
 }
 
 /// A single hunk of a file diff — the `@@ … @@` header plus its lines.

@@ -373,6 +373,48 @@ struct DiffAXProviderTests {
     #expect(sut.label(4).contains("new,"))
   }
 
+  // MARK: - splitNoNewlineMarkerValueIsNil (mirrors the unified `.line` guard)
+
+  /// A split no-newline-marker row must speak NO value — both sides carry the literal
+  /// "No newline at end of file" content, and returning it as the row's VoiceOver
+  /// value (via `new?.content ?? old?.content`) would make VO read the marker sentence
+  /// as if it were code. Mirrors the unified `.line` arm, which returns `nil` for a
+  /// `.noNewlineMarker` origin. Guards the fix: reverting it makes value(marker) == the
+  /// marker sentence.
+  @Test func splitNoNewlineMarkerRowHasNilValueLikeUnified() {
+    func markerTree() -> ChunkTree {
+      let tree = ChunkTree(metrics: .production)
+      let del = DiffLine(
+        origin: .deletion, oldLineNumber: 1, newLineNumber: nil, content: "old code", noNewlineAtEof: true)
+      let add = DiffLine(
+        origin: .addition, oldLineNumber: nil, newLineNumber: 1, content: "new code", noNewlineAtEof: true)
+      _ = tree.insert(
+        .lineSegment(
+          LineSegment(
+            hunkID: HunkID(fileID: "f", index: 0), lines: [del, add], window: 0..<2, classification: .change)),
+        after: nil)
+      return tree
+    }
+
+    // Split: row 0 is the content pair (value == a real side), row 1 is the marker
+    // pair (both sides `.noNewlineMarker`) → nil.
+    let splitDoc = documentView()
+    let splitSUT = provider(tree: markerTree(), mode: .split, documentView: splitDoc)
+    splitSUT.reload()
+    #expect(splitDoc.accessibilityChildren()?.count == 2)
+    #expect(splitSUT.value(0) == "new code")  // content pair still speaks the code
+    #expect(splitSUT.value(1) == nil)  // marker pair speaks nothing
+    #expect(splitSUT.value(1) != "No newline at end of file")
+
+    // Unified reference: the `.line` marker rows are `nil` too (parity).
+    let unifiedDoc = documentView()
+    let unifiedSUT = provider(tree: markerTree(), mode: .unified, documentView: unifiedDoc)
+    unifiedSUT.reload()
+    // rows: 0 del content, 1 del marker, 2 add content, 3 add marker.
+    #expect(unifiedSUT.value(1) == nil)
+    #expect(unifiedSUT.value(3) == nil)
+  }
+
   // MARK: - commentWidgetA11yMerge (live hosting view onscreen / synthesized offscreen)
 
   @Test func commentRotorMergesLiveWidgetOrSynthesizedFallback() {

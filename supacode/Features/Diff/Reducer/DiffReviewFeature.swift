@@ -971,12 +971,21 @@ struct DiffReviewFeature {
               }
             }
           } else if delta < 0 {
-            // Re-hide: drop back to the collapsed default and cancel any in-flight slice
-            // for this document's gaps (mirrors `.collapseGap`, so a late slice cannot
-            // repopulate the just-cleared `revealed`).
-            document.expansion = .collapsed
-            document.revealed.removeAll()
-            contextEffects += (0...document.hunks.count).map { Effect<Action>.cancel(id: CancelID.slice(key, $0)) }
+            // Re-hide: SYMMETRIC to the grow branch — shrink every gap by one fine step,
+            // both ends (`.full` is all-or-nothing and a no-op under `shrink`). A gap that
+            // fully collapses (its region pruned to no-region) drops its `revealed` slice
+            // and cancels any in-flight slice for it (mirrors `.collapseGap`, so a late
+            // slice can't repopulate the just-cleared `revealed`). A PARTIAL shrink keeps
+            // `revealed` untouched — the resolved region caps what `applyExpansion` shows,
+            // so the over-populated revealed lines are harmless (and re-growing needs no
+            // fresh slice).
+            for gap in 0...document.hunks.count {
+              let wasExpanded = document.expansion.hasRevealedRegion(gap: gap)
+              document.expansion.shrink(gap: gap, by: .fine, direction: .both)
+              guard wasExpanded, !document.expansion.hasRevealedRegion(gap: gap) else { continue }
+              document.revealed[gap] = nil
+              contextEffects.append(.cancel(id: CancelID.slice(key, gap)))
+            }
           } else {
             continue
           }
@@ -1024,8 +1033,14 @@ struct DiffReviewFeature {
         let new = document.newBlob
         state.openDiffs[key] = document
         // Nothing to highlight on either side (plain-text file / no bundled grammar):
-        // still clear any stale runs, but skip the effect.
+        // actually clear any previously-arrived runs and bump the delivery revision so
+        // the view repaints plain — then skip the async effect. (The comment used to
+        // promise this without doing it.)
         guard old != nil || new != nil else {
+          document.oldStyleRuns = [:]
+          document.newStyleRuns = [:]
+          document.styleRunsVersion &+= 1
+          state.openDiffs[key] = document
           return windowingEffects.isEmpty ? .none : .merge(windowingEffects)
         }
         // Each side is queried with ITS OWN visible line range (old / new line numbers

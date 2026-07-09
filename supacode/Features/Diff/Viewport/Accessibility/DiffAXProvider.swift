@@ -191,7 +191,13 @@ final class DiffAXProvider: NSObject {
     else { return nil }
     switch diffRow {
     case .line(let line): return line.origin == .noNewlineMarker ? nil : line.content
-    case .splitLine(_, let old, let new): return new?.content ?? old?.content
+    case .splitLine(_, let old, let new):
+      // Mirror the unified `.line` guard: a no-newline-marker side carries the literal
+      // "No newline at end of file" as its content, which must NOT be spoken as the
+      // row's value. Return the first side whose origin is a real content line.
+      if let new, new.origin != .noNewlineMarker { return new.content }
+      if let old, old.origin != .noNewlineMarker { return old.content }
+      return nil
     case .plainFallback(_, let text): return text
     default: return nil
     }

@@ -218,7 +218,10 @@ final class DiffHighlightEngine {
   /// (a `MainActor.assumeIsolated` here crashed on neon's background processor). A
   /// missing grammar returns `nil` so the embedded region renders plain.
   nonisolated func injectedConfiguration(named name: String) -> LanguageConfiguration? {
-    guard let grammar = GrammarRegistry.grammar(forInjectionName: name) else { return nil }
+    guard let grammar = GrammarRegistry.grammar(forInjectionName: name) else {
+      Self.logger.info("no grammar for injected language \(name); embedded region renders plain")
+      return nil
+    }
     return languageConfiguration(for: grammar)
   }
 

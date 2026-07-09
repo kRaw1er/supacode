@@ -201,6 +201,15 @@ private struct FileChangeRow: View {
         }
       }
       Spacer(minLength: 8)
+      if file.isSymlink {
+        // The diff content is the symlink TARGET string, not file bytes — flag it so
+        // the reader doesn't mistake the target path for the linked file's contents.
+        Image(systemName: "link")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .help("Symlink — the diff shows the link target, not file contents")
+          .accessibilityHidden(true)
+      }
       if file.status == .conflicted {
         Text("unmerged")
           .font(.caption2.weight(.semibold))
@@ -244,7 +253,8 @@ private struct FileChangeRow: View {
       : "\(tail(file.newPath)), \(StatusBadge.statusWord(file.status))"
     let detail = file.isBinary ? "binary" : "\(file.addedLines) added, \(file.removedLines) removed"
     let unmerged = file.status == .conflicted ? ", unmerged" : ""
-    return "\(lead), \(detail)\(unmerged)"
+    let symlink = file.isSymlink ? ", symlink" : ""
+    return "\(lead), \(detail)\(unmerged)\(symlink)"
   }
 }
 

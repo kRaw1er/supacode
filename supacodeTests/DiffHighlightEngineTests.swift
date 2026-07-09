@@ -62,6 +62,16 @@ struct DiffHighlightEngineTests {
     #expect(runs.contains { $0.capture.hasPrefix("keyword") }, "expected injected JS `let` keyword in <script>")
   }
 
+  /// A missing injected grammar is handled — the `LanguageProvider` returns `nil` so
+  /// the embedded region renders plain (never crashes). The engine also logs the miss
+  /// loudly (bug #3: no silent drop) via `SupaLogger.info`; there is no log-capture
+  /// harness, so this asserts the observable contract (the `nil` return) directly.
+  @Test func missingInjectedGrammarReturnsNilForPlainFallback() {
+    let engine = DiffHighlightEngine()
+    #expect(engine.injectedConfiguration(named: "definitely-not-a-language") == nil)
+    #expect(engine.injectedConfiguration(named: "") == nil)
+  }
+
   /// B §10 — the shared engine is one lazily-built instance across files; `dispose`
   /// tears it down and the next request rebuilds a NEW instance.
   @Test func sharedHighlighterSingletonLifecycle() {

@@ -673,6 +673,12 @@ nonisolated enum Libgit2Diff {
     // other file `old_file.id`/`new_file.id` are blob OIDs, not commit SHAs), so
     // gate them; the octal modes are meaningful metadata for every file.
     let isSubmodule = status == .submodule
+    // Symlink HINT (SpecFlow 2.6): either side at `GIT_FILEMODE_LINK` (0120000)
+    // means the diff content is the symlink TARGET string, not file bytes. libgit2
+    // already diffs the target (never follows the link) — this only flags it for the
+    // renderer. Check both sides so a deleted / added symlink is covered too.
+    let linkMode = UInt16(GIT_FILEMODE_LINK.rawValue)
+    let isSymlink = delta.new_file.mode == linkMode || delta.old_file.mode == linkMode
     return FileChange(
       oldPath: oldPath,
       newPath: newPath,
@@ -686,7 +692,8 @@ nonisolated enum Libgit2Diff {
       oldSubmoduleSHA: isSubmodule ? oidString(delta.old_file.id) : nil,
       newSubmoduleSHA: isSubmodule ? oidString(delta.new_file.id) : nil,
       oldMode: octalMode(delta.old_file.mode),
-      newMode: octalMode(delta.new_file.mode)
+      newMode: octalMode(delta.new_file.mode),
+      isSymlink: isSymlink
     )
   }
 

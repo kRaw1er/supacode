@@ -102,6 +102,44 @@ struct ExpansionStateTests {
     #expect(full == .full)
   }
 
+  // MARK: - 9.3b symmetric shrink (⇧E) — saturating, prunes to no-region
+
+  @Test func shrinkIsSymmetricAndPrunesToCollapsed() {
+    var state = ExpansionState.collapsed
+    // Grow two fine steps on both ends ⇒ 40/40.
+    state.expand(gap: 1, by: .fine, direction: .both)
+    state.expand(gap: 1, by: .fine, direction: .both)
+    #expect(state == .regions([1: HunkExpansionRegion(fromStart: 40, fromEnd: 40)]))
+
+    // One shrink removes exactly ONE fine step from each end (symmetric to expand).
+    state.shrink(gap: 1, by: .fine, direction: .both)
+    #expect(state == .regions([1: HunkExpansionRegion(fromStart: 20, fromEnd: 20)]))
+    #expect(state.hasRevealedRegion(gap: 1))
+
+    // The final shrink saturates at 0 and PRUNES the gap back to no-region ⇒ `.collapsed`.
+    state.shrink(gap: 1, by: .fine, direction: .both)
+    #expect(state == .collapsed)
+    #expect(!state.hasRevealedRegion(gap: 1))
+
+    // Shrinking an already-absent gap is an inert no-op.
+    state.shrink(gap: 5, by: .fine, direction: .both)
+    #expect(state == .collapsed)
+
+    // `.full` is all-or-nothing — shrink is a no-op (mirrors expand/collapse on `.full`).
+    var full = ExpansionState.full
+    #expect(full.hasRevealedRegion(gap: 0))
+    full.shrink(gap: 0, by: .fine, direction: .both)
+    #expect(full == .full)
+
+    // Uneven ends: shrinking below zero clamps at 0, and a single non-zero end keeps the region.
+    var uneven = ExpansionState.regions([2: HunkExpansionRegion(fromStart: 10, fromEnd: 20)])
+    uneven.shrink(gap: 2, by: .fine, direction: .both)  // 10-20→0, 20-20→0 ... fromStart clamps at 0
+    #expect(uneven == .collapsed)  // both ends hit 0 ⇒ pruned
+    var oneEnd = ExpansionState.regions([2: HunkExpansionRegion(fromStart: 40, fromEnd: 5)])
+    oneEnd.shrink(gap: 2, by: .fine, direction: .down)  // only the bottom shrinks: 5→0, top untouched
+    #expect(oneEnd == .regions([2: HunkExpansionRegion(fromStart: 40, fromEnd: 0)]))
+  }
+
   // MARK: - 9.4 = E seam 1.5 — expansion survives a re-diff via the gap-index key
 
   @Test func expansionSurvivesReDiffByGapKey() {
