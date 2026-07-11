@@ -37,12 +37,16 @@ struct DiffHighlightReducerTests {
       isPlain: { _, _, _, _ in false })
   }
 
+  /// Distinct runs the ASYNC path yields, so a test can tell which overload answered.
+  private static let asyncRuns: [Int: [StyleRun]] = [0: [StyleRun(range: 0..<2, capture: "string")]]
+
   /// A stub whose SYNC fast path answers (with `cannedRuns`) only for the given warm
-  /// blob OIDs, and returns `nil` (pending) for the rest — so a test can drive the
-  /// warm / pending / partial sync branches of `.highlightVisibleRangeChanged`.
+  /// blob OIDs and returns `nil` (pending) otherwise; the async `styleRuns` yields the
+  /// DISTINCT `asyncRuns`. So a received `cannedRuns` proves the sync overload was used
+  /// and `asyncRuns` proves the async fallback ran.
   private static func stubHighlight(syncWarmOIDs: Set<String>) -> DiffHighlightClient {
     DiffHighlightClient(
-      styleRuns: { _, _ in cannedRuns },
+      styleRuns: { _, _ in asyncRuns },
       syncStyleRuns: { input, _ in syncWarmOIDs.contains(input.blobOID) ? cannedRuns : nil },
       isPlain: { _, _, _, _ in false })
   }
@@ -125,34 +129,41 @@ struct DiffHighlightReducerTests {
     }
   }
 
-  /// Phase 1 sync fast path — a WARM parse colors the same reduction and NO async pass
-  /// is scheduled (the flash-killer). Old side warm, new side absent (working tree).
-  @Test(.dependencies) func syncFastPathPaintsWarmSideAndSkipsAsync() async {
+  /// Phase 1 sync fast path — inside the DEBOUNCED effect (NOT per scroll tick): a warm
+  /// parse is served by the cheap sync overload, so the delivered runs are the sync
+  /// `cannedRuns`, not the async `asyncRuns`. Debounce preserved ⇒ one delivery per
+  /// settle, no per-tick `setSyntax`.
+  @Test(.dependencies) func warmSideServedBySyncOverloadInsideDebounce() async {
     let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
     let old = HighlightBlobInput(blobOID: "head", utf16: DiffFixture.blob("let x = 1"), path: "a.swift")
     var state = DiffReviewFeature.State()
     state.openDiffs[key] = Self.loadedDoc(oldBlob: old, newBlob: nil)
+    let clock = TestClock()
 
     let store = TestStore(initialState: state) {
       DiffReviewFeature()
     } withDependencies: {
-      $0.continuousClock = TestClock()
+      $0.continuousClock = clock
       $0.diffHighlight = Self.stubHighlight(syncWarmOIDs: ["head"])
     }
 
-    // Runs land SYNCHRONOUSLY in the send reduction; no `highlightsReady` follows
-    // (exhaustive TestStore would flag a leftover async effect).
+    // The range change only records the window + bumps the generation — no synchronous
+    // paint (no `styleRunsVersion` bump in the body).
     await store.send(.highlightVisibleRangeChanged(key: key, window: VisibleLineWindow(old: 0..<10, new: 0..<10))) {
       $0.openDiffs[key]?.visibleLineWindow = VisibleLineWindow(old: 0..<10, new: 0..<10)
       $0.openDiffs[key]?.highlightGeneration = 1
-      $0.openDiffs[key]?.oldStyleRuns = Self.cannedRuns
+    }
+    await clock.advance(by: .milliseconds(16))
+    await store.receive(\.highlightsReady) {
+      $0.openDiffs[key]?.oldStyleRuns = Self.cannedRuns  // sync overload answered
+      $0.openDiffs[key]?.newStyleRuns = [:]
       $0.openDiffs[key]?.styleRunsVersion = 1
     }
   }
 
-  /// Phase 1 sync fast path — a PENDING side (sync returns nil) falls back to the
-  /// async pass, byte-identical to the pre-sync behaviour.
-  @Test(.dependencies) func syncFastPathPendingFallsBackToAsync() async {
+  /// A PENDING side (sync returns nil) falls back to the async overload — delivers
+  /// `asyncRuns`.
+  @Test(.dependencies) func pendingSideFallsBackToAsyncOverload() async {
     let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
     let old = HighlightBlobInput(blobOID: "head", utf16: DiffFixture.blob("let x = 1"), path: "a.swift")
     var state = DiffReviewFeature.State()
@@ -172,15 +183,15 @@ struct DiffHighlightReducerTests {
     }
     await clock.advance(by: .milliseconds(16))
     await store.receive(\.highlightsReady) {
-      $0.openDiffs[key]?.oldStyleRuns = Self.cannedRuns
+      $0.openDiffs[key]?.oldStyleRuns = Self.asyncRuns  // async fallback answered
       $0.openDiffs[key]?.newStyleRuns = [:]
       $0.openDiffs[key]?.styleRunsVersion = 1
     }
   }
 
-  /// Phase 1 sync fast path — PARTIAL warmth: the warm old side paints immediately,
-  /// the pending new side still resolves through the async pass.
-  @Test(.dependencies) func syncFastPathPartialWarmthPaintsThenAsyncFillsPending() async {
+  /// PARTIAL warmth in ONE delivery: warm old side served by sync (`cannedRuns`),
+  /// pending new side by the async fallback (`asyncRuns`).
+  @Test(.dependencies) func partialWarmthMixesSyncAndAsyncInOneDelivery() async {
     let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
     let old = HighlightBlobInput(blobOID: "head", utf16: DiffFixture.blob("let x = 1"), path: "a.swift")
     let new = HighlightBlobInput(blobOID: "work", utf16: DiffFixture.blob("let x = 2"), path: "a.swift")
@@ -195,17 +206,15 @@ struct DiffHighlightReducerTests {
       $0.diffHighlight = Self.stubHighlight(syncWarmOIDs: ["head"])  // old warm, new pending
     }
 
-    // Old paints synchronously (v1); the async pass then delivers both sides (v2).
     await store.send(.highlightVisibleRangeChanged(key: key, window: VisibleLineWindow(old: 0..<10, new: 0..<10))) {
       $0.openDiffs[key]?.visibleLineWindow = VisibleLineWindow(old: 0..<10, new: 0..<10)
       $0.openDiffs[key]?.highlightGeneration = 1
-      $0.openDiffs[key]?.oldStyleRuns = Self.cannedRuns
-      $0.openDiffs[key]?.styleRunsVersion = 1
     }
     await clock.advance(by: .milliseconds(16))
     await store.receive(\.highlightsReady) {
-      $0.openDiffs[key]?.newStyleRuns = Self.cannedRuns
-      $0.openDiffs[key]?.styleRunsVersion = 2
+      $0.openDiffs[key]?.oldStyleRuns = Self.cannedRuns  // sync
+      $0.openDiffs[key]?.newStyleRuns = Self.asyncRuns  // async fallback
+      $0.openDiffs[key]?.styleRunsVersion = 1
     }
   }
 }
