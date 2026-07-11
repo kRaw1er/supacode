@@ -33,6 +33,12 @@ enum LineTypesetter {
   /// word-diff bg (Phase 5) is a separate hand-filled rect since `CTLineDraw` ignores
   /// background. Ligatures OFF (`.ligature = 0`) ⇒ offset↔x stays exact (brainstorm
   /// §Round-3). Ranges are clamped to the string so a stale run can never crash.
+  ///
+  /// Overlapping runs apply in ARRAY order (last-wins). This is deliberately NOT routed
+  /// through `StyleRunCompositor` (parked): for our grammars neon emits only same-range
+  /// ties + non-overlapping splits, so array-order and the compositor's narrowest-wins
+  /// are equivalent (see `StyleRunCompositorEquivalenceTests`). Non-color modifier
+  /// captures that would clobber a real one are dropped upstream in `DiffHighlightEngine`.
   static func attributed(
     _ content: NSString, font: NSFont, style: NSParagraphStyle, syntax: [StyleRun] = []
   ) -> NSAttributedString {

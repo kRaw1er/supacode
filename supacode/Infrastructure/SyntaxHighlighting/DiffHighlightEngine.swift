@@ -268,6 +268,11 @@ final class DiffHighlightEngine {
     var byLine: [Int: [StyleRun]] = [:]
     guard !lineStarts.isEmpty else { return byLine }
     for range in named {
+      // Drop non-color modifier captures (`@spell`/`@conceal`): they carry no
+      // foreground, resolve to `labelColor`, and — arriving AFTER the real
+      // `@comment`/`@string` capture for the same range — would override it and paint
+      // e.g. comments in the default text color instead of the muted comment color.
+      guard Self.isColorBearing(range.name) else { continue }
       let nsRange = range.range  // ALREADY UTF-16 — no /2
       guard nsRange.length > 0 else { continue }
       let lower = nsRange.location
@@ -288,6 +293,19 @@ final class DiffHighlightEngine {
       }
     }
     return byLine
+  }
+
+  /// tree-sitter modifier captures that mark a region for tooling (spell-checking,
+  /// conceal) but carry NO foreground color. `highlights.scm` emits them alongside a
+  /// real color capture over the SAME range, so without this filter they resolve to
+  /// the default `labelColor` and clobber the real capture in array order.
+  nonisolated static let nonColorCaptures: Set<String> = ["spell", "nospell", "conceal"]
+
+  /// `false` for a non-color modifier capture (`@spell`, `@spell.foo`, `@conceal`, …),
+  /// matched on the ROOT component so a namespaced variant is caught too.
+  nonisolated static func isColorBearing(_ capture: String) -> Bool {
+    let root = capture.split(separator: ".").first.map(String.init) ?? capture
+    return !nonColorCaptures.contains(root)
   }
 
   /// 0-based line for a UTF-16 offset — largest index with `lineStarts[index] <=

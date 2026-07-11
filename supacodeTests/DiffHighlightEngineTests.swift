@@ -105,6 +105,35 @@ struct DiffHighlightEngineTests {
     #expect(runs.contains { $0.capture.hasPrefix("keyword") })
   }
 
+  /// A `@spell` modifier capture shares the comment's range but carries no color; it
+  /// must be dropped in bucketing so it can't override the comment's foreground (which,
+  /// in array order, painted comments in the default text color instead of the muted
+  /// comment color). Every surviving run over the comment resolves to the comment color.
+  @Test func nonColorSpellCaptureIsDroppedSoCommentKeepsColor() async {
+    let engine = DiffHighlightEngine()
+    let input = HighlightBlobInput(
+      blobOID: "spell-comment", utf16: DiffFixture.blob("// TODO return if\n"), path: "a.swift")
+    let runs = (await engine.styleRuns(for: input, visibleLines: 0..<2))[0] ?? []
+
+    #expect(!runs.isEmpty)
+    #expect(!runs.contains { $0.capture == "spell" || $0.capture.hasPrefix("spell.") })
+    #expect(runs.contains { $0.capture.hasPrefix("comment") })
+    // No surviving run resolves to a DIFFERENT foreground than `comment` over the line.
+    let commentColor = HighlightTheme.color(for: "comment")
+    #expect(runs.allSatisfy { HighlightTheme.color(for: $0.capture) == commentColor })
+  }
+
+  /// The color-bearing filter is a pure classifier: color captures pass, modifier
+  /// captures (root-matched, so namespaced variants too) are rejected.
+  @Test func isColorBearingRejectsModifierCaptures() {
+    #expect(DiffHighlightEngine.isColorBearing("comment"))
+    #expect(DiffHighlightEngine.isColorBearing("keyword.control"))
+    #expect(DiffHighlightEngine.isColorBearing("string.escape"))
+    #expect(!DiffHighlightEngine.isColorBearing("spell"))
+    #expect(!DiffHighlightEngine.isColorBearing("spell.rare"))
+    #expect(!DiffHighlightEngine.isColorBearing("conceal"))
+  }
+
   /// C9 sync fast path — a no-grammar file is a legitimate plain render (`[:]`), NOT
   /// pending (`nil`): the reducer must treat it as "nothing to paint", not "retry async".
   @Test func syncFastPathPlainFileIsEmptyNotPending() {

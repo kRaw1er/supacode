@@ -15,6 +15,17 @@ import Foundation
 ///
 /// O(intervals × fgRuns) per line, both bounded by tokens-per-visible-line. Caseless
 /// `enum` — no free functions (CLAUDE.md).
+///
+/// PARKED (2026-07-11, not wired into the render path): an investigation over real
+/// neon output for our bundled grammars found that this compositor's narrowest-wins
+/// precedence produces output IDENTICAL to production's array-order last-wins
+/// (`LineTypesetter.attributed`). neon does not emit strictly-nested different-width
+/// overlaps — it splits captures around inner ones (e.g. `string` around
+/// `string.escape`) and otherwise emits same-range ties, which BOTH strategies resolve
+/// to the later capture. Wiring it would unify syntax fg + word-diff bg into one model
+/// but change no visible output while adding cache-key / word-diff / perf risk. Retained
+/// (NOT deleted) with `StyleRunCompositorEquivalenceTests` guarding the equivalence — if
+/// a future grammar introduces a divergent nesting, that guard fails and this gets wired.
 enum StyleRunCompositor {
   /// Merge `foreground` (syntax fg; `background == nil`, may overlap) with `wordDiff`
   /// spans (→ background) into one non-overlapping, coalesced `[StyleRun]` covering
