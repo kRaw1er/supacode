@@ -48,8 +48,11 @@ struct DiffDocument: Equatable, Sendable {
   /// The new-side blob (branch tip for a base diff), or `nil` on a deleted file /
   /// the working-tree new side (workdir, not decoded).
   var newBlob: HighlightBlobInput?
-  /// The last per-side visible SOURCE-line window the highlighter was asked about
-  /// (1-based line numbers, split by blob side — NOT rendered-row indices).
+  /// VESTIGIAL — kept only so the field's decode/Equatable shape is unchanged. Under the
+  /// pull-model, syntax highlighting reads the span cache directly at render time, so NO
+  /// consumer reads this window; `.visibleRangeChanged` therefore no longer writes it
+  /// (re-publishing the document every scroll frame just to store dead state cost ~1.5ms/
+  /// frame). Do not re-introduce a per-frame write — resolve the visible window on demand.
   var visibleLineWindow: VisibleLineWindow = .empty
   /// Set once by the size gate at load; short-circuits the highlight driver so a
   /// 200k-line / >2.5M-unit file renders plain with a header affordance, no stall.
@@ -975,8 +978,15 @@ struct DiffReviewFeature {
       // MARK: Phase 4 — visible-range / lazy blob-slice windowing
 
       case .visibleRangeChanged(let key, let window):
-        guard var document = state.openDiffs[key] else { return .none }
-        document.visibleLineWindow = window
+        // Read the document IMMUTABLY — the visible window is deliberately NOT stored back
+        // into `state.openDiffs`. Nothing reads `document.visibleLineWindow` (syntax
+        // highlighting is a render-layer PULL off the span cache now, warmed by the
+        // controller — not a reducer push), and re-assigning the document re-published it
+        // to SwiftUI on EVERY scroll frame — ~1.5ms/frame of pure churn for dead state.
+        // This handler's ONLY remaining job is lazily slicing expanded gaps scrolled into view.
+        guard let document = state.openDiffs[key], let worktree = state.selectedWorktree,
+          document.expansion != .collapsed
+        else { return .none }
         // Lazy blob windowing (F69 tail / finding #11): if the visible window scrolled
         // into an expanded gap region the eager slice never materialized (capped at
         // `maxEagerSliceLines` per gap), slice the still-missing NEW-side sub-ranges
@@ -985,22 +995,19 @@ struct DiffReviewFeature {
         // in-flight eager slice's result is never dropped — and dedups against
         // `revealed[gap]`. Runs before the highlight size gate: a huge file still
         // expands even when syntax highlighting is disabled.
+        let sliceToken = document.generation
         var windowingEffects: [Effect<Action>] = []
-        if let worktree = state.selectedWorktree, document.expansion != .collapsed {
-          let sliceToken = document.generation
-          for gap in 0...document.hunks.count {
-            let ranges = document.unrevealedVisibleRanges(
-              gap: gap, window: window, cap: Self.maxEagerSliceLines)
-            guard !ranges.isEmpty else { continue }
-            windowingEffects.append(
-              Self.sliceEffect(
-                SliceRequest(
-                  key: key, gap: gap, file: document.file, source: key.source, worktree: worktree,
-                  ranges: ranges, oldLineDelta: document.gapOldLineDelta(gap), token: sliceToken),
-                blobSliceClient: blobSliceClient))
-          }
+        for gap in 0...document.hunks.count {
+          let ranges = document.unrevealedVisibleRanges(
+            gap: gap, window: window, cap: Self.maxEagerSliceLines)
+          guard !ranges.isEmpty else { continue }
+          windowingEffects.append(
+            Self.sliceEffect(
+              SliceRequest(
+                key: key, gap: gap, file: document.file, source: key.source, worktree: worktree,
+                ranges: ranges, oldLineDelta: document.gapOldLineDelta(gap), token: sliceToken),
+              blobSliceClient: blobSliceClient))
         }
-        state.openDiffs[key] = document
         return windowingEffects.isEmpty ? .none : .merge(windowingEffects)
 
       // MARK: Phase 5 — comments

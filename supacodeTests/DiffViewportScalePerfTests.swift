@@ -97,6 +97,31 @@ struct DiffViewportScalePerfTests {
     )
   }
 
+  // MARK: - Incremental typeset — a shifted window rebuilds only the newly-exposed rows
+
+  @Test func scrollRebuildsOnlyNewlyExposedRowsNotWholeWindow_100k() {
+    let tree = ChunkTreeFixture.uniform(rows: 100_000)
+    let controller = ViewportTestSupport.controller()
+    controller.apply(tree: tree, mode: .unified, scrollPreserving: false)
+
+    // A few-row scroll shifts the render window by a handful of rows. With incremental
+    // typeset, the surviving rows keep their glyphs and only the newly-exposed rows are
+    // (re)built — so the rebuild count is ~the shift, NOT the whole ~80-row window.
+    let baseline = controller.lineRowsConfigured
+    controller.scroll(toY: 120)  // ~6 rows at the 20px fixture row height
+    let rebuilt = controller.lineRowsConfigured - baseline
+
+    #expect(
+      rebuilt <= 30,
+      """
+      A ~6-row scroll rebuilt \(rebuilt) rows. Same typeset inputs, window merely shifted — \
+      only the newly-exposed rows should re-typeset; the survivors keep their glyphs. A count \
+      near the full window means `typesetRows` re-wraps the whole window every frame \
+      (`reuseExisting` incremental path missing).
+      """
+    )
+  }
+
   // MARK: - Bug 3 — a syntax arrival re-typesets the window, it must NOT re-project the leaf
 
   @Test func syntaxBumpDoesNotReprojectMaterializedLeaf() {

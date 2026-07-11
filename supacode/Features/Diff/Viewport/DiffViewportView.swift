@@ -19,9 +19,21 @@ final class DiffViewportView: NSView {
 
   override var isFlipped: Bool { true }
 
+  /// Opaque + a background fill on every `draw` so the WHOLE document surface (leaf
+  /// views AND the gaps between them) is truthfully opaque — that is what lets the
+  /// enclosing `NSClipView.copiesOnScroll` blit the still-visible pixels on a scroll and
+  /// invalidate only the newly-exposed strip, instead of AppKit handing every subview the
+  /// whole viewport as `dirtyRect` (the defeated-`copiesOnScroll` per-frame redraw).
+  override var isOpaque: Bool { true }
+
   /// The viewport takes first responder so diff-body key navigation works. The
   /// comment editor's `NSHostingView` steals FR for typing (mutually exclusive).
   override var acceptsFirstResponder: Bool { true }
+
+  override func draw(_ dirtyRect: NSRect) {
+    NSColor.textBackgroundColor.setFill()
+    dirtyRect.fill()
+  }
 
   override func layout() {
     super.layout()

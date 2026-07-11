@@ -80,9 +80,9 @@ struct DiffSeamSwapReducerTests {
     await store.finish()
   }
 
-  // MARK: - C 16.4 — the visible-range seam survives the swap (records the window)
+  // MARK: - C 16.4 — the visible-range seam is inert on a non-expanded document
 
-  @Test(.dependencies) func visibleRangeChangeRecordsWindow() async {
+  @Test(.dependencies) func visibleRangeChangeIsInertWithoutExpansion() async {
     let fileChange = file()
     let key = DiffDocumentKey(path: fileChange.id, source: .workingTree)
     var document = DiffDocument(file: fileChange, loadState: .loaded, generation: 1)
@@ -95,13 +95,14 @@ struct DiffSeamSwapReducerTests {
     } withDependencies: {
       $0.continuousClock = TestClock()
     }
-    store.exhaustivity = .off
 
-    // A visible-range change records the per-side window (the surviving scroll-position
-    // event); syntax highlighting is now a pure render-layer pull off the span cache, so
-    // no highlight effect is issued and no runs are stored on the document.
+    // A visible-range change on a NON-expanded document is a pure no-op: syntax highlighting
+    // is a render-layer pull off the span cache (no reducer push), the visible window is NOT
+    // stored back (dead state — see `DiffDocument.visibleLineWindow`), and there is no
+    // expanded gap to lazily slice. Exhaustive TestStore ⇒ this asserts NO state mutation
+    // and NO effect: re-publishing the document here was ~1.5ms/frame of scroll churn.
     await store.send(.visibleRangeChanged(key: key, window: VisibleLineWindow(old: 0..<40, new: 0..<40)))
-    #expect(store.state.openDiffs[key]?.visibleLineWindow == VisibleLineWindow(old: 0..<40, new: 0..<40))
+    #expect(store.state.openDiffs[key]?.visibleLineWindow == .empty)
   }
 
   // MARK: - C 16.5 — expand uses the blob-slice path, never a raised-context re-diff

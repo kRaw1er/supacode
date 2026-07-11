@@ -271,24 +271,47 @@ final class ChunkTree {
     var newLo = Int.max
     var newHi = Int.min
     var hit: ChunkHit? = top
-    // Memoize the per-leaf rendered-row array across the walk: consecutive visible
-    // rows share a leaf, so rebuilding `renderedRows(mode)` PER ROW was O(visible ×
-    // leaf) — the dominant per-frame scroll cost on a big leaf. Rebuild only when the
-    // leaf changes ⇒ O(distinct visible leaves × leaf) + O(visible).
+    // Resolve each visible row's source numbers in O(1) from the leaf's intrinsic
+    // numbering (`LineSegment.lineNumbers`) instead of building the whole ≤maxLeafSpan
+    // `renderedRows` array per distinct visible leaf — that array build (+ its two
+    // `windowDeletions`/`windowAdditions` filters) was ~75% of the per-frame scroll cost
+    // on a big leaf. The per-leaf `deletionCount` (O(log window) binary search) is
+    // memoized across the walk; a leaf carrying a no-newline marker (rare — EOF only,
+    // where rendered-row ≠ window offset) falls back to the full projection.
     var cachedID: ChunkID?
-    var cachedRows: [RenderedRow] = []
+    var cachedSegment: LineSegment?
+    var cachedDelCount = 0
+    var cachedFallback: [RenderedRow]?
     while let current = hit, current.yOrigin < rect.maxY {
       if current.id != cachedID {
-        cachedRows = current.chunk.renderedRows(mode)
         cachedID = current.id
+        cachedSegment = current.chunk.lineSegment
+        cachedFallback = nil
+        cachedDelCount = 0
+        if let segment = cachedSegment {
+          cachedDelCount = segment.windowDeletionCount
+          if segment.windowHasNoNewlineMarker(deletionCount: cachedDelCount) {
+            cachedFallback = current.chunk.renderedRows(mode)
+          }
+        }
       }
-      if current.localRow >= 0, current.localRow < cachedRows.count {
-        let row = cachedRows[current.localRow]
-        if let old = row.oldNumber {
+      if let segment = cachedSegment, current.localRow >= 0 {
+        let numbers: (old: Int?, new: Int?)
+        if let fallback = cachedFallback {
+          guard current.localRow < fallback.count else {
+            hit = successor(of: current, mode: mode)
+            continue
+          }
+          let row = fallback[current.localRow]
+          numbers = (row.oldNumber, row.newNumber)
+        } else {
+          numbers = segment.lineNumbers(atRenderedRow: current.localRow, mode: mode, deletionCount: cachedDelCount)
+        }
+        if let old = numbers.old {
           oldLo = min(oldLo, old)
           oldHi = max(oldHi, old)
         }
-        if let new = row.newNumber {
+        if let new = numbers.new {
           newLo = min(newLo, new)
           newHi = max(newHi, new)
         }

@@ -112,6 +112,10 @@ final class LineRowView: NSView, DiffViewportRecyclable {
   private var context = LineRowView.defaultContext()
   private var totalHeight: CGFloat = 0
 
+  /// The view-space union rect of the rows (re)built by the last `typesetRows` pass — the
+  /// exposed strip the incremental repaint invalidates instead of the whole leaf view.
+  private var lastBuiltRect: NSRect = .zero
+
   /// The sub-range of `rows` currently typeset (CTLines built) — the visible
   /// window the last `configure` resolved. For the whole-leaf compat path this is
   /// `0..<rows.count`. Only these rows carry `wrapped` glyphs, have a valid `top`,
@@ -160,6 +164,11 @@ final class LineRowView: NSView, DiffViewportRecyclable {
 
   override var isFlipped: Bool { true }
   override var wantsDefaultClipping: Bool { true }
+  /// `draw(_:)` fills `bounds` opaquely (textBackgroundColor) before anything else, so
+  /// declaring the view opaque is truthful — and it lets `NSClipView.copiesOnScroll` blit
+  /// the still-visible pixels and hand `draw` only the newly-exposed strip as `dirtyRect`,
+  /// instead of the whole viewport (the `maxDirtyH ≈ visible height every frame` waste).
+  override var isOpaque: Bool { true }
 
   override init(frame frameRect: NSRect) {
     super.init(frame: frameRect)
@@ -315,9 +324,24 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     {
       return 0
     }
+    // Same typeset inputs (width / syntax / appearance), window merely SHIFTED ⇒ reuse the
+    // surviving rows' glyphs and typeset ONLY the newly-exposed rows (incremental). A key
+    // change or a reproject invalidates every row's glyphs ⇒ rebuild the whole window.
+    let reuseExisting = !reprojected && configuredTypesetKey == typesetKey
+    // Whether the whole windowed band shifted document-y (a measured height change above the
+    // window). When it hasn't, the survivor rows are byte-identical at their document-fixed
+    // positions, so only the newly-built rows need repainting.
+    let bandMoved = context.renderRangeTop != typesetTop
     self.configuredTypesetKey = typesetKey
-    let typeset = typesetRows(window: window, top: context.renderRangeTop)
-    needsDisplay = true
+    let typeset = typesetRows(window: window, top: context.renderRangeTop, reuseExisting: reuseExisting)
+    if reuseExisting, !bandMoved {
+      // Incremental repaint: invalidate ONLY the exposed strip, not the whole (viewport-
+      // spanning) leaf view. The window backing keeps the survivors' pixels, so `draw` gets
+      // a narrow `dirtyRect` instead of the full visible height every scroll frame.
+      if typeset > 0 { setNeedsDisplay(lastBuiltRect) }
+    } else {
+      needsDisplay = true  // fresh projection / full re-typeset / the whole band shifted
+    }
     return typeset
   }
 
@@ -353,11 +377,12 @@ final class LineRowView: NSView, DiffViewportRecyclable {
   /// the window, not the leaf. `totalHeight` becomes `bufferBefore + Σ windowed
   /// heights` (the frame-growth floor). Returns the count of rows typeset this pass.
   @discardableResult
-  private func typesetRows(window: Range<Int>, top bufferBefore: CGFloat) -> Int {
+  private func typesetRows(window: Range<Int>, top bufferBefore: CGFloat, reuseExisting: Bool) -> Int {
+    let previousWindow = typesetWindow
     let rowHeight = context.rowHeight
     // Release the CTLines of rows that scrolled out of the window (bounded by the
     // previous window, so this stays O(window) — never O(leaf)).
-    for index in typesetWindow where !window.contains(index) && index < rows.count {
+    for index in previousWindow where !window.contains(index) && index < rows.count {
       rows[index].wrapped = nil
       rows[index].oldWrapped = nil
       rows[index].newWrapped = nil
@@ -366,6 +391,8 @@ final class LineRowView: NSView, DiffViewportRecyclable {
 
     let geo = geometry()
     let style = LineTypesetter.paragraphStyle(advance: context.metrics.charWidth)
+    var built = 0
+    var builtRect = NSRect.zero
     var top = bufferBefore
     for index in window {
       if rows[index].isMarker {
@@ -374,6 +401,17 @@ final class LineRowView: NSView, DiffViewportRecyclable {
         top += rowHeight
         continue
       }
+      // Incremental: a survivor row (in the prior window, glyphs still held) with unchanged
+      // typeset inputs only needs its `top` repositioned — skip the re-wrap. Rebuild only
+      // the newly-exposed rows. This is the "whole window re-wraps every frame though it
+      // shifted a few rows" fix; `built` (the return value) counts only genuine rebuilds.
+      if reuseExisting, previousWindow.contains(index), rowHasGlyphs(index) {
+        rows[index].top = top
+        top += rows[index].height
+        continue
+      }
+      built += 1
+      let rowTop = top
       switch context.mode {
       case .unified:
         let content = rows[index].content ?? ""
@@ -401,11 +439,30 @@ final class LineRowView: NSView, DiffViewportRecyclable {
       }
       rows[index].top = top
       top += rows[index].height
+      let rowRect = NSRect(x: 0, y: rowTop, width: context.width, height: rows[index].height)
+      builtRect = builtRect.isEmpty ? rowRect : builtRect.union(rowRect)
     }
+    lastBuiltRect = builtRect
     totalHeight = top
     typesetWindow = window
     typesetTop = bufferBefore
-    return window.count
+    return built
+  }
+
+  /// Whether row `index` currently holds the wrapped glyphs it WOULD rebuild in the
+  /// current mode — the reuse gate for the incremental typeset. A content column with no
+  /// text needs no glyphs, so it never blocks reuse; a column with text must already carry
+  /// its `Wrapped` (else it was released and must rebuild).
+  private func rowHasGlyphs(_ index: Int) -> Bool {
+    let row = rows[index]
+    switch context.mode {
+    case .unified:
+      return row.content == nil || row.wrapped != nil
+    case .split:
+      let oldReady = row.oldContent == nil || row.oldWrapped != nil
+      let newReady = row.newContent == nil || row.newWrapped != nil
+      return oldReady && newReady
+    }
   }
 
   /// Cache-through typeset of one content string at a content width. The syntax runs
