@@ -29,13 +29,22 @@ struct LineRowRenderContext {
   /// `CTLineDraw` ignores background, a word-diff arrival recomposites + redraws the
   /// row's rects but must NOT re-typeset the glyphs (⚠️ Deepening note 4).
   var wordDiffVersion: Int = 0
-  /// Resolved syntax-highlight runs per SOURCE line, keyed by 1-based line number and
-  /// split by blob side. Applied as foreground `NSColor` (via `HighlightTheme`) over
-  /// each run's line-relative UTF-16 range when the row is typeset (Phase-4 seam:
-  /// `DiffDocument.old/newStyleRuns` → here → `CTLine`). Empty ⇒ plain foreground
-  /// (unbundled grammar / over-cap file / not-yet-highlighted range).
-  var oldStyleRuns: [Int: [StyleRun]] = [:]
-  var newStyleRuns: [Int: [StyleRun]] = [:]
+  /// The render-layer seam the row PULLS its syntax runs from (pull model): each drawn
+  /// row asks the provider for its own line's runs synchronously (a µs span-cache read),
+  /// so the overscan the viewport materializes is colored too — no reducer push, no
+  /// white overscan band. A cache miss returns `[]` (plain foreground); the async warmer
+  /// fills the cache off-main and bumps `syntaxVersion` → the row re-typesets and pulls
+  /// its now-cached color.
+  ///
+  /// LINE SPACE: `LineRowView` holds 1-based SOURCE line numbers; the provider/cache key
+  /// is a **0-based BLOB line**. `syntaxRuns` converts with `blobLine = number - 1`.
+  /// Empty identity (`nil` OID / query name) ⇒ that side stays plain (unbundled grammar,
+  /// over-cap file, or an added/deleted/working-tree side with no counterpart blob).
+  var syntaxProvider: SyntaxRunsProvider = .empty
+  var oldBlobOID: String?
+  var newBlobOID: String?
+  var oldQueryName: String?
+  var newQueryName: String?
   /// The sub-range of the leaf's rendered rows to actually typeset — the visible
   /// viewport window (+overscan) the viewport resolved via the tree (pierre
   /// `renderRange` { startingLine, totalLines }, `VirtualizedFile.ts:191`). Rows
@@ -418,16 +427,18 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     }
   }
 
-  /// The syntax runs for a rendered row's content column: old-blob runs for a
-  /// deletion (the row shows the old line), new-blob runs otherwise. Empty unless a
-  /// highlight pass has populated the context for that line number.
+  /// The syntax runs for a rendered row's content column, PULLED from the span cache via
+  /// the provider: old-blob runs for a deletion (the row shows the old line), new-blob
+  /// runs otherwise. Converts the row's 1-based source line number to the provider's
+  /// 0-based blob line (`number - 1`). Empty when the side has no blob identity or the
+  /// cache has not yet been warmed for that line.
   private func syntaxRuns(oldNumber: Int?, newNumber: Int?, isOldSide: Bool) -> [StyleRun] {
     if isOldSide {
-      guard let oldNumber else { return [] }
-      return context.oldStyleRuns[oldNumber] ?? []
+      guard let oldNumber, let oid = context.oldBlobOID, let query = context.oldQueryName else { return [] }
+      return context.syntaxProvider.runs(oid, query, oldNumber - 1)
     }
-    guard let newNumber else { return [] }
-    return context.newStyleRuns[newNumber] ?? []
+    guard let newNumber, let oid = context.newBlobOID, let query = context.newQueryName else { return [] }
+    return context.syntaxProvider.runs(oid, query, newNumber - 1)
   }
 
   // MARK: - Geometry (matches `DiffHitTest.bands` so render + hit-test agree)

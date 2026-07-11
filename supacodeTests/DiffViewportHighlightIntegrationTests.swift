@@ -80,37 +80,45 @@ struct DiffViewportHighlightIntegrationTests {
     #expect((scrolled?.lowerBound ?? 0) > (top?.lowerBound ?? 0), "scrolling down must advance the visible line window")
   }
 
-  /// THE FULL LOOP: apply → the row materializes plain → `setSyntax` delivers runs →
-  /// the SAME materialized `LineRowView` re-typesets in colour. This is the live
-  /// path (`setSyntax` → `layoutVisibleChunks` → `configure(syntaxVersion:)`) that the
-  /// headless keystone bypassed.
-  @Test func setSyntaxRepaintsMaterializedRowInColor() throws {
+  /// THE FULL LOOP (pull model): apply → the row materializes plain (cold cache) →
+  /// `setHighlightBlobs` warms the span cache off-main → on completion the controller
+  /// bumps `syntaxVersion` + re-lays out → the SAME materialized `LineRowView` PULLS its
+  /// now-cached runs and re-typesets in colour. The view-side twin of the Phase-B warm
+  /// test — the live loop that stayed white before the pull switch.
+  @Test func warmRepaintsMaterializedRowInColor() async throws {
+    let engine = DiffHighlightEngine()
     let controller = ViewportTestSupport.controller(width: 800, clipHeight: 600)
+    controller.highlightEngine = engine
+    // A real Swift file whose line 1 is "func run() {}" (blob line 0 = the probed row).
+    let texts = ["func run() {}"] + (1...60).map { "let value\($0) = compute(\($0))" }
+    let source = texts.joined(separator: "\n") + "\n"
     controller.apply(
-      tree: codeTree([(1, "func run() {}")] + manyLines(60).map { ($0.no + 1, $0.text) }),
+      tree: codeTree(texts.enumerated().map { ($0.offset + 1, $0.element) }),
       mode: .unified, scrollPreserving: false)
 
-    // Before syntax: the "func run()" row is plain (base foreground).
     func funcRow() -> LineRowView? {
       (controller.pools[.line]?.used.values).flatMap { views in
         views.compactMap { $0 as? LineRowView }.first { $0.firstRowText == "func run() {}" }
       }
     }
+    // Before the warm: the cache is cold, so the row pulls nothing and renders plain.
     let before = try #require(funcRow(), "line 1 must be materialized at the top")
     let beforeLine = try #require(before.firstRowCTLines?.first)
     #expect(
       CTRunColorProbe.sameColor(
         CTRunColorProbe.foreground(beforeLine, at: 1), DiffPalette.shared.codeForeground.cgColor),
-      "before syntax arrives the row is plain")
+      "before the warm fills the cache the row is plain")
 
-    // Deliver runs for line 1 (new side): `func` keyword at 0..<4.
-    controller.setSyntax(old: [:], new: [1: [StyleRun(range: 0..<4, capture: "keyword")]])
+    // Warm the new side; the completion repaints the visible window from the cache.
+    let input = HighlightBlobInput(blobOID: "func-run", utf16: DiffFixture.blob(source), path: "a.swift")
+    controller.setHighlightBlobs(old: nil, new: input, disabled: false)
+    await controller.highlightWarmTask?.value
 
-    let after = try #require(funcRow(), "the row is still materialized after setSyntax")
+    let after = try #require(funcRow(), "the row is still materialized after the warm")
     let afterLine = try #require(after.firstRowCTLines?.first)
     #expect(
       !CTRunColorProbe.sameColor(
         CTRunColorProbe.foreground(afterLine, at: 1), DiffPalette.shared.codeForeground.cgColor),
-      "setSyntax must repaint the materialized row in colour (the live loop that stayed white)")
+      "the warm must repaint the materialized row in colour (the live loop that stayed white)")
   }
 }

@@ -104,8 +104,11 @@ struct DiffRenderDigestGoldenTests {
       cache: CTLineCache(),
       palette: .shared,
       styleGeneration: 0,
-      oldStyleRuns: oldStyleRuns(),
-      newStyleRuns: newStyleRuns()
+      syntaxProvider: SyntaxRenderHarness.provider(new: newStyleRuns(), old: oldStyleRuns()),
+      oldBlobOID: SyntaxRenderHarness.oldBlobOID,
+      newBlobOID: SyntaxRenderHarness.newBlobOID,
+      oldQueryName: SyntaxRenderHarness.queryName,
+      newQueryName: SyntaxRenderHarness.queryName
     )
   }
 

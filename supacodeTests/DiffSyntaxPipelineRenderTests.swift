@@ -23,8 +23,12 @@ import Testing
 @MainActor
 struct DiffSyntaxPipelineRenderTests {
   /// A wide, cache-fresh context to typeset one line unwrapped (line-relative
-  /// offsets == string offsets), carrying the engine's real per-line style runs.
-  private func context(newStyleRuns: [Int: [StyleRun]]) -> LineRowRenderContext {
+  /// offsets == string offsets), pulling the row's runs SYNCHRONOUSLY from `engine`'s
+  /// warmed span cache via `SyntaxRunsProvider.live` — the TRUE pull path the app now
+  /// draws through (no reducer push, no hand-keyed map). The new side declares the
+  /// blob's OID + grammar query name so `LineRowView`'s 0-based-blob-line pull resolves
+  /// straight into the cache the engine just filled.
+  private func context(engine: DiffHighlightEngine, input: HighlightBlobInput) -> LineRowRenderContext {
     LineRowRenderContext(
       metrics: .resolve(),
       rowHeight: ChunkLayoutMetrics.production.lineHeight,
@@ -33,8 +37,11 @@ struct DiffSyntaxPipelineRenderTests {
       cache: CTLineCache(),
       palette: .shared,
       styleGeneration: 0,
-      oldStyleRuns: [:],
-      newStyleRuns: newStyleRuns
+      syntaxProvider: .live(engine),
+      oldBlobOID: nil,
+      newBlobOID: input.blobOID,
+      oldQueryName: nil,
+      newQueryName: DiffHighlightEngine.grammarQueryName(forPath: input.path)
     )
   }
 
@@ -54,17 +61,18 @@ struct DiffSyntaxPipelineRenderTests {
     )
   }
 
-  /// Render one Swift source line (given its 1-based line number + the engine's
-  /// full per-line run map) and return the foreground of the glyph at `probeOffset`
-  /// plus the base foreground for comparison.
+  /// Render one Swift source line (given its 1-based line number) and return the
+  /// foreground of the glyph at `probeOffset` plus the base foreground for comparison.
+  /// The row PULLS its runs from `engine`'s already-warmed span cache (via the live
+  /// provider) exactly as the app does — this is the seam that shipped broken.
   private func renderedColors(
-    _ content: String, newLineNumber: Int, runs: [Int: [StyleRun]], probeOffset: Int
+    _ content: String, newLineNumber: Int, engine: DiffHighlightEngine, input: HighlightBlobInput, probeOffset: Int
   ) throws -> (token: CGColor, base: CGColor) {
     let view = LineRowView()
     view.configure(
       segment: contextSegment(content, newLineNumber: newLineNumber),
       chunkID: ChunkID(raw: UInt64(newLineNumber)),
-      context: context(newStyleRuns: runs))
+      context: context(engine: engine, input: input))
     let ctLine = try #require(view.firstRowCTLines?.first, "row \(newLineNumber) must produce a CTLine")
     let token = try #require(
       CTRunColorProbe.foreground(ctLine, at: probeOffset), "no foreground at offset \(probeOffset)")
@@ -82,11 +90,14 @@ struct DiffSyntaxPipelineRenderTests {
   @Test func realEngineColorsTheKeywordOnTheRenderedRow() async throws {
     let source = "let alpha = 1\n"
     let input = HighlightBlobInput(blobOID: "kw-1", utf16: DiffFixture.blob(source), path: "Sample.swift")
-    // 1-based visible window for a one-line file: line 1 only (1..<2).
-    let runs = await DiffHighlightClient.liveValue.styleRuns(input, 1..<2)
-    #expect(!runs.values.flatMap { $0 }.isEmpty, "sanity: the client must produce runs for real Swift")
+    // Warm a REAL engine over the 0-based blob line window (line 0 for a one-line file),
+    // filling the span cache the view then pulls from.
+    let engine = DiffHighlightEngine()
+    let warmed = await engine.styleRuns(for: input, visibleLines: 0..<1)
+    #expect(!warmed.values.flatMap { $0 }.isEmpty, "sanity: the engine must produce runs for real Swift")
 
-    let colors = try renderedColors("let alpha = 1", newLineNumber: 1, runs: runs, probeOffset: 1)  // inside "let"
+    let colors = try renderedColors(
+      "let alpha = 1", newLineNumber: 1, engine: engine, input: input, probeOffset: 1)  // inside "let"
     #expect(
       !CTRunColorProbe.sameColor(colors.token, colors.base),
       "the `let` keyword rendered the BASE color — the engine's line-0 runs never reached the 1-based row lookup")
@@ -101,8 +112,9 @@ struct DiffSyntaxPipelineRenderTests {
     let lines = ["let a = 1", "struct B {}", "func g() {}"]
     let source = lines.joined(separator: "\n") + "\n"
     let input = HighlightBlobInput(blobOID: "kw-multi", utf16: DiffFixture.blob(source), path: "Multi.swift")
-    // 1-based visible window covering all three lines: 1..<4.
-    let runs = await DiffHighlightClient.liveValue.styleRuns(input, 1..<(lines.count + 1))
+    // Warm a REAL engine over the 0-based blob window covering all three lines: 0..<3.
+    let engine = DiffHighlightEngine()
+    _ = await engine.styleRuns(for: input, visibleLines: 0..<lines.count)
 
     struct Probe {
       var line: Int
@@ -115,7 +127,8 @@ struct DiffSyntaxPipelineRenderTests {
       Probe(line: 3, content: lines[2], offset: 1),  // "func" at 0..<4
     ]
     for probe in probes {
-      let colors = try renderedColors(probe.content, newLineNumber: probe.line, runs: runs, probeOffset: probe.offset)
+      let colors = try renderedColors(
+        probe.content, newLineNumber: probe.line, engine: engine, input: input, probeOffset: probe.offset)
       #expect(
         !CTRunColorProbe.sameColor(colors.token, colors.base),
         "line \(probe.line) (\"\(probe.content)\") rendered the base color — its keyword was not highlighted")

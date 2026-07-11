@@ -133,9 +133,12 @@ final class DiffViewportController: NSObject {
         }
       }
       if Task.isCancelled { return }
-      // The cache grew for the render window: bump the repaint signal so Phase C can
-      // repaint from the cache. Harmless in Phase B (the view reads the reducer push).
+      // The cache grew for the render window: bump the repaint signal AND re-typeset the
+      // materialized rows so each pulls its now-cached color (pull model). The re-layout
+      // re-enters `warmVisibleHighlights`, but the window is now fully warm (no missing
+      // lines) → it returns without launching another task → no loop.
       self?.syntaxVersion &+= 1
+      self?.layoutVisibleChunks()
     }
   }
 
@@ -500,8 +503,11 @@ final class DiffViewportController: NSObject {
             styleGeneration: DiffPalette.shared.styleGeneration,
             wordDiffEnabled: wordDiffEnabled,
             syntaxVersion: syntaxVersion,
-            oldStyleRuns: oldStyleRuns,
-            newStyleRuns: newStyleRuns,
+            syntaxProvider: .live(highlightEngine),
+            oldBlobOID: oldBlob?.blobOID,
+            newBlobOID: newBlob?.blobOID,
+            oldQueryName: oldBlob.flatMap { DiffHighlightEngine.grammarQueryName(forPath: $0.path) },
+            newQueryName: newBlob.flatMap { DiffHighlightEngine.grammarQueryName(forPath: $0.path) },
             renderRange: window.rows,
             renderRangeTop: window.top
           )

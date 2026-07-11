@@ -34,7 +34,10 @@ struct DiffSyntaxRenderMatrixTests {
       chunkID: ChunkID(raw: 1),
       context: LineRowRenderContext(
         metrics: .resolve(), rowHeight: ChunkLayoutMetrics.production.lineHeight, mode: .unified, width: width,
-        cache: CTLineCache(), palette: .shared, styleGeneration: 0, oldStyleRuns: old, newStyleRuns: new))
+        cache: CTLineCache(), palette: .shared, styleGeneration: 0,
+        syntaxProvider: SyntaxRenderHarness.provider(new: new, old: old), oldBlobOID: SyntaxRenderHarness.oldBlobOID,
+        newBlobOID: SyntaxRenderHarness.newBlobOID, oldQueryName: SyntaxRenderHarness.queryName,
+        newQueryName: SyntaxRenderHarness.queryName))
     return view
   }
 
@@ -61,7 +64,9 @@ struct DiffSyntaxRenderMatrixTests {
       context: LineRowRenderContext(
         metrics: .resolve(), rowHeight: ChunkLayoutMetrics.production.lineHeight, mode: .unified, width: 4000,
         cache: CTLineCache(), palette: .shared, styleGeneration: 0,
-        oldStyleRuns: [5: [StyleRun(range: 0..<3, capture: "keyword")]], newStyleRuns: [:]))
+        syntaxProvider: SyntaxRenderHarness.provider(old: [5: [StyleRun(range: 0..<3, capture: "keyword")]]),
+        oldBlobOID: SyntaxRenderHarness.oldBlobOID, newBlobOID: SyntaxRenderHarness.newBlobOID,
+        oldQueryName: SyntaxRenderHarness.queryName, newQueryName: SyntaxRenderHarness.queryName))
     let ctLine = try #require(view.firstRowCTLines?.first)
     #expect(
       CTRunColorProbe.sameColor(CTRunColorProbe.foreground(ctLine, at: 1), DiffPalette.shared.codeForeground.cgColor),
@@ -80,8 +85,10 @@ struct DiffSyntaxRenderMatrixTests {
       segment: segment, chunkID: ChunkID(raw: 1),
       context: LineRowRenderContext(
         metrics: .resolve(), rowHeight: ChunkLayoutMetrics.production.lineHeight, mode: .unified, width: 240,
-        cache: CTLineCache(), palette: .shared, styleGeneration: 0, oldStyleRuns: [:],
-        newStyleRuns: [1: [StyleRun(range: 0..<4, capture: "keyword")]]))
+        cache: CTLineCache(), palette: .shared, styleGeneration: 0,
+        syntaxProvider: SyntaxRenderHarness.provider(new: [1: [StyleRun(range: 0..<4, capture: "keyword")]]),
+        oldBlobOID: SyntaxRenderHarness.oldBlobOID, newBlobOID: SyntaxRenderHarness.newBlobOID,
+        oldQueryName: SyntaxRenderHarness.queryName, newQueryName: SyntaxRenderHarness.queryName))
     let ctLines = try #require(view.firstRowCTLines)
     #expect(ctLines.count > 1, "the line must actually wrap for this to test sub-line colouring")
     let token = try #require(CTRunColorProbe.foreground(ctLines[0], at: 1), "no glyph on the first sub-line")

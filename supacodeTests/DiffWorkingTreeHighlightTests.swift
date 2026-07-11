@@ -31,10 +31,12 @@ struct DiffWorkingTreeHighlightTests {
     return try #require(batches.first { $0.file.id == path }, "no working-tree batch for \(path)")
   }
 
-  /// The base foreground a plain glyph renders — the "white" everything collapsed to.
-  private func renderedTokenColor(_ content: String, newLineNumber: Int, runs: [Int: [StyleRun]], offset: Int)
-    throws -> (token: CGColor, base: CGColor)
-  {
+  /// Render one row and PULL its runs from `engine`'s warmed span cache (the TRUE pull
+  /// path) — the base foreground is the "white" everything collapsed to on the pre-fix
+  /// nil-blob bug.
+  private func renderedTokenColor(
+    _ content: String, newLineNumber: Int, engine: DiffHighlightEngine, input: HighlightBlobInput, offset: Int
+  ) throws -> (token: CGColor, base: CGColor) {
     let segment = LineSegment(
       hunkID: HunkID(fileID: "f", index: 0),
       lines: [
@@ -50,7 +52,9 @@ struct DiffWorkingTreeHighlightTests {
       chunkID: ChunkID(raw: UInt64(newLineNumber)),
       context: LineRowRenderContext(
         metrics: .resolve(), rowHeight: ChunkLayoutMetrics.production.lineHeight, mode: .unified, width: 4000,
-        cache: CTLineCache(), palette: .shared, styleGeneration: 0, oldStyleRuns: [:], newStyleRuns: runs))
+        cache: CTLineCache(), palette: .shared, styleGeneration: 0, syntaxProvider: .live(engine), oldBlobOID: nil,
+        newBlobOID: input.blobOID, oldQueryName: nil,
+        newQueryName: DiffHighlightEngine.grammarQueryName(forPath: input.path)))
     let ctLine = try #require(view.firstRowCTLines?.first)
     let token = try #require(CTRunColorProbe.foreground(ctLine, at: offset))
     return (token, DiffPalette.shared.codeForeground.cgColor)
@@ -76,12 +80,14 @@ struct DiffWorkingTreeHighlightTests {
 
     let input = HighlightBlobInput(blobOID: oid, utf16: utf16, path: "Sample.swift")
     let lineCount = workdir.split(separator: "\n", omittingEmptySubsequences: false).count
-    let runs = await DiffHighlightClient.liveValue.styleRuns(input, 1..<lineCount)
+    // Warm a REAL engine over the 0-based blob window, filling the span cache the row pulls from.
+    let engine = DiffHighlightEngine()
+    let runs = await engine.styleRuns(for: input, visibleLines: 0..<lineCount)
     #expect(runs.contains { $0.value.contains { $0.capture.hasPrefix("keyword") } }, "new side must produce keywords")
 
     // Line 1 "struct Sample {" — `struct` keyword at 0..<6; render it and assert it is
     // NOT the base color (i.e. the new side is no longer white).
-    let colors = try renderedTokenColor("struct Sample {", newLineNumber: 1, runs: runs, offset: 1)
+    let colors = try renderedTokenColor("struct Sample {", newLineNumber: 1, engine: engine, input: input, offset: 1)
     #expect(!CTRunColorProbe.sameColor(colors.token, colors.base), "the working-tree new side rendered white")
   }
 
