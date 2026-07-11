@@ -84,6 +84,18 @@ struct GutterRenderer {
     }
   }
 
+  /// Paint the opaque number-column fill behind a line number on a CHANGED row, so the
+  /// number reads on a distinct gutter band rather than the translucent +/- row tint
+  /// (pierre parity: `--diffs-bg-{addition,deletion}-number`, an OKLab `color-mix` of
+  /// the change base over the editor bg — mirrored by `DiffPalette.numberColumnFill`).
+  /// Context / marker rows have no fill (`numberColumnFill` returns `nil`) and keep the
+  /// plain background. Backing-snapped so the band edge stays crisp at 1× / 1.5× / 2×.
+  func drawNumberColumn(_ rect: CGRect, origin: DiffLineOrigin, in ctx: some DiffGraphics) {
+    guard let fill = palette.numberColumnFill(for: origin) else { return }
+    ctx.setFillColor(fill.cgColor)
+    ctx.fill(backingAligned(rect))
+  }
+
   private func drawDashedBar(_ bar: CGRect, in ctx: some DiffGraphics) {
     let period = Self.dashPeriod(lineHeight: metrics.lineHeight)
     var offsetY = bar.minY

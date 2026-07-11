@@ -66,6 +66,40 @@ struct GutterRendererTests {
     #expect(context.fills.isEmpty)
   }
 
+  // MARK: - opaque number-column fill (pierre parity) on changed rows only
+
+  @Test func numberColumnFillPaintsOnChangedRowsOnly() {
+    let gutter = renderer(scale: 2)
+    let band = CGRect(x: 4, y: 0, width: 48, height: 20)  // integral at 2× ⇒ snap is identity
+
+    // Addition / deletion: exactly one opaque fill over the band.
+    for origin in [DiffLineOrigin.addition, .deletion] {
+      let rec = RecordingContext()
+      gutter.drawNumberColumn(band, origin: origin, in: rec)
+      #expect(rec.fills == [band], "expected one number-column fill for \(origin)")
+    }
+
+    // Context / no-newline marker: no fill (numberColumnFill returns nil) — numbers keep
+    // the plain background, not a change tint.
+    for origin in [DiffLineOrigin.context, .noNewlineMarker] {
+      let rec = RecordingContext()
+      gutter.drawNumberColumn(band, origin: origin, in: rec)
+      #expect(rec.fills.isEmpty, "expected no number-column fill for \(origin)")
+    }
+  }
+
+  @Test func numberColumnFillIsBackingSnapped() {
+    let gutter = renderer(scale: 2)
+    // A fractional band must land on the backing grid (× scale is integral).
+    let rec = RecordingContext()
+    gutter.drawNumberColumn(CGRect(x: 4.3, y: 0.7, width: 47.9, height: 20.4), origin: .addition, in: rec)
+    #expect(rec.fills.count == 1)
+    let filled = rec.fills[0]
+    for edge in [filled.minX, filled.minY, filled.maxX, filled.maxY] {
+      #expect(abs(edge * 2 - (edge * 2).rounded()) < 1e-9, "off-grid edge \(edge)")
+    }
+  }
+
   // MARK: - 1-based display / 0-based index parity + gutter width == digits
 
   @Test func lineNumbering1BasedIndex0Based() {

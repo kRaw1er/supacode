@@ -522,6 +522,13 @@ final class LineRowView: NSView, DiffViewportRecyclable {
       row: LineRowGeometry(rowRect: rowRect, barX: geo.unifiedBarX),
       origin: row.unifiedOrigin ?? .context,
       in: ctx)
+    // Opaque number-column fill behind BOTH numbers on a changed row (pierre parity).
+    if let origin = row.unifiedOrigin {
+      gutter.drawNumberColumn(
+        CGRect(x: geo.unifiedOldNumX, y: row.top, width: geo.gutterWidth, height: row.height), origin: origin, in: ctx)
+      gutter.drawNumberColumn(
+        CGRect(x: geo.unifiedNewNumX, y: row.top, width: geo.gutterWidth, height: row.height), origin: origin, in: ctx)
+    }
     drawNumber(row.oldNumber, originX: geo.unifiedOldNumX, top: row.top)
     drawNumber(row.newNumber, originX: geo.unifiedNewNumX, top: row.top)
     if let wrapped = row.wrapped {
@@ -576,6 +583,11 @@ final class LineRowView: NSView, DiffViewportRecyclable {
       return
     }
     gutter.draw(row: LineRowGeometry(rowRect: pane.paneRect, barX: pane.barX), origin: origin, in: ctx)
+    // Opaque number-column fill behind this pane's number on a changed row (pierre parity).
+    gutter.drawNumberColumn(
+      CGRect(
+        x: pane.numberX, y: pane.paneRect.minY, width: context.metrics.gutterWidth, height: pane.paneRect.height),
+      origin: origin, in: ctx)
     drawNumber(pane.number, originX: pane.numberX, top: pane.paneRect.minY)
     if let wrapped = pane.wrapped {
       drawContent(
