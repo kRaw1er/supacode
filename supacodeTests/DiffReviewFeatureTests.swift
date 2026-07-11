@@ -569,9 +569,9 @@ struct DiffReviewFeatureTests {
       document.hunks = hunks
       document.loadState = .loaded
       document.isStale = false
-      // The load now feeds the highlighter (production path): with no stubbed blobs
-      // the gate helper still clears stale runs and bumps the delivery revision.
-      document.styleRunsVersion = 1
+      // The load feeds the highlighter (production path): it captures the per-side blobs
+      // and evaluates the size gate. Syntax runs are now a pure render-layer pull off the
+      // span cache — no runs / delivery revision live on the document any more.
       $0.openDiffs[key] = document
     }
   }
@@ -874,7 +874,7 @@ struct DiffReviewFeatureTests {
 
   /// Finding #11 (F69 tail): a `.whole` expand of a >500-line gap eager-slices only the
   /// first `maxEagerSliceLines`; scrolling the viewport into the un-sliced region must
-  /// lazily window in the rest. A `.highlightVisibleRangeChanged` whose new-side window
+  /// lazily window in the rest. A `.visibleRangeChanged` whose new-side window
   /// falls beyond the eager slice fires ONE slice for exactly the missing sub-range; a
   /// re-scroll over already-revealed lines fires none (dedup). Drives a single bounded
   /// gap (not `.diffExpandWholeFile`) so the trailing EOF-unbounded gap's own eager
@@ -917,7 +917,7 @@ struct DiffReviewFeatureTests {
     // Scroll into the un-sliced region (new 700…749): one windowing slice fires for
     // exactly the missing sub-range and lands in `revealed`.
     await store.send(
-      .highlightVisibleRangeChanged(key: key, window: VisibleLineWindow(old: 700..<750, new: 700..<750)))
+      .visibleRangeChanged(key: key, window: VisibleLineWindow(old: 700..<750, new: 700..<750)))
     await store.receive(\.gapSliceLoaded)
     #expect(sliceCalls.value == 2)
     #expect(store.state.openDiffs[key]?.revealed[1]?.contains { $0.newLineNumber == 700 } == true)
@@ -926,7 +926,7 @@ struct DiffReviewFeatureTests {
     // Re-scrolling over an ALREADY-revealed window (new 4…49, inside the eager slice)
     // fires NO further slice — the dedup against `revealed[gap]` holds.
     await store.send(
-      .highlightVisibleRangeChanged(key: key, window: VisibleLineWindow(old: 4..<50, new: 4..<50)))
+      .visibleRangeChanged(key: key, window: VisibleLineWindow(old: 4..<50, new: 4..<50)))
     #expect(sliceCalls.value == 2)
     await store.finish()
   }

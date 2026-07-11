@@ -49,7 +49,6 @@ struct WordDiffGateReducerTests {
       DiffReviewFeature()
     } withDependencies: {
       $0.continuousClock = TestClock()
-      $0.diffHighlight = DiffHighlightClient(styleRuns: { _, _ in [:] }, isPlain: { _, _, _, _ in false })
       $0.diffStreamConsumer = DiffStreamConsumerClient(
         begin: { _, _, _, _ in }, consume: { _, _, _ in }, finish: { _, _ in })
     }

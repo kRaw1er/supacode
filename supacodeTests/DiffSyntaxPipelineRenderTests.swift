@@ -13,12 +13,11 @@ import Testing
 /// empty, `LineTypesetter` early-outs, and every glyph of every file renders the
 /// base `.labelColor` (white in dark mode) — the "all text white" bug.
 ///
-/// These tests drive the REAL highlight CLIENT (`DiffHighlightClient.liveValue`, over
-/// real tree-sitter) — the adapter that owns the blob-line ↔ 1-based-line-number
-/// conversion — end-to-end into a REAL `LineRowView`, and assert the drawn `CTRun`
-/// foreground. They query with a 1-based visible-line window (the app's coordinate)
-/// and are RED on the pre-fix code (the client passed the range straight to the
-/// 0-based engine and returned 0-based keys the 1-based row lookup missed), GREEN
+/// These tests drive the REAL engine (`DiffHighlightEngine`, over real tree-sitter)
+/// end-to-end into a REAL `LineRowView` through the `SyntaxRunsProvider` pull, and
+/// assert the drawn `CTRun` foreground. They resolve the 1-based visible line (the
+/// app's coordinate) to the engine's 0-based blob line and are RED on the pre-fix code
+/// (the row lookup missed the 0-based key), GREEN
 /// once the client speaks 1-based in and out.
 @MainActor
 struct DiffSyntaxPipelineRenderTests {

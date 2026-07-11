@@ -104,10 +104,10 @@ struct DiffViewportScalePerfTests {
     controller.apply(tree: ChunkTreeFixture.largeDistinct(rows: 5_000), mode: .unified, scrollPreserving: false)
     let afterApply = LineRowView.projectCount
     #expect(afterApply >= 1, "the visible leaf was never projected — the guard would be vacuous")
-    // A windowed-highlight arrival bumps `syntaxVersion` ≈ every scroll frame. Syntax
-    // colours are applied at TYPESET time, so a bump must re-typeset the visible window
-    // WITHOUT rebuilding the whole ≤maxLeafSpan row model (`project()`).
-    for line in 1...10 { controller.setSyntax(old: [:], new: [line: []]) }
+    // A span-cache fill bumps `syntaxVersion` ≈ every scroll frame. Syntax colours are
+    // applied at TYPESET time, so a bump must re-typeset the visible window WITHOUT
+    // rebuilding the whole ≤maxLeafSpan row model (`project()`).
+    for _ in 1...10 { controller.repaintForSyntaxFill() }
     #expect(
       LineRowView.projectCount == afterApply,
       """

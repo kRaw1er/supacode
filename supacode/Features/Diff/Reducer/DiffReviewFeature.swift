@@ -63,21 +63,6 @@ struct DiffDocument: Equatable, Sendable {
   /// `nil` when the file renders fully. Surfaced in the diff-tab header so a dropped
   /// render feature (highlight / word-diff) is never a silent drop.
   var renderBannerKey: LargeFileRenderPolicy.BannerKey?
-  /// `line → runs` for the OLD side of the visible window (both sides highlighted —
-  /// fixes bug #2, the old path forced the old side `[]`).
-  var oldStyleRuns: [Int: [StyleRun]] = [:]
-  /// `line → runs` for the NEW side of the visible window.
-  var newStyleRuns: [Int: [StyleRun]] = [:]
-  /// Monotonic guard for the in-flight highlight query. Bumped on every
-  /// visible-range change (the REQUEST); a returning `.highlightsReady` whose token
-  /// no longer matches is dropped (pierre `isCurrentRequest`).
-  var highlightGeneration: Int = 0
-  /// Monotonic revision bumped whenever the STORED runs change (a highlight ARRIVES,
-  /// or a re-diff clears them). This — NOT `highlightGeneration` (which bumps on the
-  /// request, before the runs exist) — is what the view observes to push fresh runs
-  /// into the viewport: gating delivery on `highlightGeneration` skipped the arriving
-  /// colors because the request had already advanced the token.
-  var styleRunsVersion: Int = 0
 
   enum LoadState: Equatable, Sendable {
     case loading
@@ -450,14 +435,12 @@ struct DiffReviewFeature {
     /// context (declarative, reuses Phase-7 `ExpansionState`).
     case diffExpandContext(fileID: FileChange.ID, delta: Int)
 
-    // MARK: Phase 4 — neon syntax highlighting driver
-    /// Viewport scrolled/resized → (re)issue a windowed highlight for the per-side
-    /// visible SOURCE-line `window`, debounced with the injected clock, superseding
-    /// any in-flight pass.
-    case highlightVisibleRangeChanged(key: DiffDocumentKey, window: VisibleLineWindow)
-    /// Both sides' windowed runs came back; applied when `generation` is still live.
-    case highlightsReady(
-      key: DiffDocumentKey, old: [Int: [StyleRun]], new: [Int: [StyleRun]], generation: Int)
+    // MARK: Phase 4 — visible-range / lazy blob-slice windowing
+    /// Viewport scrolled/resized → record the per-side visible SOURCE-line `window`
+    /// and lazily slice any still-unrevealed EXPANDED gap sub-ranges into view (F69 /
+    /// finding #11). Syntax highlighting is a pure render-layer pull off the span cache
+    /// (the controller warms it), so this no longer drives any highlight query.
+    case visibleRangeChanged(key: DiffDocumentKey, window: VisibleLineWindow)
 
     // MARK: Phase 5 — comments + send-to-agent
     /// Gutter "+"/drag resolved a range. Opens the composer (edit mode if a
@@ -495,7 +478,6 @@ struct DiffReviewFeature {
     case commentsLoad
     case diff(DiffDocumentKey)
     case stream(DiffDocumentKey)
-    case highlight(DiffDocumentKey)
     case slice(DiffDocumentKey, Int)  // per (document, gap) blob-slice request
   }
 
@@ -512,7 +494,6 @@ struct DiffReviewFeature {
       @Dependency(BlobSliceClient.self) var blobSliceClient
       @Dependency(DiffStreamConsumerClient.self) var diffStreamConsumer
       @Dependency(DiffStreamingEnabledKey.self) var diffStreamingEnabled
-      @Dependency(DiffHighlightClient.self) var diffHighlight
       @Dependency(TerminalClient.self) var terminalClient
       @Dependency(GitClientDependency.self) var gitClient
       @Dependency(CommentPersistenceStoreClient.self) var persistenceStore
@@ -740,8 +721,7 @@ struct DiffReviewFeature {
         // this the viewer renders every file plain (the "all text white" bug).
         Self.applyHighlightAndRenderGates(
           &document, key: key,
-          loaded: LoadedFileDiff(file: document.file, hunks: hunks, oldBlob: old, newBlob: new),
-          diffHighlight: diffHighlight)
+          loaded: LoadedFileDiff(file: document.file, hunks: hunks, oldBlob: old, newBlob: new))
         // A re-diff re-materializes revealed slices against the fresh geometry; the
         // declarative `expansion` (gap-index keyed) persists across the re-diff.
         document.revealed.removeAll()
@@ -786,8 +766,7 @@ struct DiffReviewFeature {
         let (oldBlob, newBlob) = DiffHighlightDriver.blobInputs(for: batch)
         Self.applyHighlightAndRenderGates(
           &document, key: key,
-          loaded: LoadedFileDiff(file: batch.file, hunks: batch.hunks, oldBlob: oldBlob, newBlob: newBlob),
-          diffHighlight: diffHighlight)
+          loaded: LoadedFileDiff(file: batch.file, hunks: batch.hunks, oldBlob: oldBlob, newBlob: newBlob))
         // A re-diff re-materializes revealed slices; the declarative `expansion`
         // (gap-index keyed) survives the line shift (Phase 7).
         document.revealed.removeAll()
@@ -993,9 +972,9 @@ struct DiffReviewFeature {
         }
         return contextEffects.isEmpty ? .none : .merge(contextEffects)
 
-      // MARK: Phase 4 — neon syntax highlighting driver
+      // MARK: Phase 4 — visible-range / lazy blob-slice windowing
 
-      case .highlightVisibleRangeChanged(let key, let window):
+      case .visibleRangeChanged(let key, let window):
         guard var document = state.openDiffs[key] else { return .none }
         document.visibleLineWindow = window
         // Lazy blob windowing (F69 tail / finding #11): if the visible window scrolled
@@ -1021,59 +1000,8 @@ struct DiffReviewFeature {
                 blobSliceClient: blobSliceClient))
           }
         }
-        // The size gate (set at load) short-circuits before any client is built or
-        // any parse runs — a 200k-line / oversized file renders plain, no stall.
-        guard !document.highlightingDisabled else {
-          state.openDiffs[key] = document
-          return windowingEffects.isEmpty ? .none : .merge(windowingEffects)
-        }
-        document.highlightGeneration &+= 1
-        let generation = document.highlightGeneration
-        let old = document.oldBlob
-        let new = document.newBlob
         state.openDiffs[key] = document
-        // Nothing to highlight on either side (plain-text file / no bundled grammar):
-        // actually clear any previously-arrived runs and bump the delivery revision so
-        // the view repaints plain — then skip the async effect. (The comment used to
-        // promise this without doing it.)
-        guard old != nil || new != nil else {
-          document.oldStyleRuns = [:]
-          document.newStyleRuns = [:]
-          document.styleRunsVersion &+= 1
-          state.openDiffs[key] = document
-          return windowingEffects.isEmpty ? .none : .merge(windowingEffects)
-        }
-        // Each side is queried with ITS OWN visible line range (old / new line numbers
-        // differ). The client speaks 1-based line numbers in and out, so the returned
-        // runs are keyed exactly how `LineRowView` looks them up. The query stays inside
-        // the DEBOUNCED effect (never synchronously per scroll tick — that would force a
-        // `setSyntax` re-typeset every tick); the sync fast path is used FIRST inside it
-        // because a warm windowed query is ~1000× cheaper than the async re-parse (which
-        // reprocesses from byte 0 up to the window), and only falls back to async when the
-        // parse is still pending (sync returns nil).
-        let highlightEffect = Effect<Action>.run { send in
-          try await clock.sleep(for: .milliseconds(16))  // coalesce scroll bursts (no Task.sleep)
-          func runs(_ blob: HighlightBlobInput?, _ lines: Range<Int>) async -> [Int: [StyleRun]] {
-            guard let blob, !lines.isEmpty else { return [:] }
-            if let warm = await diffHighlight.syncStyleRuns(blob, lines) { return warm }
-            return await diffHighlight.styleRuns(blob, lines)
-          }
-          let oldRuns = await runs(old, window.old)
-          let newRuns = await runs(new, window.new)
-          await send(.highlightsReady(key: key, old: oldRuns, new: newRuns, generation: generation))
-        }
-        .cancellable(id: CancelID.highlight(key), cancelInFlight: true)
-        return windowingEffects.isEmpty ? highlightEffect : .merge([highlightEffect] + windowingEffects)
-
-      case .highlightsReady(let key, let old, let new, let generation):
-        // Drop a stale/superseded result (pierre isCurrentRequest) — a re-diff or a
-        // newer visible range already bumped `highlightGeneration`.
-        guard var document = state.openDiffs[key], generation == document.highlightGeneration else { return .none }
-        document.oldStyleRuns = old
-        document.newStyleRuns = new
-        document.styleRunsVersion &+= 1  // runs ARRIVED — the view keys delivery off this
-        state.openDiffs[key] = document
-        return .none
+        return windowingEffects.isEmpty ? .none : .merge(windowingEffects)
 
       // MARK: Phase 5 — comments
 
@@ -1297,11 +1225,11 @@ struct DiffReviewFeature {
   }
 
   /// Populate a freshly loaded diff document's highlight blobs + the size / render /
-  /// word-diff gates, and clear stale style runs (bumping the delivery revision so
-  /// the view repaints). Shared by BOTH load paths — the on-demand `.diffLoaded`
+  /// word-diff gates. Shared by BOTH load paths — the on-demand `.diffLoaded`
   /// (production; streaming is gated off) and the streaming `.streamFileReady` — so
-  /// they can never drift on what the highlighter sees. `LargeFileRenderPolicy` + the
-  /// blob-size `isPlain` gate keep a huge / minified file off the contiguous parse.
+  /// they can never drift on what the highlighter sees. The controller pulls syntax
+  /// runs from the span cache off these blobs; `LargeFileRenderPolicy` + the blob-size
+  /// `DiffHighlightPolicy.isPlain` gate keep a huge / minified file off the contiguous parse.
   /// A freshly loaded file diff's inputs to the highlight + render gates — bundled so
   /// both load paths hand the gate helper one payload (parameter budget).
   private struct LoadedFileDiff {
@@ -1312,7 +1240,7 @@ struct DiffReviewFeature {
   }
 
   private static func applyHighlightAndRenderGates(
-    _ document: inout DiffDocument, key: DiffDocumentKey, loaded: LoadedFileDiff, diffHighlight: DiffHighlightClient
+    _ document: inout DiffDocument, key: DiffDocumentKey, loaded: LoadedFileDiff
   ) {
     let file = loaded.file
     document.oldBlob = loaded.oldBlob
@@ -1325,16 +1253,14 @@ struct DiffReviewFeature {
       file: file, changedLines: changedLines, maxLineLength: longestLine)
     document.highlightingDisabled =
       !renderDecision.highlight
-      || diffHighlight.isPlain(
-        file.removedLines, file.addedLines, loaded.oldBlob?.utf16.count ?? 0, loaded.newBlob?.utf16.count ?? 0)
+      || DiffHighlightPolicy.isPlain(
+        oldChangedLines: file.removedLines, newChangedLines: file.addedLines,
+        oldBlobUTF16: loaded.oldBlob?.utf16.count ?? 0, newBlobUTF16: loaded.newBlob?.utf16.count ?? 0)
     document.wordDiffDisabled = !renderDecision.wordDiff
     document.renderBannerKey = renderDecision.bannerKey
     if let banner = renderDecision.bannerKey {
       Self.logger.info("large-file render gate for \(key.path): \(String(describing: banner))")
     }
-    document.oldStyleRuns = [:]
-    document.newStyleRuns = [:]
-    document.styleRunsVersion &+= 1  // cleared — the view repaints without stale colors
   }
 
   /// Fetches one file's hunks (generation-guarded, 8.1) and feeds them back as

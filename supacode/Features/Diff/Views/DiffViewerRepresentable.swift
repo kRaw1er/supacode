@@ -43,18 +43,9 @@ struct DiffViewerRepresentable: NSViewRepresentable {
   /// never invoked on the render path (only the row-level `+`/`-` tint).
   var wordDiffEnabled: Bool = true
 
-  /// Resolved syntax runs from the reducer (`DiffDocument.old/newStyleRuns`), keyed
-  /// by 1-based line number per blob side. `syntaxVersion` (== the document's
-  /// `highlightGeneration`) bumps on each windowed highlight arrival so `updateNSView`
-  /// repaints the visible rows without a tree rebuild.
-  var oldStyleRuns: [Int: [StyleRun]] = [:]
-  var newStyleRuns: [Int: [StyleRun]] = [:]
-  var syntaxVersion: Int = 0
-
-  /// The per-side blobs + size gate the controller warms the span cache from (Phase B
-  /// pull model, `DiffDocument.old/newBlob` + `highlightingDisabled`). Additive to the
-  /// reducer push above: the view still reads `old/newStyleRuns` for now, so threading
-  /// these only fills the cache off-main for the render window (visible + overscan).
+  /// The per-side blobs + size gate the controller warms the span cache from (pull
+  /// model, `DiffDocument.old/newBlob` + `highlightingDisabled`). The view pulls each
+  /// drawn row's syntax runs from the filled cache — no reducer push.
   var oldBlob: HighlightBlobInput?
   var newBlob: HighlightBlobInput?
   var highlightingDisabled: Bool = false
@@ -71,9 +62,9 @@ struct DiffViewerRepresentable: NSViewRepresentable {
   /// Fired once the pending menu nav intent has been forwarded to `DiffKeyboardNav`,
   /// so the reducer clears `pendingNavCommand` (consume-once).
   var onNavCommandConsumed: () -> Void = {}
-  /// Viewport scrolled/resized → windowed highlight (re)issue (Phase 4 driver). The
-  /// payload is the per-side 1-based visible SOURCE-line window, not rendered-row
-  /// indices — the coordinate the highlighter queries + the row lookup keys off.
+  /// Viewport scrolled/resized → records the visible window + lazily slices unrevealed
+  /// expanded-gap ranges into view (`.visibleRangeChanged`). The payload is the per-side
+  /// 1-based visible SOURCE-line window, not rendered-row indices.
   var onVisibleRangeChanged: (VisibleLineWindow) -> Void = { _ in }
   /// An expander widget's reveal button → the reducer's incremental `expandGap`.
   var onExpandGap: (_ gap: Int, _ step: ExpansionState.Step, _ direction: ExpansionState.Direction) -> Void = {
@@ -104,7 +95,6 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     coordinator.installInteraction()
     let tree = buildTree()
     controller.apply(tree: tree, mode: mode, scrollPreserving: false)
-    controller.setSyntax(old: oldStyleRuns, new: newStyleRuns)
     controller.setHighlightBlobs(old: oldBlob, new: newBlob, disabled: highlightingDisabled)
     coordinator.rebuildKeyboardNav()
     coordinator.syncExpansion(expansion: expansion, revealed: revealed, hunks: hunks, file: file, rebuilt: true)
@@ -114,7 +104,6 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     coordinator.lastGeneration = generation
     coordinator.lastExpansion = expansion
     coordinator.lastRevealedCounts = revealed.mapValues(\.count)
-    coordinator.lastSyntaxVersion = syntaxVersion
     coordinator.lastHighlightBlobKey = highlightBlobKey
     return controller.scrollView
   }
@@ -143,12 +132,10 @@ struct DiffViewerRepresentable: NSViewRepresentable {
       // re-project the tree scroll-preserving, then re-apply the live expansion state
       // (the fresh tree is collapsed) and rebuild the keyboard nav over the new tree.
       controller.apply(tree: buildTree(), mode: mode, scrollPreserving: true)
-      controller.setSyntax(old: oldStyleRuns, new: newStyleRuns)
       controller.setHighlightBlobs(old: oldBlob, new: newBlob, disabled: highlightingDisabled)
       coordinator.lastHighlightBlobKey = highlightBlobKey
       coordinator.rebuildKeyboardNav()
       coordinator.syncExpansion(expansion: expansion, revealed: revealed, hunks: hunks, file: file, rebuilt: true)
-      coordinator.lastSyntaxVersion = syntaxVersion
     } else {
       if coordinator.lastMode != mode {
         // Only the unified↔split preference flipped: O(log #hunks) re-seek, no rebuild.
@@ -159,12 +146,6 @@ struct DiffViewerRepresentable: NSViewRepresentable {
         // An expand / collapse without a re-diff: splice ONLY the changed gaps.
         coordinator.syncExpansion(
           expansion: expansion, revealed: revealed, hunks: hunks, file: file, rebuilt: false)
-      }
-      // Windowed syntax arrival: push the latest runs and repaint the visible rows —
-      // no tree rebuild, cache-hit on rows whose runs are unchanged.
-      if coordinator.lastSyntaxVersion != syntaxVersion {
-        controller.setSyntax(old: oldStyleRuns, new: newStyleRuns)
-        coordinator.lastSyntaxVersion = syntaxVersion
       }
       // Pull-model: re-warm the span cache when the blobs / size gate change without a
       // full re-project (e.g. the size gate resolving after the first batch).
@@ -283,7 +264,6 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     // Change-detection baselines.
     var lastSignature: Signature?
     var lastMode: DiffViewMode = .unified
-    var lastSyntaxVersion: Int = -1
     var lastHighlightBlobKey: String = ""
     var lastGeneration: Int = .min
     var lastExpansion: ExpansionState = .collapsed

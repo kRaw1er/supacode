@@ -5,7 +5,7 @@ import Testing
 @testable import supacode
 
 /// CAT 2 — cross-grammar color fidelity. The user report was "any file, all white",
-/// so this proves the WHOLE pipeline (real `DiffHighlightClient` → tree-sitter → real
+/// so this proves the WHOLE pipeline (real engine → tree-sitter → real
 /// `LineRowView`) colors a leading keyword for every bundled language we claim to
 /// support, not just Swift. Each case is a valid top-level construct so the grammar
 /// classifies its leading keyword; the assertion is "the token is NOT the base color"
@@ -36,8 +36,8 @@ struct DiffSyntaxGrammarFidelityTests {
   func everyBundledGrammarColorsItsLeadingKeyword(_ lang: Lang) async throws {
     let input = HighlightBlobInput(
       blobOID: "grammar-\(lang.name)", utf16: DiffFixture.blob(lang.line + "\n"), path: lang.path)
-    let runs = await DiffHighlightClient.liveValue.styleRuns(input, 1..<2)
-    #expect(!runs.values.flatMap { $0 }.isEmpty, "\(lang.name): the client produced no runs (grammar missing?)")
+    let runs = await SyntaxRenderHarness.liveRuns(input, lineNumbers: 1..<2)
+    #expect(!runs.values.flatMap { $0 }.isEmpty, "\(lang.name): the engine produced no runs (grammar missing?)")
 
     let token = try #require(
       SyntaxRenderHarness.foreground(lang.line, lineNumber: 1, newRuns: runs, at: lang.probe),

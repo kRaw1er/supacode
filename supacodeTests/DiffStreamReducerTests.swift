@@ -125,9 +125,9 @@ struct DiffStreamReducerTests {
       document.hunks = hunks
       document.loadState = .loaded
       document.isStale = false
-      document.styleRunsVersion = 1  // load clears any stale runs → bumps the view-delivery revision
       // Post-P13 seam swap: the tree-backed viewport projects `hunks` directly —
-      // no flat `rows`, no `revision` bump.
+      // no flat `rows`, no `revision` bump. Syntax runs are a render-layer pull off the
+      // span cache now, so nothing highlight-related lands on the document.
       $0.openDiffs[key] = document
     }
     await store.receive(\.streamFinished)

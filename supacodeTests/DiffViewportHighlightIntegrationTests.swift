@@ -10,7 +10,7 @@ import Testing
 /// layout so the highlight query actually issues without a manual scroll (Finding C),
 /// (2) resolve that window to the right 1-based line numbers through real scroll
 /// geometry, (3) re-fire on scroll, and (4) — the full loop — repaint an already
-/// materialized `LineRowView` in colour when `setSyntax` delivers runs.
+/// materialized `LineRowView` in colour when a span-cache fill delivers runs.
 @MainActor
 struct DiffViewportHighlightIntegrationTests {
   /// One single-line context leaf per `(lineNumber, content)`, in order — leaf `i`

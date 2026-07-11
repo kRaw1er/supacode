@@ -5,8 +5,8 @@ import Testing
 @testable import supacode
 
 /// RENDER-CORRECTNESS (CT-HEADLESS) — the seam that was MISSING and let syntax
-/// highlighting ship completely dead. The reducer computed `DiffDocument.old/newStyleRuns`
-/// and stored them in state, but NOTHING in the render path read them: `LineRowView`
+/// highlighting ship completely dead. The render path must pull resolved runs from the
+/// span cache (via `SyntaxRunsProvider`) and typeset them; before the fix `LineRowView`
 /// typeset plain glyphs, so not a single file highlighted. These tests assert on the
 /// ACTUAL `CTRun` foreground the viewport draws — no app launch, no screenshot — so
 /// the seam can never silently break again.

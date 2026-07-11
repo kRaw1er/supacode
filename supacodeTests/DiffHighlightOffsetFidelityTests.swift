@@ -13,9 +13,9 @@ import Testing
 /// tree-sitter parse where a keyword lives AFTER a surrogate pair, so a halved offset
 /// (14 → 7) would land on the wrong glyphs and fail loudly.
 ///
-/// Drives the REAL `DiffHighlightClient.liveValue.styleRuns` (real neon + tree-sitter)
-/// so a regression anywhere on the blob → `NamedRange` → line-relative `StyleRun`
-/// path is caught end-to-end, not just in a unit of `bucket`.
+/// Drives the REAL engine through `SyntaxRenderHarness.liveRuns` (real neon +
+/// tree-sitter) so a regression anywhere on the blob → `NamedRange` → line-relative
+/// `StyleRun` path is caught end-to-end, not just in a unit of `bucket`.
 @MainActor
 struct DiffHighlightOffsetFidelityTests {
   /// A one-line Swift file whose `func` keyword begins at UTF-16 offset 14 — AFTER a
@@ -27,7 +27,7 @@ struct DiffHighlightOffsetFidelityTests {
     let source = "let x = \"\u{1F44D}\"; func foo() {}\n"
     let input = HighlightBlobInput(blobOID: "halve-1", utf16: DiffFixture.blob(source), path: "Fidelity.swift")
     // 1-based visible window for a one-line file: line 1 only.
-    let runs = await DiffHighlightClient.liveValue.styleRuns(input, 1..<2)
+    let runs = await SyntaxRenderHarness.liveRuns(input, lineNumbers: 1..<2)
 
     let lineRuns = runs[1] ?? []
     #expect(!lineRuns.isEmpty, "sanity: real Swift must produce runs for line 1")

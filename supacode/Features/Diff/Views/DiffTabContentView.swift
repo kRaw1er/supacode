@@ -281,9 +281,6 @@ struct DiffTabContentView: View {
           composerStore: composerBelongsHere ? $store.scope(state: \.composer, action: \.composer).wrappedValue : nil,
           composerDraft: composerBelongsHere ? store.composer?.draft : nil,
           wordDiffEnabled: !document.wordDiffDisabled,
-          oldStyleRuns: document.oldStyleRuns,
-          newStyleRuns: document.newStyleRuns,
-          syntaxVersion: document.styleRunsVersion,
           oldBlob: document.oldBlob,
           newBlob: document.newBlob,
           highlightingDisabled: document.highlightingDisabled,
@@ -291,7 +288,7 @@ struct DiffTabContentView: View {
           send: { store.send($0) },
           onNavCommandConsumed: { store.send(.diffNavCommandConsumed) },
           onVisibleRangeChanged: { window in
-            store.send(.highlightVisibleRangeChanged(key: key, window: window))
+            store.send(.visibleRangeChanged(key: key, window: window))
           },
           onExpandGap: { gap, step, direction in
             store.send(.expandGap(key: key, gap: gap, step: step, direction: direction))

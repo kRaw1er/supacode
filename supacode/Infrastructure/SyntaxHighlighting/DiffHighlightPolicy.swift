@@ -6,8 +6,8 @@ import Foundation
 /// so a deep hunk in a huge file never triggers a multi-second **contiguous** parse
 /// (neon windows the *query* but `processLocation` forces a contiguous parse from
 /// byte 0 up to the deepest queried location — the crux). Pure / static — no free
-/// functions, and `nonisolated` so the `@Sendable` `DiffHighlightClient.isPlain`
-/// closure can call it off the main actor.
+/// functions, and `nonisolated` so the reducer's load-gate and the controller warmer
+/// can call it off the main actor.
 nonisolated enum DiffHighlightPolicy {
   /// Pierre parity: `packages/diffs/src/constants.ts:60`
   /// `DEFAULT_TOKENIZE_MAX_LENGTH = 100_000`, applied on BOTH sides

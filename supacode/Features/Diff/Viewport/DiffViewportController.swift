@@ -38,24 +38,10 @@ final class DiffViewportController: NSObject {
   /// lands; it is the counter behind the "no O(segment) re-project per frame" test.
   private(set) var lineRowsConfigured = 0
 
-  /// Per-line syntax runs (Phase-4 seam), pushed in from the reducer's
-  /// `DiffDocument.old/newStyleRuns`. `setSyntax` re-typesets the visible window so a
-  /// windowed highlight arrival paints WITHOUT a tree rebuild; `syntaxVersion` folds
-  /// into the render context so the configure early-out never skips a colour change.
-  private(set) var oldStyleRuns: [Int: [StyleRun]] = [:]
-  private(set) var newStyleRuns: [Int: [StyleRun]] = [:]
+  /// Repaint signal for the pull-model span cache: bumped by the warmer when a fill
+  /// grows the cache for the render window, so the configure early-out never skips a
+  /// colour change and each drawn row re-pulls its now-cached runs from the provider.
   private(set) var syntaxVersion = 0
-
-  /// Adopt freshly-resolved syntax runs and repaint the visible window. Content is
-  /// untouched (no `apply`, no tree rebuild) — only the materialized rows re-typeset,
-  /// and only the ones whose runs actually changed miss the `CTLineCache`.
-  func setSyntax(old: [Int: [StyleRun]], new: [Int: [StyleRun]]) {
-    oldStyleRuns = old
-    newStyleRuns = new
-    syntaxVersion &+= 1
-    Self.logger.info("[hl] setSyntax received old=\(old.count) new=\(new.count) lines, v=\(syntaxVersion)")
-    layoutVisibleChunks()
-  }
 
   // MARK: - Pull-model warming (Phase B — fills the span cache for the render window)
 
@@ -82,9 +68,9 @@ final class DiffViewportController: NSObject {
   /// nothing" invariant to a number.
   private(set) var highlightWarmLaunchCount = 0
 
-  /// Store the per-side blobs + size gate and kick a warm pass. Additive to `setSyntax`:
-  /// the view still reads the reducer push in Phase B, so this only proves the cache
-  /// gets filled off-main for the render window.
+  /// Store the per-side blobs + size gate and kick a warm pass: the span cache fills
+  /// off-main for the render window, then each drawn row pulls its runs from the cache
+  /// (pull model). Called on every blob / size-gate change.
   func setHighlightBlobs(old: HighlightBlobInput?, new: HighlightBlobInput?, disabled: Bool) {
     oldBlob = old
     newBlob = new
@@ -93,10 +79,9 @@ final class DiffViewportController: NSObject {
   }
 
   /// Fill the span cache for the VISIBLE + overscan window, per side, off-main and
-  /// coalesced — querying ONLY the blob lines not already cached. The view still reads
-  /// the reducer push (`setSyntax`), so this is purely additive: it proves the pull
-  /// path and seeds Phase C's repaint-from-cache. Called after every layout settles and
-  /// from `setHighlightBlobs`.
+  /// coalesced — querying ONLY the blob lines not already cached. The view pulls each
+  /// drawn row's runs from the filled cache (pull model). Called after every layout
+  /// settles and from `setHighlightBlobs`.
   private func warmVisibleHighlights() {
     // Mirror `layoutVisibleChunks`' preconditions: no warm when plain-gated, when there
     // is nothing to parse, or before the viewport has a real width.
@@ -114,7 +99,7 @@ final class DiffViewportController: NSObject {
     var work: [(blob: HighlightBlobInput, gaps: [Range<Int>])] = []
     for (blob, lineRange) in [(oldBlob, window.old), (newBlob, window.new)] {
       guard let blob, let queryName = DiffHighlightEngine.grammarQueryName(forPath: blob.path) else { continue }
-      let blobLines = DiffHighlightClient.blobWindow(forLineNumbers: lineRange)
+      let blobLines = DiffHighlightEngine.blobWindow(forLineNumbers: lineRange)
       let gaps = highlightEngine.missingBlobLines(blobOID: blob.blobOID, queryName: queryName, blobLines: blobLines)
       guard !gaps.isEmpty else { continue }
       work.append((blob, gaps))
@@ -137,9 +122,17 @@ final class DiffViewportController: NSObject {
       // materialized rows so each pulls its now-cached color (pull model). The re-layout
       // re-enters `warmVisibleHighlights`, but the window is now fully warm (no missing
       // lines) → it returns without launching another task → no loop.
-      self?.syntaxVersion &+= 1
-      self?.layoutVisibleChunks()
+      self?.repaintForSyntaxFill()
     }
+  }
+
+  /// Bump the repaint signal and re-typeset the materialized rows so each pulls its
+  /// now-cached runs from the span cache (pull model). `syntaxVersion` folds into the
+  /// render context so a bump re-typesets WITHOUT re-projecting the leaf (the project
+  /// key excludes it). Called by the warmer on a cache fill.
+  func repaintForSyntaxFill() {
+    syntaxVersion &+= 1
+    layoutVisibleChunks()
   }
 
   /// The visible viewport band expanded by `Self.overscan` on each side and clamped to

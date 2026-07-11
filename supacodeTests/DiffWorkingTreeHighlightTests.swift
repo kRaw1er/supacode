@@ -151,7 +151,7 @@ struct DiffWorkingTreeHighlightTests {
     // highlighter parsed the MERGE-BASE blob (every run here is a base-side span,
     // since `old` IS the base input). Pre-fix this side read the workdir instead.
     let lineCount = baseSource.split(separator: "\n", omittingEmptySubsequences: false).count
-    let runs = await DiffHighlightClient.liveValue.styleRuns(old, 0..<lineCount)
+    let runs = await SyntaxRenderHarness.liveRuns(old, lineNumbers: 0..<lineCount)
     #expect(
       runs.contains { $0.value.contains { $0.capture.hasPrefix("keyword") } },
       "the base blob must produce keyword spans on the base side")

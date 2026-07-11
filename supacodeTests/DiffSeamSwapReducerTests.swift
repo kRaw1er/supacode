@@ -80,14 +80,13 @@ struct DiffSeamSwapReducerTests {
     await store.finish()
   }
 
-  // MARK: - C 16.4 — the highlight driver's generation guard survives the swap
+  // MARK: - C 16.4 — the visible-range seam survives the swap (records the window)
 
-  @Test(.dependencies) func highlightDriverScopeDown() async {
+  @Test(.dependencies) func visibleRangeChangeRecordsWindow() async {
     let fileChange = file()
     let key = DiffDocumentKey(path: fileChange.id, source: .workingTree)
     var document = DiffDocument(file: fileChange, loadState: .loaded, generation: 1)
     document.hunks = [modifiedHunk()]
-    document.highlightGeneration = 5
     var initialState = DiffReviewFeature.State()
     initialState.selectedWorktree = worktree()
     initialState.openDiffs = [key: document]
@@ -98,19 +97,11 @@ struct DiffSeamSwapReducerTests {
     }
     store.exhaustivity = .off
 
-    // A visible-range change bumps the generation + records the range. Both blobs
-    // are nil (plain file) so no highlight effect is issued — deterministic.
-    await store.send(.highlightVisibleRangeChanged(key: key, window: VisibleLineWindow(old: 0..<40, new: 0..<40)))
+    // A visible-range change records the per-side window (the surviving scroll-position
+    // event); syntax highlighting is now a pure render-layer pull off the span cache, so
+    // no highlight effect is issued and no runs are stored on the document.
+    await store.send(.visibleRangeChanged(key: key, window: VisibleLineWindow(old: 0..<40, new: 0..<40)))
     #expect(store.state.openDiffs[key]?.visibleLineWindow == VisibleLineWindow(old: 0..<40, new: 0..<40))
-    #expect(store.state.openDiffs[key]?.highlightGeneration == 6)
-
-    // A stale `.highlightsReady` (superseded generation) is dropped (pierre
-    // isCurrentRequest); a live one applies.
-    let runs = [0: [StyleRun(range: 0..<3, capture: "keyword")]]
-    await store.send(.highlightsReady(key: key, old: runs, new: [:], generation: 3))
-    #expect(store.state.openDiffs[key]?.oldStyleRuns.isEmpty == true)
-    await store.send(.highlightsReady(key: key, old: runs, new: [:], generation: 6))
-    #expect(store.state.openDiffs[key]?.oldStyleRuns == runs)
   }
 
   // MARK: - C 16.5 — expand uses the blob-slice path, never a raised-context re-diff

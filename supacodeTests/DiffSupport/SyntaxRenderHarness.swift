@@ -41,6 +41,21 @@ enum SyntaxRenderHarness {
       oldBlobOID: oldBlobOID, newBlobOID: newBlobOID, oldQueryName: queryName, newQueryName: queryName)
   }
 
+  /// Live neon runs keyed by 1-based line number — the exact conversion the retired
+  /// `DiffHighlightClient.styleRuns` performed (blob-window shift → engine query →
+  /// re-key +1). Centralized here so the pipeline-fidelity suites drive the REAL engine
+  /// (tree-sitter → `NamedRange` → line-relative `StyleRun`) end-to-end without the
+  /// deleted client. Uses the shared engine, matching the retired client's live value.
+  static func liveRuns(_ input: HighlightBlobInput, lineNumbers: Range<Int>) async -> [Int: [StyleRun]] {
+    let window = DiffHighlightEngine.blobWindow(forLineNumbers: lineNumbers)
+    guard !window.isEmpty else { return [:] }
+    let byBlobLine = await DiffHighlightEngine.shared.styleRuns(for: input, visibleLines: window)
+    var out: [Int: [StyleRun]] = [:]
+    out.reserveCapacity(byBlobLine.count)
+    for (blobLine, runs) in byBlobLine { out[blobLine + 1] = runs }
+    return out
+  }
+
   /// A single-row context segment carrying `content` at 1-based `lineNumber`.
   static func contextSegment(_ content: String, lineNumber: Int) -> LineSegment {
     LineSegment(

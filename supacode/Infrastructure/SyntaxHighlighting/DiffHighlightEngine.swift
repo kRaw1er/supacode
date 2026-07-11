@@ -70,30 +70,7 @@ final class DiffHighlightEngine {
     let grammar: GrammarRegistry.Grammar
   }
 
-  // MARK: - sync fast path (paint now) + async fallback (never blocks a deep parse)
-
-  /// Synchronous attempt for the render path. Returns `nil` ⇒ the parse is still
-  /// pending (neon `canAttemptSynchronousAccess == hasPendingChanges == false`, C9)
-  /// and the caller should schedule the async pass. Returns `[:]` when there is no
-  /// grammar / nothing visible (a legitimate plain render, not a pending parse).
-  func syncStyleRuns(for input: HighlightBlobInput, visibleLines: Range<Int>) -> [Int: [StyleRun]]? {
-    guard let prepared = prepare(input) else { return [:] }
-    let window = windowRange(prepared.blob, visibleLines)
-    guard !window.lines.isEmpty else { return [:] }
-    do {
-      // Non-async context ⇒ the sync `highlights(in:provider:) -> [NamedRange]?`
-      // overload (TreeSitterClient.swift:380-382); `nil` ⇒ still parsing.
-      guard
-        let named = try prepared.client.highlights(
-          in: window.range, provider: prepared.blob.string.predicateTextProvider)
-      else { return nil }
-      return Self.bucket(
-        named, lineStarts: prepared.blob.lineStarts, textLength: prepared.blob.text.length, window: window.lines)
-    } catch {
-      Self.logger.error("sync highlight failed for \(input.path): \(error)")
-      return [:]
-    }
-  }
+  // MARK: - async parse (off-main) → span-cache fill (the warmer's path)
 
   /// Async pass — always answers (TreeSitterClient.swift:385-387). Buckets the
   /// window and unions it into the span cache for scroll reuse.
@@ -125,8 +102,8 @@ final class DiffHighlightEngine {
   ///
   /// LINE SPACE: `blobLines` and the returned keys are **0-based blob lines** — exactly
   /// what `bucket` emits and `styleRuns` merges into the cache. Any 1-based↔0-based
-  /// translation is the caller's job (the warmer / client adapter owns it, mirroring
-  /// `DiffHighlightClient.blobWindow` / `lineNumberKeyed`), never this method's.
+  /// translation is the caller's job (the warmer owns it, via `blobWindow(forLineNumbers:)`),
+  /// never this method's.
   func cachedRuns(blobOID: String, queryName: String, blobLines: Range<Int>) -> [Int: [StyleRun]] {
     guard let map = spans[.init(blobOID: blobOID, queryName: queryName, themeGen: syntaxThemeGen)] else { return [:] }
     var result: [Int: [StyleRun]] = [:]
@@ -176,6 +153,17 @@ final class DiffHighlightEngine {
   /// can resolve the key without hopping to the main actor.
   nonisolated static func grammarQueryName(forPath path: String) -> String? {
     GrammarRegistry.grammar(forPath: path)?.queryName
+  }
+
+  /// 1-based visible line-number range → the 0-based blob-line window the cache is
+  /// keyed by (blob line `i` == source line number `i + 1`). An empty / degenerate
+  /// range stays empty. `nonisolated` so the warmer / a test resolves it off the main
+  /// actor — the single translation point between line-number space and blob-line space.
+  nonisolated static func blobWindow(forLineNumbers lines: Range<Int>) -> Range<Int> {
+    guard !lines.isEmpty else { return 0..<0 }
+    let lower = max(0, lines.lowerBound - 1)
+    let upper = max(lower, lines.upperBound - 1)
+    return lower..<upper
   }
 
   // MARK: - client + config build (mirrors TreeSitterClient+Neon.swift:75-110)

@@ -11,7 +11,7 @@ import Testing
 /// assert only that the cache gets FILLED — repaint-from-cache is Phase C.
 ///
 /// The tree's 1-based `newLineNumber` maps to the blob's 0-based line with the SAME
-/// `-1` shift the client uses (`DiffHighlightClient.blobWindow`), so a warmed source
+/// `-1` shift the warmer uses (`DiffHighlightEngine.blobWindow`), so a warmed source
 /// line `n` is cached at blob line `n - 1`. `@MainActor` because the controller +
 /// engine are.
 @MainActor
