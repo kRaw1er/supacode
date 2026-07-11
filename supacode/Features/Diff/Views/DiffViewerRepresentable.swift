@@ -94,8 +94,11 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     // BEFORE the first `apply` so the provider's `reload()` fires from it.
     coordinator.installInteraction()
     let tree = buildTree()
-    controller.apply(tree: tree, mode: mode, scrollPreserving: false)
-    controller.setHighlightBlobs(old: oldBlob, new: newBlob, disabled: highlightingDisabled)
+    // Blobs + tree ATOMICALLY: `apply` paints from the current blobs, so setting them AFTER
+    // would flash the new content in the OLD file's colors (see `applyDocument`).
+    controller.applyDocument(
+      tree: tree, mode: mode, fileID: file.id,
+      blobs: .init(old: oldBlob, new: newBlob, disabled: highlightingDisabled), scrollPreserving: false)
     coordinator.rebuildKeyboardNav()
     coordinator.syncExpansion(expansion: expansion, revealed: revealed, hunks: hunks, file: file, rebuilt: true)
     coordinator.keyboardNav?.revealFirstChange()
@@ -131,8 +134,11 @@ struct DiffViewerRepresentable: NSViewRepresentable {
       // Content changed (re-diff / comment insert-remove / composer open-close):
       // re-project the tree scroll-preserving, then re-apply the live expansion state
       // (the fresh tree is collapsed) and rebuild the keyboard nav over the new tree.
-      controller.apply(tree: buildTree(), mode: mode, scrollPreserving: true)
-      controller.setHighlightBlobs(old: oldBlob, new: newBlob, disabled: highlightingDisabled)
+      // Blobs + tree ATOMICALLY (see `applyDocument`): applying the tree first and the blobs
+      // second paints one frame of the new content in the PREVIOUS file's colors.
+      controller.applyDocument(
+        tree: buildTree(), mode: mode, fileID: file.id,
+        blobs: .init(old: oldBlob, new: newBlob, disabled: highlightingDisabled), scrollPreserving: true)
       coordinator.lastHighlightBlobKey = highlightBlobKey
       coordinator.rebuildKeyboardNav()
       coordinator.syncExpansion(expansion: expansion, revealed: revealed, hunks: hunks, file: file, rebuilt: true)
@@ -150,7 +156,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
       // Pull-model: re-warm the span cache when the blobs / size gate change without a
       // full re-project (e.g. the size gate resolving after the first batch).
       if coordinator.lastHighlightBlobKey != highlightBlobKey {
-        controller.setHighlightBlobs(old: oldBlob, new: newBlob, disabled: highlightingDisabled)
+        controller.setHighlightBlobs(fileID: file.id, old: oldBlob, new: newBlob, disabled: highlightingDisabled)
         coordinator.lastHighlightBlobKey = highlightBlobKey
       }
     }

@@ -147,6 +147,17 @@ final class LineRowView: NSView, DiffViewportRecyclable {
   /// scroll stall.
   private struct ProjectKey: Equatable {
     var chunkID: ChunkID
+    // `chunkID` is NOT unique across trees — every `ChunkTree` restarts its id counter at
+    // 0 (`ChunkTree.nextRaw`), so a leaf at position N in file A and file B share `chunkID
+    // == N`. A recycled `LineRowView` pooled by `chunkID` is therefore handed a DIFFERENT
+    // file's leaf under the SAME `chunkID` on a file switch; keying only on `chunkID` made
+    // `configure` early-out and keep the PREVIOUS file's rows while the new file's syntax
+    // recoloured them — the previous file's text in the new file's colors ("плавающая
+    // каша"). `hunkID` (carries the fileID) + `window` restore a real per-leaf content
+    // identity so a cross-file / re-windowed reuse always re-projects. O(1) — no hot-path
+    // cost (a pure scroll reuses the same leaf ⇒ same key ⇒ early-out preserved).
+    var hunkID: HunkID
+    var window: Range<Int>
     var mode: DiffViewMode
     var wordDiffEnabled: Bool
   }
@@ -161,6 +172,11 @@ final class LineRowView: NSView, DiffViewportRecyclable {
   }
   private var configuredProjectKey: ProjectKey?
   private var configuredTypesetKey: TypesetKey?
+
+  /// The `FileID` of the leaf currently configured onto this view (one leaf == one file).
+  /// The controller resolves each leaf's blobs by this, so it's the identity a diagnostic
+  /// uses to check the row was highlighted from the RIGHT file's blob.
+  private(set) var configuredFileID: FileID?
 
   override var isFlipped: Bool { true }
   override var wantsDefaultClipping: Bool { true }
@@ -215,6 +231,30 @@ final class LineRowView: NSView, DiffViewportRecyclable {
       return VisibleRowText(
         localRow: index, unified: row.content as String?, old: row.oldContent as String?,
         new: row.newContent as String?)
+    }
+  }
+
+  /// Test probe: per-typeset-row identity + drawn CTLines for the windowed-render
+  /// color-fidelity check (the dense-leaf + live-scroll path `firstRowCTLines` can't
+  /// reach). Unified column only; at a non-wrapping width each row is one CTLine whose
+  /// string indices are 0-based within the row content.
+  struct TypesetRowRender {
+    var localRow: Int
+    var oldNumber: Int?
+    var newNumber: Int?
+    var unifiedOrigin: DiffLineOrigin?
+    var content: String?
+    var ctLines: [CTLine]
+  }
+
+  /// Test probe: every typeset row's identity + unified CTLines.
+  var typesetRowRenders: [TypesetRowRender] {
+    typesetWindow.compactMap { index in
+      guard index < rows.count else { return nil }
+      let row = rows[index]
+      return TypesetRowRender(
+        localRow: index, oldNumber: row.oldNumber, newNumber: row.newNumber, unifiedOrigin: row.unifiedOrigin,
+        content: row.content as String?, ctLines: row.wrapped?.ctLines ?? [])
     }
   }
 
@@ -299,7 +339,9 @@ final class LineRowView: NSView, DiffViewportRecyclable {
   /// scroll re-placements.
   @discardableResult
   func configure(segment: LineSegment, chunkID: ChunkID, context: LineRowRenderContext) -> Int {
-    let projectKey = ProjectKey(chunkID: chunkID, mode: context.mode, wordDiffEnabled: context.wordDiffEnabled)
+    let projectKey = ProjectKey(
+      chunkID: chunkID, hunkID: segment.hunkID, window: segment.window, mode: context.mode,
+      wordDiffEnabled: context.wordDiffEnabled)
     let typesetKey = TypesetKey(
       width: context.width, syntaxVersion: context.syntaxVersion, styleGeneration: context.styleGeneration)
     self.context = context  // keep the fresh palette / word-diff / syntax generation for redraw
@@ -311,6 +353,7 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     if configuredProjectKey != projectKey || rows.isEmpty {
       self.configuredChunkID = chunkID
       self.configuredProjectKey = projectKey
+      self.configuredFileID = segment.hunkID.fileID
       self.rows = Self.project(segment: segment, mode: context.mode, wordDiffEnabled: context.wordDiffEnabled)
       self.typesetWindow = 0..<0
       isHidden = false
@@ -359,6 +402,7 @@ final class LineRowView: NSView, DiffViewportRecyclable {
   override func prepareForReuse() {
     rows = []
     configuredChunkID = nil
+    configuredFileID = nil
     configuredProjectKey = nil
     configuredTypesetKey = nil
     typesetWindow = 0..<0

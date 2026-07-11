@@ -45,12 +45,20 @@ final class DiffViewportController: NSObject {
 
   // MARK: - Pull-model warming (Phase B — fills the span cache for the render window)
 
-  /// The per-side blobs the warmer parses (fed from the reducer's
-  /// `DiffDocument.old/newBlob`), or `nil` on an added / deleted / working-tree side.
-  private(set) var oldBlob: HighlightBlobInput?
-  private(set) var newBlob: HighlightBlobInput?
-  /// The size gate (`DiffDocument.highlightingDisabled`): `true` ⇒ render plain, no warm.
-  private(set) var highlightingDisabled = false
+  /// One file's per-side highlight blobs + its size gate. `old`/`new` are `nil` on an
+  /// added / deleted / working-tree side; `disabled == true` ⇒ that file renders plain.
+  struct FileHighlightBlobs: Equatable, Sendable {
+    var old: HighlightBlobInput?
+    var new: HighlightBlobInput?
+    var disabled: Bool
+  }
+
+  /// Highlight identity keyed by `FileID`, NOT a single controller-wide slot. Each leaf
+  /// resolves ITS OWN file's blobs via `segment.hunkID.fileID`, so a viewport holding more
+  /// than one file (the planned single-scroll feed) highlights each file from its own blob
+  /// — and a stale entry can never bleed one file's syntax onto another's text (the
+  /// "плавающая каша"). Tab-per-file keeps exactly one entry; the feed populates many.
+  private(set) var highlightBlobsByFile: [FileID: FileHighlightBlobs] = [:]
 
   /// The span-cache engine the warmer fills. Defaults to the shared instance so every
   /// open tab reuses one bounded parse cache; a test injects a FRESH engine so its
@@ -68,13 +76,19 @@ final class DiffViewportController: NSObject {
   /// nothing" invariant to a number.
   private(set) var highlightWarmLaunchCount = 0
 
-  /// Store the per-side blobs + size gate and kick a warm pass: the span cache fills
+  #if DEBUG
+    /// Throttle + per-blob decoded-line cache for the opt-in highlight diagnostic
+    /// (`SUPACODE_DIFF_HL_DIAG=1`). See `DiffViewportController+HighlightDiagnostic.swift`.
+    var hlDiagLastDump: CFAbsoluteTime = 0
+    var hlDiagBlobLines: [String: [String]] = [:]
+  #endif
+
+  /// Store ONE file's per-side blobs + size gate and kick a warm pass: the span cache fills
   /// off-main for the render window, then each drawn row pulls its runs from the cache
-  /// (pull model). Called on every blob / size-gate change.
-  func setHighlightBlobs(old: HighlightBlobInput?, new: HighlightBlobInput?, disabled: Bool) {
-    oldBlob = old
-    newBlob = new
-    highlightingDisabled = disabled
+  /// (pull model). Merges the entry (leaves the OTHER files' entries untouched) — the
+  /// blob-only-change path where the tree (hence the set of files) did not change.
+  func setHighlightBlobs(fileID: FileID, old: HighlightBlobInput?, new: HighlightBlobInput?, disabled: Bool) {
+    highlightBlobsByFile[fileID] = FileHighlightBlobs(old: old, new: new, disabled: disabled)
     warmVisibleHighlights()
   }
 
@@ -83,26 +97,31 @@ final class DiffViewportController: NSObject {
   /// drawn row's runs from the filled cache (pull model). Called after every layout
   /// settles and from `setHighlightBlobs`.
   private func warmVisibleHighlights() {
-    // Mirror `layoutVisibleChunks`' preconditions: no warm when plain-gated, when there
-    // is nothing to parse, or before the viewport has a real width.
-    guard !highlightingDisabled else { return }
-    guard oldBlob != nil || newBlob != nil else { return }
+    // Mirror `layoutVisibleChunks`' preconditions: nothing to parse, or before the
+    // viewport has a real width (the per-file size gate is applied per entry below).
+    guard !highlightBlobsByFile.isEmpty else { return }
     guard documentView.bounds.width > 0 else { return }
 
     // The render window the layout materializes: visible band expanded by the overscan
     // the renderer draws, clamped to the document — the whole point (the reducer's
     // visible-only query never covered these rows).
+    // Single-scroll feed follow-up: `visibleLineRange` returns ONE (old,new) range for the
+    // whole window — correct while the viewport holds a single file. A multi-file feed
+    // needs per-file visible ranges so each file warms only its own visible lines.
     let window = tree.visibleLineRange(in: expandedRenderRect(), mode: mode)
 
-    // Resolve each side's still-uncached 0-based blob-line gaps. A side with no grammar,
-    // no blob, or an already-warm window contributes nothing (a warm scroll is a no-op).
+    // Resolve each visible file's still-uncached 0-based blob-line gaps, per side. A file
+    // that is plain-gated, or a side with no grammar / no blob / an already-warm window,
+    // contributes nothing (a warm scroll is a no-op).
     var work: [(blob: HighlightBlobInput, gaps: [Range<Int>])] = []
-    for (blob, lineRange) in [(oldBlob, window.old), (newBlob, window.new)] {
-      guard let blob, let queryName = DiffHighlightEngine.grammarQueryName(forPath: blob.path) else { continue }
-      let blobLines = DiffHighlightEngine.blobWindow(forLineNumbers: lineRange)
-      let gaps = highlightEngine.missingBlobLines(blobOID: blob.blobOID, queryName: queryName, blobLines: blobLines)
-      guard !gaps.isEmpty else { continue }
-      work.append((blob, gaps))
+    for entry in highlightBlobsByFile.values where !entry.disabled {
+      for (blob, lineRange) in [(entry.old, window.old), (entry.new, window.new)] {
+        guard let blob, let queryName = DiffHighlightEngine.grammarQueryName(forPath: blob.path) else { continue }
+        let blobLines = DiffHighlightEngine.blobWindow(forLineNumbers: lineRange)
+        let gaps = highlightEngine.missingBlobLines(blobOID: blob.blobOID, queryName: queryName, blobLines: blobLines)
+        guard !gaps.isEmpty else { continue }
+        work.append((blob, gaps))
+      }
     }
     guard !work.isEmpty else { return }
 
@@ -290,6 +309,24 @@ final class DiffViewportController: NSObject {
   /// The single applier. Captures the anchor BEFORE mutation, grows / shrinks the
   /// document, materializes the window at the current offset (pierre order), then
   /// re-lands the anchored line against the fresh placements.
+  /// Swap the tree AND its highlight blobs ATOMICALLY. `apply(tree:)` lays out + warms +
+  /// paints immediately from the controller's CURRENT blobs, so a caller that updates the
+  /// tree first and the blobs second paints ONE frame of the new file's text with the
+  /// PREVIOUS file's syntax runs — wrong-file colors on a file switch / re-diff that only
+  /// self-correct once the new blob's async warm lands (the "плавающая каша" bug). Setting
+  /// the blobs BEFORE `apply` lays out closes that window: the first (and only) paint uses
+  /// the matching blob. Blobs are stored directly (no separate warm) — `apply`'s own layout
+  /// issues the single warm for the reconciled tree+blob. `fileID` keys the blobs so each
+  /// leaf resolves its own file's runs; a single-file tree REPLACES the map so a switched-
+  /// away file's stale entry can never linger.
+  func applyDocument(
+    tree newTree: ChunkTree, mode newMode: DiffViewMode, fileID: FileID, blobs: FileHighlightBlobs,
+    scrollPreserving: Bool
+  ) {
+    highlightBlobsByFile = [fileID: blobs]
+    apply(tree: newTree, mode: newMode, scrollPreserving: scrollPreserving)
+  }
+
   func apply(tree newTree: ChunkTree, mode newMode: DiffViewMode, scrollPreserving: Bool) {
     let anchor = scrollPreserving ? captureAnchor() : nil
     tree = newTree
@@ -400,6 +437,9 @@ final class DiffViewportController: NSObject {
     }
     fireVisibleRange()
     warmVisibleHighlights()  // pull-model: fill the span cache for the settled render window (Phase B)
+    #if DEBUG
+      runHighlightDiagnosticThrottled()  // opt-in (`SUPACODE_DIFF_HL_DIAG=1`); no-op otherwise
+    #endif
   }
 
   /// One placement sweep: seek the visible window (+ overscan), place one view per
@@ -490,6 +530,12 @@ final class DiffViewportController: NSObject {
     case .lineSegment(let segment):
       if let lineView = view as? LineRowView {
         let window = lineRenderWindow(placement)
+        // Resolve THIS leaf's highlight blobs by its own `fileID` — never a controller-wide
+        // slot — so a multi-file viewport colors each file from its own blob. A plain-gated
+        // file resolves to no blobs (renders plain).
+        let entry = highlightBlobsByFile[segment.hunkID.fileID]
+        let old = (entry?.disabled ?? false) ? nil : entry?.old
+        let new = (entry?.disabled ?? false) ? nil : entry?.new
         let typeset = lineView.configure(
           segment: segment,
           chunkID: placement.top.id,
@@ -504,10 +550,10 @@ final class DiffViewportController: NSObject {
             wordDiffEnabled: wordDiffEnabled,
             syntaxVersion: syntaxVersion,
             syntaxProvider: .live(highlightEngine),
-            oldBlobOID: oldBlob?.blobOID,
-            newBlobOID: newBlob?.blobOID,
-            oldQueryName: oldBlob.flatMap { DiffHighlightEngine.grammarQueryName(forPath: $0.path) },
-            newQueryName: newBlob.flatMap { DiffHighlightEngine.grammarQueryName(forPath: $0.path) },
+            oldBlobOID: old?.blobOID,
+            newBlobOID: new?.blobOID,
+            oldQueryName: old.flatMap { DiffHighlightEngine.grammarQueryName(forPath: $0.path) },
+            newQueryName: new.flatMap { DiffHighlightEngine.grammarQueryName(forPath: $0.path) },
             renderRange: window.rows,
             renderRangeTop: window.top
           )

@@ -63,7 +63,7 @@ struct DiffViewportHighlightWarmTests {
     let engine = DiffHighlightEngine()
     let controller = sizedController(engine: engine)
 
-    controller.setHighlightBlobs(old: nil, new: newBlob("warm-visible"), disabled: false)
+    controller.setHighlightBlobs(fileID: "f", old: nil, new: newBlob("warm-visible"), disabled: false)
     await controller.highlightWarmTask?.value
 
     // Blob line 0 (source line 1) is at the very top of the visible band.
@@ -81,7 +81,7 @@ struct DiffViewportHighlightWarmTests {
     let engine = DiffHighlightEngine()
     let controller = sizedController(engine: engine)
 
-    controller.setHighlightBlobs(old: nil, new: newBlob("warm-overscan"), disabled: false)
+    controller.setHighlightBlobs(fileID: "f", old: nil, new: newBlob("warm-overscan"), disabled: false)
     await controller.highlightWarmTask?.value
 
     // Source line 55 (blob line 54) is beyond the visible ~30 rows but inside the
@@ -104,7 +104,7 @@ struct DiffViewportHighlightWarmTests {
     let engine = DiffHighlightEngine()
     let controller = sizedController(engine: engine)
 
-    controller.setHighlightBlobs(old: nil, new: newBlob("warm-noop"), disabled: false)
+    controller.setHighlightBlobs(fileID: "f", old: nil, new: newBlob("warm-noop"), disabled: false)
     await controller.highlightWarmTask?.value
     let launchesAfterFirst = controller.highlightWarmLaunchCount
     let cachedAfterFirst = engine.cachedRuns(blobOID: "warm-noop", queryName: Self.queryName, blobLines: 0..<200).count
@@ -117,7 +117,7 @@ struct DiffViewportHighlightWarmTests {
       "after the first warm the render window is fully cached")
 
     // A re-trigger over the same window must not launch a new warm or grow the cache.
-    controller.setHighlightBlobs(old: nil, new: newBlob("warm-noop"), disabled: false)
+    controller.setHighlightBlobs(fileID: "f", old: nil, new: newBlob("warm-noop"), disabled: false)
     await controller.highlightWarmTask?.value
     #expect(controller.highlightWarmLaunchCount == launchesAfterFirst, "a warm over a filled window launches nothing")
     #expect(
@@ -131,7 +131,7 @@ struct DiffViewportHighlightWarmTests {
     let engine = DiffHighlightEngine()
     let controller = sizedController(engine: engine)
 
-    controller.setHighlightBlobs(old: nil, new: newBlob("warm-gated"), disabled: true)
+    controller.setHighlightBlobs(fileID: "f", old: nil, new: newBlob("warm-gated"), disabled: true)
     await controller.highlightWarmTask?.value
 
     #expect(controller.highlightWarmLaunchCount == 0, "a plain-gated file must not launch a warm")
@@ -148,7 +148,7 @@ struct DiffViewportHighlightWarmTests {
 
     let plain = HighlightBlobInput(
       blobOID: "warm-nogrammar", utf16: DiffFixture.blob(Self.swiftSource), path: "notes.unknownext")
-    controller.setHighlightBlobs(old: nil, new: plain, disabled: false)
+    controller.setHighlightBlobs(fileID: "f", old: nil, new: plain, disabled: false)
     await controller.highlightWarmTask?.value
 
     #expect(controller.highlightWarmLaunchCount == 0, "a path with no grammar must not launch a warm")

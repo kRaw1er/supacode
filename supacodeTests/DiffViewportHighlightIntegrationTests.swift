@@ -111,7 +111,7 @@ struct DiffViewportHighlightIntegrationTests {
 
     // Warm the new side; the completion repaints the visible window from the cache.
     let input = HighlightBlobInput(blobOID: "func-run", utf16: DiffFixture.blob(source), path: "a.swift")
-    controller.setHighlightBlobs(old: nil, new: input, disabled: false)
+    controller.setHighlightBlobs(fileID: "f", old: nil, new: input, disabled: false)
     await controller.highlightWarmTask?.value
 
     let after = try #require(funcRow(), "the row is still materialized after the warm")
