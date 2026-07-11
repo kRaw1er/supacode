@@ -76,6 +76,14 @@ final class DiffHighlightEngine {
   /// window and unions it into the span cache for scroll reuse.
   func styleRuns(for input: HighlightBlobInput, visibleLines: Range<Int>) async -> [Int: [StyleRun]] {
     guard let prepared = prepare(input) else { return [:] }
+    let key = HighlightSpanCache.Key(
+      blobOID: input.blobOID, queryName: prepared.grammar.queryName, themeGen: syntaxThemeGen)
+    // Mark the REQUESTED range covered up front — BEFORE the empty-window early return —
+    // so lines past the blob end or lines that yield no tokens are recorded as queried and
+    // `missingBlobLines` never re-reports them. Without this the warmer re-requests the same
+    // token-less lines every layout → warm→repaint→layout→warm runaway (the <60fps loop).
+    let requested = max(0, visibleLines.lowerBound)..<max(max(0, visibleLines.lowerBound), visibleLines.upperBound)
+    spans.markCovered(requested, for: key)
     let window = windowRange(prepared.blob, visibleLines)
     guard !window.lines.isEmpty else { return [:] }
     do {
@@ -83,9 +91,7 @@ final class DiffHighlightEngine {
         in: window.range, provider: prepared.blob.string.predicateTextProvider)
       let byLine = Self.bucket(
         named, lineStarts: prepared.blob.lineStarts, textLength: prepared.blob.text.length, window: window.lines)
-      spans.merge(
-        byLine,
-        into: .init(blobOID: input.blobOID, queryName: prepared.grammar.queryName, themeGen: syntaxThemeGen))
+      spans.merge(byLine, into: key)
       return byLine
     } catch {
       Self.logger.error("highlight failed for \(input.path): \(error)")
@@ -106,46 +112,34 @@ final class DiffHighlightEngine {
   /// never this method's.
   func cachedRuns(blobOID: String, queryName: String, blobLines: Range<Int>) -> [Int: [StyleRun]] {
     guard let map = spans[.init(blobOID: blobOID, queryName: queryName, themeGen: syntaxThemeGen)] else { return [:] }
+    // Iterate the REQUESTED range and probe the map (O(range)), NOT the whole map
+    // (O(cache) — which grows to the whole file as you scroll, turning every read into a
+    // full-file scan).
     var result: [Int: [StyleRun]] = [:]
-    for (line, runs) in map where blobLines.contains(line) {
-      result[line] = runs
+    for line in blobLines where map[line] != nil {
+      result[line] = map[line]
     }
     return result
   }
 
-  /// Single-blob-line convenience over `cachedRuns`, for `SyntaxRunsProvider.live`.
-  /// Returns the cached runs for `blobLine` (0-based blob line) or `[]` on a miss.
+  /// Single-blob-line convenience for `SyntaxRunsProvider.live` — the HOT path (called
+  /// per drawn row per frame). A direct O(1) dictionary probe: it must NOT fan out to the
+  /// range version (that once iterated the entire span map for one line → O(cache) per
+  /// row → the "gets slow everywhere after scrolling to the end" regression).
   func cachedRuns(blobOID: String, queryName: String, blobLine: Int) -> [StyleRun] {
-    cachedRuns(blobOID: blobOID, queryName: queryName, blobLines: blobLine..<(blobLine + 1))[blobLine] ?? []
+    spans[.init(blobOID: blobOID, queryName: queryName, themeGen: syntaxThemeGen)]?[blobLine] ?? []
   }
 
-  /// The coalesced sub-ranges of `blobLines` for which NO runs are cached — the gaps a
-  /// warmer must still query. A line present in the cache with an empty `[]` value
-  /// counts as PRESENT (it was queried and simply had no tokens), NOT missing. When the
-  /// blob isn't cached at all, the whole input range is missing (`[blobLines]`, or `[]`
-  /// if `blobLines` is empty).
+  /// The coalesced sub-ranges of `blobLines` the warmer must still query — the lines NOT
+  /// yet COVERED (queried). Covered is tracked separately from the runs map (`styleRuns`
+  /// marks the whole requested range covered), so a line that was queried but produced no
+  /// tokens counts as PRESENT and is never re-requested — without that the warm re-queries
+  /// token-less / past-end lines every layout and never converges (the <60fps loop).
   ///
   /// LINE SPACE: 0-based blob lines, matching `cachedRuns` / the span cache.
   func missingBlobLines(blobOID: String, queryName: String, blobLines: Range<Int>) -> [Range<Int>] {
-    guard !blobLines.isEmpty else { return [] }
-    guard let map = spans[.init(blobOID: blobOID, queryName: queryName, themeGen: syntaxThemeGen)] else {
-      return [blobLines]
-    }
-    var ranges: [Range<Int>] = []
-    var runStart: Int?
-    for line in blobLines {
-      let present = map[line] != nil
-      if present {
-        if let start = runStart {
-          ranges.append(start..<line)
-          runStart = nil
-        }
-      } else if runStart == nil {
-        runStart = line
-      }
-    }
-    if let start = runStart { ranges.append(start..<blobLines.upperBound) }
-    return ranges
+    spans.missingRanges(
+      blobLines, for: .init(blobOID: blobOID, queryName: queryName, themeGen: syntaxThemeGen))
   }
 
   /// Grammar `queryName` for a file path (the span-cache key component), or `nil` when

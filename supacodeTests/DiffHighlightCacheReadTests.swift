@@ -86,6 +86,62 @@ struct DiffHighlightCacheReadTests {
     #expect(engine.missingBlobLines(blobOID: "cold", queryName: queryName, blobLines: 5..<5).isEmpty)
   }
 
+  /// LOOP GUARD: after a warm, EVERY queried line is covered — including a token-LESS
+  /// (blank) line and lines PAST the blob end — so `missingBlobLines` reports nothing to
+  /// re-query. Without covered-tracking those lines have no runs entry, are re-reported
+  /// missing every layout, and the warmer runs away (warm→repaint→layout→warm), pegging
+  /// the main thread (<60fps). `swiftSource` line 4 is blank; `0..<20` runs past the
+  /// 5-line blob.
+  @Test func warmCoversTokenlessAndBeyondBlobLinesSoWarmConverges() async {
+    let engine = await warmedEngine(blobOID: "loop-guard", lines: 0..<20)
+    // The blank line 4 was queried → NOT missing (it simply has no tokens).
+    #expect(engine.missingBlobLines(blobOID: "loop-guard", queryName: queryName, blobLines: 4..<5).isEmpty)
+    // Lines past the blob end were requested → covered → NOT missing (they render plain).
+    #expect(engine.missingBlobLines(blobOID: "loop-guard", queryName: queryName, blobLines: 5..<20).isEmpty)
+    // The whole requested window converges to zero gaps ⇒ the warmer stops re-launching.
+    #expect(engine.missingBlobLines(blobOID: "loop-guard", queryName: queryName, blobLines: 0..<20).isEmpty)
+    // A line NEVER requested (past the covered window) is still missing (would warm once).
+    #expect(
+      engine.missingBlobLines(blobOID: "loop-guard", queryName: queryName, blobLines: 20..<25) == [20..<25])
+  }
+
+  /// PERF-REGRESSION GUARD (ratio-based, machine-independent — mirrors
+  /// `DiffViewportScalePerfTests`' scale-invariance style): the HOT single-line read
+  /// `cachedRuns(blobLine:)` must be O(1) — a direct dict probe — NOT O(cache-size). The
+  /// "gets slow EVERYWHERE after scrolling to the end of the file" regression was this
+  /// read scanning the ENTIRE span map (which grows to the whole file) once per drawn row
+  /// per frame. A ~20×-larger cache must read a single line in ~the same time.
+  @Test func singleLineCacheReadIsScaleInvariant() async {
+    func warmed(lines count: Int, oid: String) async -> DiffHighlightEngine {
+      let engine = DiffHighlightEngine()
+      let content = (0..<count).map { "let x\($0) = \($0)" }.joined(separator: "\n") + "\n"
+      let input = HighlightBlobInput(blobOID: oid, utf16: DiffFixture.blob(content), path: "a.swift")
+      _ = await engine.styleRuns(for: input, visibleLines: 0..<count)
+      return engine
+    }
+    let query = DiffHighlightEngine.grammarQueryName(forPath: "a.swift") ?? ""
+    let small = await warmed(lines: 200, oid: "scale-small")
+    let large = await warmed(lines: 4000, oid: "scale-large")
+
+    func readTime(_ engine: DiffHighlightEngine, _ oid: String, line: Int, iterations: Int) -> Duration {
+      let clock = ContinuousClock()
+      let start = clock.now
+      for _ in 0..<iterations { _ = engine.cachedRuns(blobOID: oid, queryName: query, blobLine: line) }
+      return clock.now - start
+    }
+    // Warm up (JIT / first-touch), then measure.
+    _ = readTime(small, "scale-small", line: 100, iterations: 20_000)
+    _ = readTime(large, "scale-large", line: 2000, iterations: 20_000)
+    let smallTime = readTime(small, "scale-small", line: 100, iterations: 100_000)
+    let largeTime = readTime(large, "scale-large", line: 2000, iterations: 100_000)
+
+    // O(1): the 20×-bigger cache reads in ~the same time. The generous 8× guard catches an
+    // O(cache) regression (~20×+) while tolerating machine noise; O(1) lands near 1–2×.
+    #expect(
+      largeTime < smallTime * 8,
+      "single-line read scaled with cache size (large=\(largeTime) vs small=\(smallTime)): O(cache) regression")
+  }
+
   /// `SyntaxRunsProvider.live(engine)` returns the SAME runs as `cachedRuns` for a warmed
   /// line, and `.empty` returns `[]`.
   @Test func providerLiveMatchesCacheAndEmptyIsBlank() async {

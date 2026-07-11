@@ -133,6 +133,13 @@ final class DiffViewportController: NSObject {
   func repaintForSyntaxFill() {
     syntaxVersion &+= 1
     layoutVisibleChunks()
+    // Flush the redraw NOW, per materialized row. This runs from the warm Task's
+    // continuation (not a SwiftUI update cycle like the old push path), so the
+    // `needsDisplay` the re-typeset set on each `LineRowView` would otherwise sit
+    // un-flushed until the next event — the "colors don't arrive until you nudge the
+    // scroll" regression. Flush the LEAF views directly (NOT `documentView.displayIfNeeded`,
+    // which first re-runs `layout()` → `layoutVisibleChunks` → a re-entrant layout hang).
+    for case let row as LineRowView in documentView.subviews { row.displayIfNeeded() }
   }
 
   /// The visible viewport band expanded by `Self.overscan` on each side and clamped to
