@@ -1043,6 +1043,26 @@ struct DiffReviewFeature {
           state.openDiffs[key] = document
           return windowingEffects.isEmpty ? .none : .merge(windowingEffects)
         }
+        // Paint-now sync fast path (Phase-4 C9): whichever side's parse is already warm
+        // colors THIS reduction with no async round-trip (killing the plain→colored flash
+        // on reopen / scroll-back). A pending side returns `nil` and falls through to the
+        // async pass below; an empty window is a legit `[:]` (nothing to paint that side).
+        // No `await` here, so the sync paint can never be superseded mid-flight.
+        let syncOld = old.flatMap { window.old.isEmpty ? [:] : diffHighlight.syncStyleRuns($0, window.old) }
+        let syncNew = new.flatMap { window.new.isEmpty ? [:] : diffHighlight.syncStyleRuns($0, window.new) }
+        if let syncOld { document.oldStyleRuns = syncOld }
+        if let syncNew { document.newStyleRuns = syncNew }
+        if syncOld != nil || syncNew != nil {
+          document.styleRunsVersion &+= 1  // paint what warmed now
+          state.openDiffs[key] = document
+        }
+        let oldPending = old != nil && !window.old.isEmpty && syncOld == nil
+        let newPending = new != nil && !window.new.isEmpty && syncNew == nil
+        guard oldPending || newPending else {
+          // Fully warm (or both windows empty) → the async pass would only re-derive the
+          // same runs; skip it entirely.
+          return windowingEffects.isEmpty ? .none : .merge(windowingEffects)
+        }
         // Each side is queried with ITS OWN visible line range (old / new line numbers
         // differ). The client speaks 1-based line numbers in and out, so the returned
         // runs are keyed exactly how `LineRowView` looks them up.

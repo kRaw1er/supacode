@@ -84,6 +84,36 @@ struct DiffHighlightEngineTests {
     #expect(first !== rebuilt)  // dispose ⇒ next request rebuilds a new instance
   }
 
+  /// C9 sync fast path — once the parse tree is warm the sync overload answers
+  /// immediately (non-`nil`) with the same non-empty, keyword-bearing runs the async
+  /// pass produces. This is the paint-now capability the reducer relies on to color a
+  /// reopened / scrolled-back file without the async round-trip. (Whether a *cold*
+  /// blob returns `nil` vs runs is neon-internal — small blobs can parse synchronously
+  /// — so this pins only the guaranteed post-warm contract; `nil` just routes to async.)
+  @Test func syncFastPathPaintsWarmParseImmediately() async {
+    let engine = DiffHighlightEngine()
+    let input = HighlightBlobInput(
+      blobOID: "sync-warm", utf16: DiffFixture.blob("struct Foo { let bar = 42 }\n"), path: "Foo.swift")
+
+    // Warm the parse tree through the async path (awaits processing to completion).
+    _ = await engine.styleRuns(for: input, visibleLines: 0..<2)
+
+    let sync = engine.syncStyleRuns(for: input, visibleLines: 0..<2)
+    #expect(sync != nil)  // warm ⇒ never pending
+    let runs = (sync ?? [:]).values.flatMap { $0 }
+    #expect(!runs.isEmpty)
+    #expect(runs.contains { $0.capture.hasPrefix("keyword") })
+  }
+
+  /// C9 sync fast path — a no-grammar file is a legitimate plain render (`[:]`), NOT
+  /// pending (`nil`): the reducer must treat it as "nothing to paint", not "retry async".
+  @Test func syncFastPathPlainFileIsEmptyNotPending() {
+    let engine = DiffHighlightEngine()
+    let input = HighlightBlobInput(
+      blobOID: "sync-plain", utf16: DiffFixture.blob("just some text\n"), path: "notes.unknownext")
+    #expect(engine.syncStyleRuns(for: input, visibleLines: 0..<1) == [:])
+  }
+
   /// The parse tree is cached by blob identity: a second query over the same blob
   /// reuses it (returns the same runs; no re-parse cost asserted directly, but the
   /// engine must not throw / return empty on the reuse path).

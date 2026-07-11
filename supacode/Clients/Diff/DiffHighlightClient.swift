@@ -19,6 +19,16 @@ nonisolated struct DiffHighlightClient: Sendable {
   /// there is no grammar / nothing visible / the parse failed.
   var styleRuns:
     @MainActor @Sendable (_ input: HighlightBlobInput, _ visibleLines: Range<Int>) async -> [Int: [StyleRun]]
+  /// Synchronous "paint-now" fast path (Phase-4 C9): returns runs immediately when the
+  /// parse is already warm so the render path colors in the SAME reduction with no async
+  /// round-trip; `nil` ⇒ the parse is still pending and the caller schedules the async
+  /// pass; `[:]` ⇒ a legitimate plain render (no grammar / empty window). Same 1-based
+  /// line-number contract as `styleRuns`. Defaults to always-pending (`nil`) so a test
+  /// or an unset construction transparently keeps the async-only behaviour.
+  var syncStyleRuns:
+    @MainActor @Sendable (_ input: HighlightBlobInput, _ visibleLines: Range<Int>) -> [Int: [StyleRun]]? = {
+      _, _ in nil
+    }
   /// The size gate, evaluated on counts BEFORE any parse — `true` ⇒ render plain.
   var isPlain:
     @Sendable (_ oldChangedLines: Int, _ newChangedLines: Int, _ oldBlobUTF16: Int, _ newBlobUTF16: Int) -> Bool
@@ -53,6 +63,16 @@ extension DiffHighlightClient: DependencyKey {
       let window = blobWindow(forLineNumbers: visibleLines)
       guard !window.isEmpty else { return [:] }
       let byBlobLine = await DiffHighlightEngine.shared.styleRuns(for: input, visibleLines: window)
+      return lineNumberKeyed(byBlobLine)
+    },
+    syncStyleRuns: { input, visibleLines in
+      // Same 1-based↔0-based adapter as the async path; a `nil` engine result (parse
+      // pending, C9) propagates so the reducer falls back to the async pass.
+      let window = blobWindow(forLineNumbers: visibleLines)
+      guard !window.isEmpty else { return [:] }
+      guard let byBlobLine = DiffHighlightEngine.shared.syncStyleRuns(for: input, visibleLines: window) else {
+        return nil
+      }
       return lineNumberKeyed(byBlobLine)
     },
     isPlain: { oldChanged, newChanged, oldBlob, newBlob in
