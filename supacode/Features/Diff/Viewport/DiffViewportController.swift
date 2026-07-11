@@ -158,7 +158,20 @@ final class DiffViewportController: NSObject {
     // un-flushed until the next event — the "colors don't arrive until you nudge the
     // scroll" regression. Flush the LEAF views directly (NOT `documentView.displayIfNeeded`,
     // which first re-runs `layout()` → `layoutVisibleChunks` → a re-entrant layout hang).
+    //
+    // `displayIfNeeded` only DRAWS each row into its (layer-backed — the whole hierarchy is
+    // layer-backed under SwiftUI's `NSViewRepresentable` host) backing store; the drawn
+    // contents are not PRESENTED to the screen until the enclosing CATransaction commits.
+    // From an AppKit event that commit is implicit at end-of-event; from a bare Task
+    // continuation there is no such boundary, so the already-colored CTLines sit in the
+    // backing store un-presented until the next event nudges a commit — the residual
+    // flake (a 1px scroll "reveals" colors that were computed all along). Wrap the draws in
+    // an explicit transaction so the committed surface reaches the screen immediately, and
+    // isolate them in their own begin/commit so we neither present unrelated pending layer
+    // changes early nor cut a SwiftUI animation short.
+    CATransaction.begin()
     for case let row as LineRowView in documentView.subviews { row.displayIfNeeded() }
+    CATransaction.commit()
   }
 
   /// The visible viewport band expanded by `Self.overscan` on each side and clamped to
