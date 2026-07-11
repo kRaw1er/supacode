@@ -51,6 +51,14 @@ struct DiffViewerRepresentable: NSViewRepresentable {
   var newStyleRuns: [Int: [StyleRun]] = [:]
   var syntaxVersion: Int = 0
 
+  /// The per-side blobs + size gate the controller warms the span cache from (Phase B
+  /// pull model, `DiffDocument.old/newBlob` + `highlightingDisabled`). Additive to the
+  /// reducer push above: the view still reads `old/newStyleRuns` for now, so threading
+  /// these only fills the cache off-main for the render window (visible + overscan).
+  var oldBlob: HighlightBlobInput?
+  var newBlob: HighlightBlobInput?
+  var highlightingDisabled: Bool = false
+
   /// A one-shot menu-driven nav intent (the "Diff" `CommandMenu` → viewport). Drained
   /// here into `DiffKeyboardNav.perform` and cleared via `onNavCommandConsumed`, so a
   /// menu pick reaches the SAME nav the single-letter keys drive even when the viewport
@@ -97,6 +105,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     let tree = buildTree()
     controller.apply(tree: tree, mode: mode, scrollPreserving: false)
     controller.setSyntax(old: oldStyleRuns, new: newStyleRuns)
+    controller.setHighlightBlobs(old: oldBlob, new: newBlob, disabled: highlightingDisabled)
     coordinator.rebuildKeyboardNav()
     coordinator.syncExpansion(expansion: expansion, revealed: revealed, hunks: hunks, file: file, rebuilt: true)
     coordinator.keyboardNav?.revealFirstChange()
@@ -106,6 +115,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     coordinator.lastExpansion = expansion
     coordinator.lastRevealedCounts = revealed.mapValues(\.count)
     coordinator.lastSyntaxVersion = syntaxVersion
+    coordinator.lastHighlightBlobKey = highlightBlobKey
     return controller.scrollView
   }
 
@@ -134,6 +144,8 @@ struct DiffViewerRepresentable: NSViewRepresentable {
       // (the fresh tree is collapsed) and rebuild the keyboard nav over the new tree.
       controller.apply(tree: buildTree(), mode: mode, scrollPreserving: true)
       controller.setSyntax(old: oldStyleRuns, new: newStyleRuns)
+      controller.setHighlightBlobs(old: oldBlob, new: newBlob, disabled: highlightingDisabled)
+      coordinator.lastHighlightBlobKey = highlightBlobKey
       coordinator.rebuildKeyboardNav()
       coordinator.syncExpansion(expansion: expansion, revealed: revealed, hunks: hunks, file: file, rebuilt: true)
       coordinator.lastSyntaxVersion = syntaxVersion
@@ -153,6 +165,12 @@ struct DiffViewerRepresentable: NSViewRepresentable {
       if coordinator.lastSyntaxVersion != syntaxVersion {
         controller.setSyntax(old: oldStyleRuns, new: newStyleRuns)
         coordinator.lastSyntaxVersion = syntaxVersion
+      }
+      // Pull-model: re-warm the span cache when the blobs / size gate change without a
+      // full re-project (e.g. the size gate resolving after the first batch).
+      if coordinator.lastHighlightBlobKey != highlightBlobKey {
+        controller.setHighlightBlobs(old: oldBlob, new: newBlob, disabled: highlightingDisabled)
+        coordinator.lastHighlightBlobKey = highlightBlobKey
       }
     }
 
@@ -233,6 +251,13 @@ struct DiffViewerRepresentable: NSViewRepresentable {
       collapsedThreads: collapsedThreads)
   }
 
+  /// Identity of the warm inputs (per-side blob OID + the size gate) — the controller
+  /// re-warms only when this changes, so a plain SwiftUI update pass doesn't re-kick a
+  /// warm the missing-line check would no-op anyway.
+  private var highlightBlobKey: String {
+    "\(oldBlob?.blobOID ?? "-")|\(newBlob?.blobOID ?? "-")|\(highlightingDisabled)"
+  }
+
   @MainActor
   final class Coordinator {
     let controller = DiffViewportController()
@@ -259,6 +284,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     var lastSignature: Signature?
     var lastMode: DiffViewMode = .unified
     var lastSyntaxVersion: Int = -1
+    var lastHighlightBlobKey: String = ""
     var lastGeneration: Int = .min
     var lastExpansion: ExpansionState = .collapsed
     var lastRevealedCounts: [Int: Int] = [:]

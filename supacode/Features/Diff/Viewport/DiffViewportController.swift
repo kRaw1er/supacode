@@ -57,6 +57,95 @@ final class DiffViewportController: NSObject {
     layoutVisibleChunks()
   }
 
+  // MARK: - Pull-model warming (Phase B — fills the span cache for the render window)
+
+  /// The per-side blobs the warmer parses (fed from the reducer's
+  /// `DiffDocument.old/newBlob`), or `nil` on an added / deleted / working-tree side.
+  private(set) var oldBlob: HighlightBlobInput?
+  private(set) var newBlob: HighlightBlobInput?
+  /// The size gate (`DiffDocument.highlightingDisabled`): `true` ⇒ render plain, no warm.
+  private(set) var highlightingDisabled = false
+
+  /// The span-cache engine the warmer fills. Defaults to the shared instance so every
+  /// open tab reuses one bounded parse cache; a test injects a FRESH engine so its
+  /// assertions don't collide with the app-wide live cache.
+  var highlightEngine: DiffHighlightEngine = .shared
+
+  /// The in-flight warm, cancelled + restarted on each trigger so a scroll burst
+  /// collapses to a single fill. `private(set)` so the warm test can `await` it to
+  /// drive the async fill to completion.
+  private(set) var highlightWarmTask: Task<Void, Never>?
+
+  /// Test instrumentation (parallel-safe, per controller — mirrors `lineRowsConfigured`):
+  /// the number of warm TASKS actually launched. A warm over an already-filled window
+  /// launches none (no missing lines), so this pins the "a warm scroll re-queries
+  /// nothing" invariant to a number.
+  private(set) var highlightWarmLaunchCount = 0
+
+  /// Store the per-side blobs + size gate and kick a warm pass. Additive to `setSyntax`:
+  /// the view still reads the reducer push in Phase B, so this only proves the cache
+  /// gets filled off-main for the render window.
+  func setHighlightBlobs(old: HighlightBlobInput?, new: HighlightBlobInput?, disabled: Bool) {
+    oldBlob = old
+    newBlob = new
+    highlightingDisabled = disabled
+    warmVisibleHighlights()
+  }
+
+  /// Fill the span cache for the VISIBLE + overscan window, per side, off-main and
+  /// coalesced — querying ONLY the blob lines not already cached. The view still reads
+  /// the reducer push (`setSyntax`), so this is purely additive: it proves the pull
+  /// path and seeds Phase C's repaint-from-cache. Called after every layout settles and
+  /// from `setHighlightBlobs`.
+  private func warmVisibleHighlights() {
+    // Mirror `layoutVisibleChunks`' preconditions: no warm when plain-gated, when there
+    // is nothing to parse, or before the viewport has a real width.
+    guard !highlightingDisabled else { return }
+    guard oldBlob != nil || newBlob != nil else { return }
+    guard documentView.bounds.width > 0 else { return }
+
+    // The render window the layout materializes: visible band expanded by the overscan
+    // the renderer draws, clamped to the document — the whole point (the reducer's
+    // visible-only query never covered these rows).
+    let window = tree.visibleLineRange(in: expandedRenderRect(), mode: mode)
+
+    // Resolve each side's still-uncached 0-based blob-line gaps. A side with no grammar,
+    // no blob, or an already-warm window contributes nothing (a warm scroll is a no-op).
+    var work: [(blob: HighlightBlobInput, gaps: [Range<Int>])] = []
+    for (blob, lineRange) in [(oldBlob, window.old), (newBlob, window.new)] {
+      guard let blob, let queryName = DiffHighlightEngine.grammarQueryName(forPath: blob.path) else { continue }
+      let blobLines = DiffHighlightClient.blobWindow(forLineNumbers: lineRange)
+      let gaps = highlightEngine.missingBlobLines(blobOID: blob.blobOID, queryName: queryName, blobLines: blobLines)
+      guard !gaps.isEmpty else { continue }
+      work.append((blob, gaps))
+    }
+    guard !work.isEmpty else { return }
+
+    // Coalesce: drop the prior in-flight warm and start a fresh one, so a scroll burst
+    // collapses to one fill. Each side's parse runs off-main inside `styleRuns`.
+    highlightWarmTask?.cancel()
+    highlightWarmLaunchCount += 1
+    highlightWarmTask = Task { [weak self, highlightEngine] in
+      for entry in work {
+        for gap in entry.gaps {
+          if Task.isCancelled { return }
+          _ = await highlightEngine.styleRuns(for: entry.blob, visibleLines: gap)
+        }
+      }
+      if Task.isCancelled { return }
+      // The cache grew for the render window: bump the repaint signal so Phase C can
+      // repaint from the cache. Harmless in Phase B (the view reads the reducer push).
+      self?.syntaxVersion &+= 1
+    }
+  }
+
+  /// The visible viewport band expanded by `Self.overscan` on each side and clamped to
+  /// the document — the exact render window `placeVisibleChunksOnce` materializes
+  /// against, so the warm covers every drawn (incl. overscan) row.
+  private func expandedRenderRect() -> CGRect {
+    visibleRect.insetBy(dx: 0, dy: -Self.overscan).intersection(documentView.bounds)
+  }
+
   /// Resolves a `.widget` leaf's scalar payload into the concrete `DiffWidget`
   /// model the Phase-6 harness hosts. The seam (`DiffViewerRepresentable`) injects
   /// a context-rich resolver (`FileChange` / comments / callbacks); the default
@@ -307,6 +396,7 @@ final class DiffViewportController: NSObject {
       if measurePass >= maxMeasurePasses { break }
     }
     fireVisibleRange()
+    warmVisibleHighlights()  // pull-model: fill the span cache for the settled render window (Phase B)
   }
 
   /// One placement sweep: seek the visible window (+ overscan), place one view per
