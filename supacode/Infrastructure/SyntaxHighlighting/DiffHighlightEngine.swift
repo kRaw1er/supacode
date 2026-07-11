@@ -116,6 +116,68 @@ final class DiffHighlightEngine {
     }
   }
 
+  // MARK: - pure cache reads (the pull-model read side; no parse, no client build)
+
+  /// Reads ONLY the span cache (`spans[Key(blobOID, queryName, syntaxThemeGen)]`) and
+  /// returns the subset of cached entries whose key line falls inside `blobLines`. No
+  /// `prepare`, no parse, no client build — a pure dictionary read for the draw/warm
+  /// path. Returns `[:]` when the blob isn't cached at all.
+  ///
+  /// LINE SPACE: `blobLines` and the returned keys are **0-based blob lines** — exactly
+  /// what `bucket` emits and `styleRuns` merges into the cache. Any 1-based↔0-based
+  /// translation is the caller's job (the warmer / client adapter owns it, mirroring
+  /// `DiffHighlightClient.blobWindow` / `lineNumberKeyed`), never this method's.
+  func cachedRuns(blobOID: String, queryName: String, blobLines: Range<Int>) -> [Int: [StyleRun]] {
+    guard let map = spans[.init(blobOID: blobOID, queryName: queryName, themeGen: syntaxThemeGen)] else { return [:] }
+    var result: [Int: [StyleRun]] = [:]
+    for (line, runs) in map where blobLines.contains(line) {
+      result[line] = runs
+    }
+    return result
+  }
+
+  /// Single-blob-line convenience over `cachedRuns`, for `SyntaxRunsProvider.live`.
+  /// Returns the cached runs for `blobLine` (0-based blob line) or `[]` on a miss.
+  func cachedRuns(blobOID: String, queryName: String, blobLine: Int) -> [StyleRun] {
+    cachedRuns(blobOID: blobOID, queryName: queryName, blobLines: blobLine..<(blobLine + 1))[blobLine] ?? []
+  }
+
+  /// The coalesced sub-ranges of `blobLines` for which NO runs are cached — the gaps a
+  /// warmer must still query. A line present in the cache with an empty `[]` value
+  /// counts as PRESENT (it was queried and simply had no tokens), NOT missing. When the
+  /// blob isn't cached at all, the whole input range is missing (`[blobLines]`, or `[]`
+  /// if `blobLines` is empty).
+  ///
+  /// LINE SPACE: 0-based blob lines, matching `cachedRuns` / the span cache.
+  func missingBlobLines(blobOID: String, queryName: String, blobLines: Range<Int>) -> [Range<Int>] {
+    guard !blobLines.isEmpty else { return [] }
+    guard let map = spans[.init(blobOID: blobOID, queryName: queryName, themeGen: syntaxThemeGen)] else {
+      return [blobLines]
+    }
+    var ranges: [Range<Int>] = []
+    var runStart: Int?
+    for line in blobLines {
+      let present = map[line] != nil
+      if present {
+        if let start = runStart {
+          ranges.append(start..<line)
+          runStart = nil
+        }
+      } else if runStart == nil {
+        runStart = line
+      }
+    }
+    if let start = runStart { ranges.append(start..<blobLines.upperBound) }
+    return ranges
+  }
+
+  /// Grammar `queryName` for a file path (the span-cache key component), or `nil` when
+  /// no bundled grammar matches (a plain render). `nonisolated` so the warmer / a test
+  /// can resolve the key without hopping to the main actor.
+  nonisolated static func grammarQueryName(forPath path: String) -> String? {
+    GrammarRegistry.grammar(forPath: path)?.queryName
+  }
+
   // MARK: - client + config build (mirrors TreeSitterClient+Neon.swift:75-110)
 
   /// Builds/reuses the client, the decoded blob, and resolves the grammar. `nil` ⇒
