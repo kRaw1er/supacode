@@ -130,18 +130,30 @@ final class DiffViewportController: NSObject {
     highlightWarmTask?.cancel()
     highlightWarmLaunchCount += 1
     highlightWarmTask = Task { [weak self, highlightEngine] in
-      for entry in work {
+      var mergedAny = false
+      outer: for entry in work {
         for gap in entry.gaps {
-          if Task.isCancelled { return }
-          _ = await highlightEngine.styleRuns(for: entry.blob, visibleLines: gap)
+          // Cancellation CANNOT stop the off-main parse (TreeSitterClient ignores it — a
+          // cancelled task still parses + merges its gap into the shared span cache). It only
+          // saves us from LAUNCHING further gap parses. So stop grabbing new gaps here, but
+          // still repaint below whatever we already merged.
+          if Task.isCancelled { break outer }
+          let filled = await highlightEngine.styleRuns(for: entry.blob, visibleLines: gap)
+          if !filled.isEmpty { mergedAny = true }
         }
       }
-      if Task.isCancelled { return }
-      // The cache grew for the render window: bump the repaint signal AND re-typeset the
-      // materialized rows so each pulls its now-cached color (pull model). The re-layout
-      // re-enters `warmVisibleHighlights`, but the window is now fully warm (no missing
-      // lines) → it returns without launching another task → no loop.
-      self?.repaintForSyntaxFill()
+      // Repaint whenever we grew the cache — EVEN IF a newer warm superseded (cancelled) us.
+      // `markCovered` claims each task's range UP FRONT, so the superseding warm computes a
+      // DISJOINT gap and never re-covers (hence never repaints) OUR region. The old
+      // `if Task.isCancelled { return }` here stranded the just-merged runs in the cache: with
+      // a fast scroll ~15 tasks each fill a disjoint slice but only the single last-LAUNCHED
+      // (uncancelled) task repainted — and it fired before the VISIBLE slice's owner had
+      // merged, so the viewport stayed white with color sitting unused until a 1px resize
+      // forced a re-typeset. Repainting on every merge guarantees the LAST-COMPLETING task
+      // paints the fully-filled cache; the burst converges (each repaint re-warms, gaps shrink
+      // to empty → no new task). Re-typeset of the visible leaf is idempotent, so the extra
+      // repaints are cheap and never regress correctness.
+      if mergedAny { self?.repaintForSyntaxFill() }
     }
   }
 
