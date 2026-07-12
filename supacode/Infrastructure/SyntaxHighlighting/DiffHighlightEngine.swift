@@ -72,8 +72,9 @@ final class DiffHighlightEngine {
 
   // MARK: - async parse (off-main) → span-cache fill (the warmer's path)
 
-  /// Async pass — always answers (TreeSitterClient.swift:385-387). Buckets the
-  /// window and unions it into the span cache for scroll reuse.
+  /// Buckets the window and unions it into the span cache for scroll reuse. Prefers neon's
+  /// SYNCHRONOUS `highlights` overload (reads the already-parsed tree, no `await`); only when the
+  /// tree is not yet warm does it fall through to the expensive async parse.
   func styleRuns(for input: HighlightBlobInput, visibleLines: Range<Int>) async -> [Int: [StyleRun]] {
     guard let prepared = prepare(input) else { return [:] }
     let key = HighlightSpanCache.Key(
@@ -86,30 +87,79 @@ final class DiffHighlightEngine {
     spans.markCovered(requested, for: key)
     let window = windowRange(prepared.blob, visibleLines)
     guard !window.lines.isEmpty else { return [:] }
+    let provider = prepared.blob.string.predicateTextProvider
 
-    // Serialize parses PER neon client. `TreeSitterClient` is non-Sendable and its parse runs
-    // off-main during the `highlights` await, so two concurrent calls on the SAME client race
-    // on neon's shared parse state and return CORRUPT captures — reproduced as a whole region
-    // coming back as a single spurious `string` run per line (the all-red bug), triggered by a
-    // fast-scroll warm fan-out that launches many concurrent `styleRuns` for one blob. A gate
-    // per (blobOID, queryName) keeps at most one parse in flight per client while still letting
-    // DIFFERENT files parse in parallel.
-    let clientKey = ParseTreeCache.Key(blobOID: input.blobOID, queryName: prepared.grammar.queryName)
-    let gate = parseGate(for: clientKey)
+    // FAST PATH — the SYNC `highlights` overload (`TreeSitterClient.swift:380`) reads the
+    // ALREADY-PARSED tree and returns immediately. It is ~1000× cheaper than the async overload,
+    // which re-runs `processLocation` + `await`s neon's background processor on EVERY call (the
+    // async overload was ~34ms/call warm vs ~0.04ms sync — that per-call async cost, serialized
+    // by the parse gate, was the scroll slowdown). It is also SUSPENSION-FREE, so a concurrent
+    // warm fan-out can't interleave on neon's non-Sendable tree here — no race, no gate needed.
+    // Returns `nil` only while the tree still has pending changes (the initial parse hasn't
+    // reached this window yet) → fall through to the async parse below.
+    if let byLine = trySyncStyleRuns(prepared: prepared, window: window, key: key, provider: provider) {
+      return byLine
+    }
+
+    // SLOW PATH — the tree is not warm yet. Drive ONE async parse of the WHOLE blob so neon's
+    // background processor SETTLES (`hasPendingChanges → false`); only then does the sync overload
+    // start answering. A PARTIAL (windowed) parse leaves the rest pending, so `hasPendingChanges`
+    // stays true and EVERY later sync returns nil → every call re-parses (~34-64ms) — the scroll
+    // slowdown. Settle once, and the whole file is sync-cheap forever after.
+    //
+    // Single-flight it via the per-client gate: the FIRST cold task runs the full-file parse; every
+    // task that piled up behind the gate re-checks sync on wake and returns WITHOUT parsing. That
+    // also fixes the fan-out cost (14 concurrent cold windows used to EACH re-parse 0→depth,
+    // serialized → seconds). Serializing is likewise what stops the concurrent-parse corruption
+    // (the all-red bug): the async overload suspends on the background processor, and two at once on
+    // the same non-Sendable client race.
+    let gate = parseGate(for: ParseTreeCache.Key(blobOID: input.blobOID, queryName: prepared.grammar.queryName))
     await gate.acquire()
     defer { gate.release() }
-
+    if let byLine = trySyncStyleRuns(prepared: prepared, window: window, key: key, provider: provider) {
+      return byLine
+    }
     do {
-      let named = try await prepared.client.highlights(
-        in: window.range, provider: prepared.blob.string.predicateTextProvider)
-      let byLine = Self.bucket(
-        named, lineStarts: prepared.blob.lineStarts, textLength: prepared.blob.text.length, window: window.lines)
-      spans.merge(byLine, into: key)
+      // Parse the window (returns its runs, advances the tree), then SETTLE the rest cheaply: a
+      // 1-unit query at the END drives `processLocation` to `blob.length` → `hasPendingChanges`
+      // clears → every LATER window takes the sync fast path. A 1-unit query materializes no O(file)
+      // capture array (a full-range query would). This cold path runs ONCE per blob.
+      let named = try await prepared.client.highlights(in: window.range, provider: provider)
+      let byLine = mergeNamed(named, prepared: prepared, window: window, key: key)
+      let end = prepared.blob.text.length
+      if end > window.range.upperBound {
+        _ = try await prepared.client.highlights(in: NSRange(location: end - 1, length: 1), provider: provider)
+      }
       return byLine
     } catch {
       Self.logger.error("highlight failed for \(input.path): \(error)")
-      return [:]
     }
+    return trySyncStyleRuns(prepared: prepared, window: window, key: key, provider: provider) ?? [:]
+  }
+
+  /// The synchronous fast path: `nil` when the tree isn't warm enough to answer without a parse
+  /// (neon's sync overload returns `nil` while `hasPendingChanges`). Suspension-free, so it never
+  /// races a concurrent warm.
+  private func trySyncStyleRuns(
+    prepared: Prepared, window: WindowRange, key: HighlightSpanCache.Key, provider: @escaping SwiftTreeSitter.Predicate.TextProvider
+  ) -> [Int: [StyleRun]]? {
+    do {
+      let named: [NamedRange]? = try prepared.client.highlights(in: window.range, provider: provider)
+      guard let named else { return nil }
+      return mergeNamed(named, prepared: prepared, window: window, key: key)
+    } catch {
+      Self.logger.error("sync highlight failed for \(prepared.grammar.queryName): \(error)")
+      return nil
+    }
+  }
+
+  private func mergeNamed(
+    _ named: [NamedRange], prepared: Prepared, window: WindowRange, key: HighlightSpanCache.Key
+  ) -> [Int: [StyleRun]] {
+    let byLine = Self.bucket(
+      named, lineStarts: prepared.blob.lineStarts, textLength: prepared.blob.text.length, window: window.lines)
+    spans.merge(byLine, into: key)
+    return byLine
   }
 
   /// FIFO async mutex (count 1). One per neon client serializes `highlights` calls so a
