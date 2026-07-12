@@ -86,6 +86,19 @@ final class DiffHighlightEngine {
     spans.markCovered(requested, for: key)
     let window = windowRange(prepared.blob, visibleLines)
     guard !window.lines.isEmpty else { return [:] }
+
+    // Serialize parses PER neon client. `TreeSitterClient` is non-Sendable and its parse runs
+    // off-main during the `highlights` await, so two concurrent calls on the SAME client race
+    // on neon's shared parse state and return CORRUPT captures — reproduced as a whole region
+    // coming back as a single spurious `string` run per line (the all-red bug), triggered by a
+    // fast-scroll warm fan-out that launches many concurrent `styleRuns` for one blob. A gate
+    // per (blobOID, queryName) keeps at most one parse in flight per client while still letting
+    // DIFFERENT files parse in parallel.
+    let clientKey = ParseTreeCache.Key(blobOID: input.blobOID, queryName: prepared.grammar.queryName)
+    let gate = parseGate(for: clientKey)
+    await gate.acquire()
+    defer { gate.release() }
+
     do {
       let named = try await prepared.client.highlights(
         in: window.range, provider: prepared.blob.string.predicateTextProvider)
@@ -97,6 +110,38 @@ final class DiffHighlightEngine {
       Self.logger.error("highlight failed for \(input.path): \(error)")
       return [:]
     }
+  }
+
+  /// FIFO async mutex (count 1). One per neon client serializes `highlights` calls so a
+  /// concurrent warm fan-out can never run two parses on the same non-Sendable
+  /// `TreeSitterClient` at once (which corrupts neon's parse into all-`string` garbage).
+  @MainActor
+  private final class ParseGate {
+    private var busy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func acquire() async {
+      if !busy {
+        busy = true
+        return
+      }
+      await withCheckedContinuation { waiters.append($0) }
+    }
+    func release() {
+      if waiters.isEmpty {
+        busy = false
+      } else {
+        waiters.removeFirst().resume()
+      }
+    }
+  }
+
+  private var parseGates: [ParseTreeCache.Key: ParseGate] = [:]
+
+  private func parseGate(for key: ParseTreeCache.Key) -> ParseGate {
+    if let gate = parseGates[key] { return gate }
+    let gate = ParseGate()
+    parseGates[key] = gate
+    return gate
   }
 
   // MARK: - pure cache reads (the pull-model read side; no parse, no client build)
