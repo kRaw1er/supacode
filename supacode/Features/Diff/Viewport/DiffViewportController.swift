@@ -287,6 +287,11 @@ final class DiffViewportController: NSObject {
   // Callbacks OUT — no `store.*` mutation (`DiffTableController.swift:35` precedent).
   var onVisibleRangeChanged: ((VisibleLineWindow) -> Void)?
   var onHit: ((DiffHit) -> Void)?
+  /// Fired whenever the clip view scrolls (`boundsDidChange`). The gutter overlay is a
+  /// FLOATING subview — it does not scroll with the content and so is not auto-redrawn,
+  /// leaving a stale hover highlight / "+" glyph pinned to the old screen position while
+  /// the rows scroll underneath. The coordinator wires this to re-resolve + repaint it.
+  var onViewportMoved: (() -> Void)?
 
   override init() {
     scrollView = NSScrollView()
@@ -394,6 +399,7 @@ final class DiffViewportController: NSObject {
   private func viewportMoved() {
     guard !isAdjustingScroll else { return }
     documentView.needsLayout = true
+    onViewportMoved?()
   }
 
   /// The clip view resized (window drag / split-pane drag / inspector toggle). A

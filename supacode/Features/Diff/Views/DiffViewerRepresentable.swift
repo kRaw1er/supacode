@@ -310,6 +310,9 @@ struct DiffViewerRepresentable: NSViewRepresentable {
       gutter.frame = controller.scrollView.contentView.frame
       gutter.autoresizingMask = [.width, .height]
       controller.scrollView.addFloatingSubview(gutter, for: .vertical)
+      // Repaint + re-resolve the hover on scroll: the floating overlay does not scroll
+      // with the content, so a stale highlight would otherwise stick to the old screen row.
+      controller.onViewportMoved = { [weak gutter] in gutter?.viewportDidScroll() }
       self.gutter = gutter
 
       let provider = DiffAXProvider(

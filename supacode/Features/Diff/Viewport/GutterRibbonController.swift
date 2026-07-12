@@ -178,6 +178,34 @@ final class GutterRibbonController: NSView {
     setNeedsDisplay(bounds)
   }
 
+  /// The clip view scrolled (wheel / trackpad) under a possibly-stationary cursor. This
+  /// overlay is a FLOATING subview — fixed on screen while the rows scroll beneath it —
+  /// so it is not auto-redrawn, and `mouseMoved` does NOT fire on a scroll. Without this
+  /// the hover highlight / "+" glyph stays pinned to its old screen row while the code
+  /// scrolls away (the "highlight between lines" bug). Re-resolve a passive hover to the
+  /// row now under the cursor, then ALWAYS repaint — even when the resolved line is
+  /// unchanged the document→local mapping moved, so the cached drawing is stale. During an
+  /// active drag the band follows its pinned rows via that live mapping, so only a repaint
+  /// is needed.
+  func viewportDidScroll() {
+    guard case .idle = session, let window else {
+      setNeedsDisplay(bounds)  // a drag band follows its pinned rows; just repaint
+      return
+    }
+    let local = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+    resolveHoverAfterScroll(localMouse: bounds.contains(local) ? local : nil)
+  }
+
+  /// Testable core of `viewportDidScroll`: re-resolve a passive hover to the row now under
+  /// `localMouse` (overlay-local; `nil` = the cursor is off the overlay) at the CURRENT
+  /// scroll offset, then repaint. Split out so a headless test can drive it without a live
+  /// window / mouse. Always repaints — even when the resolved line is unchanged, the
+  /// document→local mapping moved, so the cached hover drawing is stale.
+  func resolveHoverAfterScroll(localMouse: CGPoint?) {
+    updateHover(atDocument: localMouse.map(documentPoint(from:)) ?? CGPoint(x: -1, y: -1))
+    setNeedsDisplay(bounds)
+  }
+
   /// The cross-linked hover highlight (pierre `lineHoverHighlight: 'both'`, B §2):
   /// a hovered gutter number highlights BOTH its own number cell AND the paired
   /// content row across every column. `nil` when nothing is hovered. The row rect

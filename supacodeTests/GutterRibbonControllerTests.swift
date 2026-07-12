@@ -220,6 +220,33 @@ struct GutterRibbonControllerTests {
           current: SelectionPoint(lineNumber: 100, side: .old)))
   }
 
+  // MARK: - Scroll under a stationary cursor re-resolves the hover (no stale highlight)
+
+  /// Wheel / trackpad scrolling while hovering must move the highlight + "+" to the row
+  /// now under the STATIONARY cursor. The gutter overlay is a floating subview (fixed on
+  /// screen) and `mouseMoved` does not fire on a scroll, so without re-resolution the
+  /// highlight sticks to its old screen row — the "highlight between lines" bug. Drives the
+  /// testable core with a FIXED screen point across a scroll (no live window / mouse).
+  @Test func scrollReResolvesHoverUnderStationaryCursor() {
+    let (controller, gutter) = makeSetup(lines: 100)
+    // Offset 0, so screen y == document y: the cursor at y=90 sits over line 5.
+    gutter.updateHover(atDocument: CGPoint(x: oldNumX(controller), y: rowY(5)))
+    #expect(gutter.hoverHighlight?.line == SelectionPoint(lineNumber: 5, side: .old))
+
+    // Scroll down 40px. The cursor stays at screen y=90; the row under it is now line 7
+    // (document y = 90 + 40 = 130).
+    controller.scroll(toY: 40)
+    #expect(controller.visibleRect.minY == 40, "precondition: the viewport actually scrolled")
+    gutter.resolveHoverAfterScroll(localMouse: CGPoint(x: oldNumX(controller), y: rowY(5)))
+    #expect(gutter.hoverHighlight?.line == SelectionPoint(lineNumber: 7, side: .old))
+    // The highlight tracks the resolved row at its new document position, not the old screen one.
+    #expect(gutter.hoverHighlight?.contentRow == controller.lineRect(line: 7, side: .old))
+
+    // A scroll that carries the cursor off the overlay clears the hover.
+    gutter.resolveHoverAfterScroll(localMouse: nil)
+    #expect(gutter.hoverHighlight == nil)
+  }
+
   // MARK: - PERF GUARD — hovering deep in a huge file is O(log n), not O(n)/O(n²)
 
   /// A huge all-ADDITION file — every line renders (unchanged context collapses to an
