@@ -150,18 +150,28 @@ struct ChangedFilesListView: View {
   /// VoiceOver label so a file appearing in both sections is distinguishable.
   /// `scrollSpy` rows (the working-tree section, the diff viewport's scroll-spy
   /// target) highlight when active and, on tap, also record a jump-to-file intent.
-  @ViewBuilder
   private func fileRow(_ file: FileChange, source: DiffSource, axPrefix: String?, scrollSpy: Bool) -> some View {
-    FileChangeRow(file: file)
-      .contentShape(Rectangle())
-      .onTapGesture {
-        store.send(.openFile(path: file.id, source: source))
-        if scrollSpy { store.send(.diffJumpToFile(file.id)) }
-      }
-      .accessibilityAddTraits(.isButton)
-      .accessibilityHint("Opens the diff in a new tab")
-      .accessibilityLabel(axPrefix.map { "\($0): \(FileChangeRow.axLabel(file))" } ?? FileChangeRow.axLabel(file))
-      .listRowBackground(rowHighlight(for: file, scrollSpy: scrollSpy))
+    // A real `Button` (not `.onTapGesture`) so the row is a proper control. The
+    // accessibility label/hint live INSIDE the label: applied outside the `Button`
+    // they spawn a wrapper element that steals the trait/label from the pressable
+    // one. `.buttonStyle(.plain)` keeps the flat row appearance.
+    // NOTE: a `.plain` Button embedded in a `List` reports an `AXPress` action that
+    // macOS "performs" successfully but never runs the closure — so programmatic /
+    // VoiceOver activation is inert (verified with peekaboo). Drive it with a real
+    // mouse event: automation must use synthetic clicks (peekaboo `--foreground`,
+    // `--input-strategy synthOnly`), not accessibility-action clicks.
+    Button {
+      store.send(.openFile(path: file.id, source: source))
+      if scrollSpy { store.send(.diffJumpToFile(file.id)) }
+    } label: {
+      FileChangeRow(file: file)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(axPrefix.map { "\($0): \(FileChangeRow.axLabel(file))" } ?? FileChangeRow.axLabel(file))
+        .accessibilityHint("Opens the diff in a new tab")
+    }
+    .buttonStyle(.plain)
+    .listRowBackground(rowHighlight(for: file, scrollSpy: scrollSpy))
   }
 
   /// The active-file selection highlight for a scroll-spy row (system selection
