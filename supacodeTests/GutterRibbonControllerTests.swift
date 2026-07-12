@@ -219,4 +219,60 @@ struct GutterRibbonControllerTests {
           anchor: SelectionPoint(lineNumber: 100, side: .old),
           current: SelectionPoint(lineNumber: 100, side: .old)))
   }
+
+  // MARK: - PERF GUARD — hovering deep in a huge file is O(log n), not O(n)/O(n²)
+
+  /// A huge all-ADDITION file — every line renders (unchanged context collapses to an
+  /// expander, so a pure-context file would have no deep rows to hover). ≤maxLeafSpan
+  /// leaves over one shared backing.
+  private func bigAddedTree(lines count: Int) -> ChunkTree {
+    let rows = (0..<count).map { DiffFixture.line(.addition, old: nil, new: $0 + 1, "let x\($0) = \($0)") }
+    let hunk = DiffFixture.hunk(rows, oldStart: 0, newStart: 1, header: "@@ -0,0 +1,\(count) @@")
+    return ChunkTreeFixture.files([.init(file: DiffFixture.file(path: "big.swift"), hunks: [hunk])])
+  }
+
+  /// The new-number gutter column center (unified: `[oldBar][oldNum][newBar][newNum]…`).
+  private func newNumX(_ controller: DiffViewportController) -> CGFloat {
+    2 * DiffHitTest.changeBarWidth + controller.gutterWidth + controller.gutterWidth / 2
+  }
+
+  /// Hovering a line near the BOTTOM of a 20k-line file must NOT walk the tree from
+  /// row 0 (the old `lineLocation` reverse scan was O(rows), amplified to O(rows²) by
+  /// a full `renderedRows` rebuild per visited row — the ~0.5s lag / freeze the user
+  /// hit). The forward `hitTest` already yields the row INDEX, so hover resolves its
+  /// rect via an O(log n) `seek(index:)` and builds ZERO full leaf arrays. A
+  /// regression that reintroduces the reverse scan or the per-row projection grows
+  /// `renderedRowsBuildCount` and fails here.
+  @Test func hoverDeepInHugeFileBuildsNoFullLeaf() {
+    let controller = ViewportTestSupport.controller()
+    controller.apply(tree: bigAddedTree(lines: 20_000), mode: .unified, scrollPreserving: false)
+    let gutter = GutterRibbonController()
+    gutter.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+    gutter.controller = controller
+
+    // A number-column point on a rendered row deep in the file (crosses maxLeafSpan
+    // leaf boundaries — the scan-from-0 case).
+    let deepY = controller.tree.seek(index: 18_000, mode: .unified)?.yOrigin ?? 0
+
+    let before = LineSegment.renderedRowsBuildCount
+    gutter.updateHover(atDocument: CGPoint(x: newNumX(controller), y: deepY))
+    guard let highlight = gutter.hoverHighlight else {
+      Issue.record("expected a hover cross-highlight deep in the file")
+      return
+    }
+    let built = LineSegment.renderedRowsBuildCount - before
+
+    // A correct hover builds ZERO full leaf arrays; the old O(n) reverse scan built
+    // one per visited row (~18k here). `renderedRowsBuildCount` is a process-global
+    // counter and swift-testing runs suites in parallel, so a concurrent test may add
+    // a few incidental builds inside this window — the loose bound still catches the
+    // orders-of-magnitude regression without flaking on that race.
+    #expect(
+      built < 100,
+      "hover built \(built) full renderedRows array(s) — the O(1) row resolver / index-seek regressed to O(leaf)")
+    // We really did hover deep (a scan from row 0 would have been ~18k steps).
+    #expect((highlight.line.lineNumber) > 9_000, "the hover must land deep in the file, not near the top")
+    // The fast index-seek rect matches the slow reverse line→rect resolution exactly.
+    #expect(highlight.contentRow == controller.lineRect(line: highlight.line.lineNumber, side: highlight.line.side))
+  }
 }

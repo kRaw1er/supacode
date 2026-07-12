@@ -962,8 +962,11 @@ final class DiffViewportController: NSObject {
   }
 
   /// The `LineLocation` of the rendered row carrying `line` on `side` (an in-order
-  /// scan; a user gutter action is infrequent and the target line sits in the
-  /// viewport). `nil` when no rendered row carries that number on that side.
+  /// scan). Off the hot path: hover / drag-band draw resolve their row from the
+  /// `rowIndex` the forward `hitTest` already produced (`lineRect(rowIndex:)`,
+  /// O(log n)), NOT from a line-number reverse scan. Only the infrequent
+  /// comment-commit (`insertCommentWidget`) still resolves a line number this way.
+  /// `nil` when no rendered row carries that number on that side.
   func lineLocation(line: Int, side: DiffSide) -> LineLocation? {
     var hit = tree.seek(index: 0, mode: mode)
     while let current = hit {
@@ -981,6 +984,17 @@ final class DiffViewportController: NSObject {
     guard let location = lineLocation(line: line, side: side),
       let hit = tree.seek(index: location.rowIndex, mode: mode)
     else { return nil }
+    return CGRect(x: 0, y: hit.yOrigin, width: documentView.bounds.width, height: hit.rowHeight)
+  }
+
+  /// The document-space rect of a materialized row by its global rendered-row
+  /// INDEX — a pure O(log n) `seek(index:)`, no line-number reverse scan. The
+  /// gutter ribbon already holds this index from the forward `hitTest`, so it
+  /// paints the hover highlight / "+" glyph / drag band without re-deriving the
+  /// row from a `(line, side)` coordinate (which was an O(n) walk from row 0).
+  /// `nil` for an out-of-range index.
+  func lineRect(rowIndex: Int) -> NSRect? {
+    guard let hit = tree.seek(index: rowIndex, mode: mode) else { return nil }
     return CGRect(x: 0, y: hit.yOrigin, width: documentView.bounds.width, height: hit.rowHeight)
   }
 

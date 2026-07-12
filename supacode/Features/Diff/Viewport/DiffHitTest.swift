@@ -160,10 +160,28 @@ extension Chunk {
     case .widget:
       return (nil, side)
     case .lineSegment(let segment):
-      let rows = segment.renderedRows(mode)
-      guard rows.indices.contains(localRow) else { return (nil, side) }
-      let row = rows[localRow]
-      return (side == .old ? row.oldNumber : row.newNumber, side)
+      guard localRow >= 0 else { return (nil, side) }
+      // Resolve the row's numbers in O(1) from the leaf's intrinsic numbering
+      // (`LineSegment.lineNumbers`) instead of building the whole ≤maxLeafSpan
+      // `renderedRows` array — the SAME fast path `ChunkTree.visibleLineRange`
+      // uses. Building the full array here made hover / hit-test O(leaf) on every
+      // `mouseMoved`. A no-newline-marker leaf (rare — EOF only) breaks the
+      // rendered-row ↔ window-offset 1:1 mapping the O(1) resolver relies on, so
+      // it falls back to the full projection.
+      let deletionCount = segment.windowDeletionCount
+      if segment.windowHasNoNewlineMarker(deletionCount: deletionCount) {
+        let rows = segment.renderedRows(mode)
+        guard rows.indices.contains(localRow) else { return (nil, side) }
+        let row = rows[localRow]
+        return (side == .old ? row.oldNumber : row.newNumber, side)
+      }
+      // Context / unified-change index the window directly, so guard the bound
+      // (`lineNumbers` force-indexes `windowLine`); split-change's resolver is
+      // internally bounds-guarded and returns `nil` past its paired rows.
+      let indexesWindowDirectly = mode == .unified || segment.classification != .change
+      if indexesWindowDirectly, localRow >= segment.window.count { return (nil, side) }
+      let numbers = segment.lineNumbers(atRenderedRow: localRow, mode: mode, deletionCount: deletionCount)
+      return (side == .old ? numbers.old : numbers.new, side)
     }
   }
 }

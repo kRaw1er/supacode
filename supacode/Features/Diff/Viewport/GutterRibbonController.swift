@@ -63,6 +63,14 @@ final class GutterRibbonController: NSView {
   private var hover: SelectionPoint?
   private var trackingArea: NSTrackingArea?
 
+  // Geometry cached straight off the forward `hitTest` so drawing seeks the row by
+  // its global rendered-row INDEX (O(log n)) instead of reverse-resolving a
+  // `(line, side)` coordinate to a row (an O(n) walk from row 0). These mirror the
+  // logical `hover` / `session` state and are set at the same point.
+  private var hoverRowIndex: Int?
+  private var anchorRowIndex: Int?
+  private var currentRowIndex: Int?
+
   // Edge autoscroll state (set during a drag; consumed by `autoscrollStep`).
   private var autoscroller: EdgeAutoscroller?
   private var autoscrollOvershoot: CGFloat = 0
@@ -94,7 +102,10 @@ final class GutterRibbonController: NSView {
     else { return false }
     let anchor = SelectionPoint(lineNumber: line, side: side)
     session = .gutterSelecting(anchor: anchor, current: anchor)
+    anchorRowIndex = hit.rowIndex
+    currentRowIndex = hit.rowIndex
     hover = nil
+    hoverRowIndex = nil
     setNeedsDisplay(bounds)
     return true
   }
@@ -110,6 +121,7 @@ final class GutterRibbonController: NSView {
     let end = SelectionPoint(lineNumber: line, side: anchor.side)
     guard case .gutterSelecting(let anc, let current) = session, current != end else { return }
     session = .gutterSelecting(anchor: anc, current: end)
+    currentRowIndex = hit.rowIndex
     setNeedsDisplay(bounds)
   }
 
@@ -122,6 +134,9 @@ final class GutterRibbonController: NSView {
     defer {
       session = .idle
       hover = nil
+      hoverRowIndex = nil
+      anchorRowIndex = nil
+      currentRowIndex = nil
       setNeedsDisplay(bounds)
     }
     guard case .gutterSelecting(let anchor, let current) = session, let controller else { return nil }
@@ -139,6 +154,9 @@ final class GutterRibbonController: NSView {
     stopAutoscroll()
     session = .idle
     hover = nil
+    hoverRowIndex = nil
+    anchorRowIndex = nil
+    currentRowIndex = nil
     setNeedsDisplay(bounds)
   }
 
@@ -146,26 +164,31 @@ final class GutterRibbonController: NSView {
 
   func updateHover(atDocument point: CGPoint) {
     let resolved: SelectionPoint?
+    let resolvedRow: Int?
     if let hit = controller?.hitTest(point), hit.column.isNumberColumn, let line = hit.lineNumber, let side = hit.side {
       resolved = SelectionPoint(lineNumber: line, side: side)
+      resolvedRow = hit.rowIndex  // keep the geometric row so drawing seeks by index, not by line
     } else {
       resolved = nil
+      resolvedRow = nil
     }
     guard hover != resolved else { return }
     hover = resolved
+    hoverRowIndex = resolvedRow
     setNeedsDisplay(bounds)
   }
 
   /// The cross-linked hover highlight (pierre `lineHoverHighlight: 'both'`, B §2):
   /// a hovered gutter number highlights BOTH its own number cell AND the paired
-  /// content row across every column. `nil` when nothing is hovered. Derived LIVE
-  /// from the controller each read, so it re-arms on already-rendered rows and a
-  /// re-applied tree resolves against the current geometry (B §2), never a cached
-  /// per-row value. Exposed so a headless test asserts the cross-link (there is no
+  /// content row across every column. `nil` when nothing is hovered. The row rect
+  /// is derived LIVE each read from the hovered row's INDEX (`lineRect(rowIndex:)`,
+  /// an O(log n) `seek`), so it re-measures against the current geometry (B §2) —
+  /// the index is the geometric identity the forward `hitTest` produced, not a
+  /// cached rect. Exposed so a headless test asserts the cross-link (there is no
   /// window to sample pixels).
   var hoverHighlight: HoverHighlight? {
-    guard let hover, let controller,
-      let row = controller.lineRect(line: hover.lineNumber, side: hover.side)
+    guard let hover, let controller, let rowIndex = hoverRowIndex,
+      let row = controller.lineRect(rowIndex: rowIndex)
     else { return nil }
     return HoverHighlight(
       line: hover,
@@ -297,11 +320,12 @@ final class GutterRibbonController: NSView {
 
   override func draw(_ dirtyRect: NSRect) {
     guard let controller else { return }
-    if case .gutterSelecting(let anchor, let current) = session {
-      drawDragBand(anchor: anchor, current: current, controller: controller)
+    if case .gutterSelecting = session {
+      drawDragBand(controller: controller)
     } else if let highlight = hoverHighlight {
       drawHoverHighlight(highlight)
-      drawPlusGlyph(for: highlight.line, controller: controller)
+      // Reuse the row rect the highlight already resolved — no second row lookup.
+      drawPlusGlyph(for: highlight.line, docRect: highlight.contentRow, controller: controller)
     }
   }
 
@@ -318,8 +342,7 @@ final class GutterRibbonController: NSView {
     numberLocal.fill()
   }
 
-  private func drawPlusGlyph(for target: SelectionPoint, controller: DiffViewportController) {
-    guard let docRect = controller.lineRect(line: target.lineNumber, side: target.side) else { return }
+  private func drawPlusGlyph(for target: SelectionPoint, docRect: NSRect, controller: DiffViewportController) {
     let rowRect = localRect(fromDocument: docRect)
     guard !rowRect.isEmpty else { return }
     let diameter = min(rowRect.height - 2, 16)
@@ -339,9 +362,12 @@ final class GutterRibbonController: NSView {
     toolTip = "Comment on this line — drag to select a range"
   }
 
-  private func drawDragBand(anchor: SelectionPoint, current: SelectionPoint, controller: DiffViewportController) {
-    guard let anchorDoc = controller.lineRect(line: anchor.lineNumber, side: anchor.side),
-      let currentDoc = controller.lineRect(line: current.lineNumber, side: current.side)
+  private func drawDragBand(controller: DiffViewportController) {
+    // Both endpoints seek by their cached rendered-row INDEX (O(log n)); the anchor's
+    // index stays valid as it scrolls offscreen during an autoscroll drag.
+    guard let anchorIndex = anchorRowIndex, let currentIndex = currentRowIndex,
+      let anchorDoc = controller.lineRect(rowIndex: anchorIndex),
+      let currentDoc = controller.lineRect(rowIndex: currentIndex)
     else { return }
     let band = localRect(fromDocument: anchorDoc).union(localRect(fromDocument: currentDoc))
     NSColor.controlAccentColor.withAlphaComponent(0.15).setFill()
