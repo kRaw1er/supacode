@@ -91,10 +91,13 @@ final class ChunkTree {
 
   /// Instrumentation surface. `seekCount` is load-bearing for the Phase-8
   /// "toggle is O(log n), not O(n)" assertion; `buildRowsCallCount` is the
-  /// builder spy.
+  /// builder spy; `successorCount` counts in-order `successor(of:)` steps — a
+  /// bounded-viewport walk is fine, but a per-hover / per-frame walk that grows
+  /// with file size is the O(n) reverse-scan regression the gutter fix removed.
   nonisolated struct Diagnostics: Equatable, Sendable {
     var seekCount: Int = 0
     var buildRowsCallCount: Int = 0
+    var successorCount: Int = 0
   }
 
   init(metrics: ChunkLayoutMetrics = .production) {
@@ -242,6 +245,7 @@ final class ChunkTree {
   /// In-order successor of a hit (the viewport walks the visible window). nil at
   /// the last row.
   func successor(of hit: ChunkHit, mode: DiffViewMode) -> ChunkHit? {
+    diagnostics.successorCount += 1
     guard let node = nodesByID[hit.id] else { return nil }
     if hit.localRow + 1 < node.summary.count(mode) {
       return makeHit(for: node, localRow: hit.localRow + 1, mode: mode)

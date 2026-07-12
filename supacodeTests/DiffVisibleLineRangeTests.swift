@@ -154,4 +154,86 @@ struct DiffVisibleLineRangeTests {
     #expect(window.new == 1..<3, "the new side spans the context + added line, marker not double-counted")
     #expect(window.old == 1..<2, "only the context line carries an old number")
   }
+
+  // MARK: - `Chunk.lineAndSide` O(1) resolver (the gutter hit-test / hover fast path)
+
+  /// `Chunk.lineAndSide` — read on EVERY `mouseMoved` by the gutter hit-test — was
+  /// rebuilding the whole ≤maxLeafSpan `renderedRows` array to read one row's numbers.
+  /// It now resolves in O(1) via `LineSegment.lineNumbers` (the same fast path
+  /// `visibleLineRange` uses). This pins it row-for-row against the golden projection
+  /// for context, unified change (del-then-add), AND split change (del ↔ add pairing),
+  /// on both sides — so the O(1) rewrite can never diverge from what it stands in for.
+  @Test func lineAndSideMatchesRenderedRowsForEveryLeaf() {
+    for mode in [DiffViewMode.unified, .split] {
+      for node in mixedChangeTree().inorderNodes() {
+        let chunk = node.chunk
+        guard chunk.lineSegment != nil else { continue }
+        let golden = chunk.renderedRows(mode)
+        for (localRow, row) in golden.enumerated() {
+          let resolvedOld = chunk.lineAndSide(for: .gutter(.old), localRow: localRow, mode: mode).line
+          let resolvedNew = chunk.lineAndSide(for: .gutter(.new), localRow: localRow, mode: mode).line
+          #expect(
+            resolvedOld == row.oldNumber && resolvedNew == row.newNumber,
+            "lineAndSide diverged from renderedRows at leaf row \(localRow) in \(mode)")
+        }
+        // Out-of-range / negative rows resolve to `nil`, never a crash.
+        #expect(chunk.lineAndSide(for: .gutter(.new), localRow: golden.count, mode: mode).line == nil)
+        #expect(chunk.lineAndSide(for: .gutter(.new), localRow: -1, mode: mode).line == nil)
+      }
+    }
+  }
+
+  /// A leaf carrying a no-newline marker breaks the rendered-row ↔ window-offset 1:1
+  /// mapping, so `lineAndSide` must take the full-projection FALLBACK and still match the
+  /// golden rows exactly (including the number-duplicating marker row).
+  @Test func lineAndSideMatchesRenderedRowsAcrossNoNewlineMarker() {
+    let lines = [
+      DiffFixture.line(.deletion, old: 1, new: nil, "del", noNewline: true),
+      DiffFixture.line(.addition, old: nil, new: 1, "add", noNewline: true),
+    ]
+    let hunk = DiffFixture.hunk(lines, oldStart: 1, newStart: 1, header: "@@ -1 +1 @@")
+    let tree = ChunkTreeFixture.files([.init(file: DiffFixture.file(path: "m.swift"), hunks: [hunk])])
+    for mode in [DiffViewMode.unified, .split] {
+      for node in tree.inorderNodes() {
+        let chunk = node.chunk
+        guard let segment = chunk.lineSegment else { continue }
+        // This leaf must actually exercise the fallback, else the test proves nothing.
+        guard segment.windowHasNoNewlineMarker(deletionCount: segment.windowDeletionCount) else { continue }
+        let golden = chunk.renderedRows(mode)
+        for (localRow, row) in golden.enumerated() {
+          #expect(chunk.lineAndSide(for: .gutter(.old), localRow: localRow, mode: mode).line == row.oldNumber)
+          #expect(chunk.lineAndSide(for: .gutter(.new), localRow: localRow, mode: mode).line == row.newNumber)
+        }
+      }
+    }
+  }
+
+  /// PERF GUARD (Part B): resolving EVERY row of a big marker-free leaf via `lineAndSide`
+  /// must build ZERO full `renderedRows` arrays — the old code built one PER call (≈5k
+  /// here). `renderedRowsBuildCount` is process-global and swift-testing parallelizes
+  /// suites, so the bound is loose (a concurrent test may add a few) yet still an
+  /// orders-of-magnitude gap from the O(leaf)-per-call regression.
+  @Test func lineAndSideResolvesBigLeafWithoutFullProjection() {
+    let count = ChunkLayoutMetrics.maxLeafSpan  // one full ≤maxLeafSpan leaf
+    let rows = (0..<count).map { DiffFixture.line(.addition, old: nil, new: $0 + 1, "let x\($0) = \($0)") }
+    let hunk = DiffFixture.hunk(rows, oldStart: 0, newStart: 1, header: "@@ -0,0 +1,\(count) @@")
+    let tree = ChunkTreeFixture.files([.init(file: DiffFixture.file(path: "big.swift"), hunks: [hunk])])
+    guard let leaf = tree.inorderNodes().first(where: { $0.chunk.lineSegment != nil }) else {
+      Issue.record("expected a line-segment leaf")
+      return
+    }
+    let localRows = leaf.chunk.lineSegment!.window.count
+
+    let before = LineSegment.renderedRowsBuildCount
+    var resolved = 0
+    for localRow in 0..<localRows
+    where leaf.chunk.lineAndSide(for: .gutter(.new), localRow: localRow, mode: .unified).line != nil {
+      resolved += 1
+    }
+    let built = LineSegment.renderedRowsBuildCount - before
+
+    #expect(resolved == localRows, "every addition row carries a new number")
+    #expect(
+      built < 100, "resolving \(localRows) rows built \(built) full leaf array(s) — lineAndSide regressed to O(leaf)")
+  }
 }

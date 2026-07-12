@@ -254,19 +254,23 @@ struct GutterRibbonControllerTests {
     // leaf boundaries — the scan-from-0 case).
     let deepY = controller.tree.seek(index: 18_000, mode: .unified)?.yOrigin ?? 0
 
-    let before = LineSegment.renderedRowsBuildCount
+    let buildsBefore = LineSegment.renderedRowsBuildCount
+    let walkBefore = controller.tree.diagnostics.successorCount
     gutter.updateHover(atDocument: CGPoint(x: newNumX(controller), y: deepY))
     guard let highlight = gutter.hoverHighlight else {
       Issue.record("expected a hover cross-highlight deep in the file")
       return
     }
-    let built = LineSegment.renderedRowsBuildCount - before
+    let built = LineSegment.renderedRowsBuildCount - buildsBefore
+    let walked = controller.tree.diagnostics.successorCount - walkBefore
 
-    // A correct hover builds ZERO full leaf arrays; the old O(n) reverse scan built
-    // one per visited row (~18k here). `renderedRowsBuildCount` is a process-global
-    // counter and swift-testing runs suites in parallel, so a concurrent test may add
-    // a few incidental builds inside this window — the loose bound still catches the
-    // orders-of-magnitude regression without flaking on that race.
+    // PART A (deterministic, per-tree): hover resolves its row from the forward hit's
+    // INDEX (O(log n) seek). The old code reverse-resolved `(line, side)` to a row by
+    // walking the tree in-order from row 0 — ~18k `successor` steps here. A zero-walk
+    // hover is the guarantee; any in-order walk is the O(n) reverse-scan regression.
+    #expect(walked == 0, "hover walked the tree \(walked) times — the O(n) reverse line→row scan regressed")
+    // PART B (loose, process-global counter under parallel suites): resolving the row's
+    // numbers builds NO full leaf array; the old `lineAndSide` built one per visited row.
     #expect(
       built < 100,
       "hover built \(built) full renderedRows array(s) — the O(1) row resolver / index-seek regressed to O(leaf)")

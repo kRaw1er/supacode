@@ -546,6 +546,45 @@ struct DiffViewportControllerTests {
     )
   }
 
+  // MARK: - `lineRect(rowIndex:)` — the O(log n) geometry the gutter hover uses
+
+  /// `lineRect(rowIndex:)` (added for the gutter hover fix) is a pure O(log n)
+  /// `seek(index:)`: for EVERY rendered row its rect must equal the seek geometry, and
+  /// for a row carrying a git line it must equal the reverse `lineRect(line:side:)` — so
+  /// the fast index path the hover uses can never disagree with the slow line path.
+  @Test func lineRectByRowIndexMatchesSeekAndLinePath() {
+    for mode in [DiffViewMode.unified, .split] {
+      let controller = ViewportTestSupport.controller()
+      let tree = changeAndContextTree()
+      controller.apply(tree: tree, mode: mode, scrollPreserving: false)
+      let width = controller.documentView.bounds.width
+
+      for row in 0..<tree.rowCount(mode) {
+        guard let hit = tree.seek(index: row, mode: mode) else {
+          Issue.record("nil seek at row \(row) in \(mode)")
+          continue
+        }
+        let byIndex = controller.lineRect(rowIndex: row)
+        #expect(byIndex == CGRect(x: 0, y: hit.yOrigin, width: width, height: hit.rowHeight))
+
+        // For a row that carries a git line, the reverse line→rect path must agree.
+        let rendered = hit.chunk.renderedRows(mode)
+        guard hit.localRow >= 0, hit.localRow < rendered.count else { continue }
+        let numbers = rendered[hit.localRow]
+        if let old = numbers.oldNumber {
+          #expect(controller.lineRect(line: old, side: .old) == byIndex)
+        }
+        if let new = numbers.newNumber {
+          #expect(controller.lineRect(line: new, side: .new) == byIndex)
+        }
+      }
+
+      // Out-of-range indices resolve to nil, never a crash.
+      #expect(controller.lineRect(rowIndex: -1) == nil)
+      #expect(controller.lineRect(rowIndex: tree.rowCount(mode)) == nil)
+    }
+  }
+
   /// A multi-leaf tree whose split / unified layouts diverge (change hunk).
   private func changeAndContextTree() -> ChunkTree {
     let file = DiffFixture.file()
