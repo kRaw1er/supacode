@@ -141,7 +141,8 @@ final class DiffHighlightEngine {
   /// (neon's sync overload returns `nil` while `hasPendingChanges`). Suspension-free, so it never
   /// races a concurrent warm.
   private func trySyncStyleRuns(
-    prepared: Prepared, window: WindowRange, key: HighlightSpanCache.Key, provider: @escaping SwiftTreeSitter.Predicate.TextProvider
+    prepared: Prepared, window: WindowRange, key: HighlightSpanCache.Key,
+    provider: @escaping SwiftTreeSitter.Predicate.TextProvider
   ) -> [Int: [StyleRun]]? {
     do {
       let named: [NamedRange]? = try prepared.client.highlights(in: window.range, provider: provider)

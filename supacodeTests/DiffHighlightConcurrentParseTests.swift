@@ -47,7 +47,8 @@ struct DiffHighlightConcurrentParseTests {
     var n = 0
     for line in 0..<lineCount
     where engine.cachedRuns(blobOID: "concurrent-parse", queryName: query, blobLine: line)
-      .contains(where: { $0.capture.hasPrefix("string") }) {
+      .contains(where: { $0.capture.hasPrefix("string") })
+    {
       n += 1
     }
     return n
