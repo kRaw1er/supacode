@@ -14,9 +14,13 @@ nonisolated struct ScrollAnchor: Equatable {
     /// A dense code row, keyed by its git line number + side (survives re-diff /
     /// re-measure / a full from-scratch tree rebuild — the ChunkID would not).
     case line(lineNumber: Int, side: DiffSide)
-    /// A sparse widget (file header / comment / expander) that has no line
-    /// number, keyed by its stable `ChunkID`.
-    case widget(ChunkID)
+    /// A sparse widget (file header / comment / expander) that has no line number,
+    /// keyed by its `WidgetKey` — the widget's identity, which survives a
+    /// re-projection. NOT its `ChunkID`: a fresh tree allocates ids from zero, so a
+    /// `ChunkID` anchor silently addresses an unrelated node (or none) after a
+    /// rebuild, and the restore then finds nothing and leaves the viewport wherever
+    /// the collapsed-document clamp had dragged it — the top.
+    case widget(WidgetKey)
   }
 
   var identity: Identity

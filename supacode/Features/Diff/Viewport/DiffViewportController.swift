@@ -572,9 +572,10 @@ final class DiffViewportController: NSObject {
     view.frame = CGRect(x: 0, y: top.yOrigin, width: width, height: frameHeight)
     if view.superview == nil { documentView.addSubview(view) }
     live[kind, default: []].insert(top.id)
-    let identity = Self.anchorIdentity(for: top, mode: mode)
-    windowMap[identity] = top.yOrigin
-    materialized.append((identity, top.yOrigin))
+    if let identity = Self.anchorIdentity(for: top, mode: mode) {
+      windowMap[identity] = top.yOrigin
+      materialized.append((identity, top.yOrigin))
+    }
   }
 
   private func configure(_ view: NSView, placement: Placement, width: CGFloat) {
@@ -702,13 +703,14 @@ final class DiffViewportController: NSObject {
   }
 
   /// The anchor identity for a placed chunk — a line chunk keys off its first
-  /// rendered row's `(lineNumber, side)`; a widget keys off its `ChunkID`.
-  static func anchorIdentity(for hit: ChunkHit, mode: DiffViewMode) -> ScrollAnchor.Identity {
-    guard let segment = hit.chunk.lineSegment else { return .widget(hit.id) }
-    guard let first = segment.firstRenderedRow(mode) else { return .widget(hit.id) }
+  /// rendered row's `(lineNumber, side)`; a widget keys off its `WidgetKey`, which is
+  /// stable across a re-projection (its `ChunkID` is not).
+  static func anchorIdentity(for hit: ChunkHit, mode: DiffViewMode) -> ScrollAnchor.Identity? {
+    guard let segment = hit.chunk.lineSegment else { return hit.chunk.widget.map { .widget($0.key) } }
+    guard let first = segment.firstRenderedRow(mode) else { return nil }
     if let new = first.newNumber { return .line(lineNumber: new, side: .new) }
     if let old = first.oldNumber { return .line(lineNumber: old, side: .old) }
-    return .widget(hit.id)
+    return nil
   }
 
   private func fireVisibleRange() {
@@ -734,6 +736,12 @@ final class DiffViewportController: NSObject {
   /// window from the previous layout, so it is valid to call before a mutation.
   func captureAnchor() -> ScrollAnchor? {
     let minY = visibleRect.minY
+    // Parked at the very top: stay at the top. There is nothing to preserve, and
+    // anchoring here actively hurts — content that arrives ABOVE the anchored chunk
+    // (a streamed file lands before the scaffold placeholder, which is all a
+    // just-started stream has to anchor to) would scroll the viewport down to keep
+    // that chunk put, dragging the user away from the top of the document.
+    guard minY > 0 else { return nil }
     if let fully = materialized.first(where: { $0.yOrigin >= minY }) {
       return ScrollAnchor(identity: fully.identity, pixelOffset: fully.yOrigin - minY)
     }
@@ -778,8 +786,15 @@ final class DiffViewportController: NSObject {
   /// happened to be painted. The line is still IN the document, so look it up.
   /// O(n) scan, but only on the miss, and only on a document-level change.
   private func treeYOrigin(_ identity: ScrollAnchor.Identity) -> CGFloat? {
-    guard case .line(let lineNumber, let side) = identity else { return nil }
-    return lineRect(line: lineNumber, side: side)?.minY
+    switch identity {
+    case .line(let lineNumber, let side):
+      return lineRect(line: lineNumber, side: side)?.minY
+    case .widget(let key):
+      // O(log n) — the widget's node is a dictionary hit and its row index a
+      // rank query, so a widget anchor never pays the line scan.
+      guard let node = tree.widgetNode(for: key) else { return nil }
+      return frame(forChunk: node.id)?.minY
+    }
   }
 
   /// The nearest surviving line (`DiffTableController.nearestSurvivingIndex :496`

@@ -128,6 +128,42 @@ struct DiffExpansionViewportTests {
     #expect(Self.renderedNewNumbers(reprojected) == Array(1...40))
   }
 
+  /// The end-to-end shape of "comment on a file with a big expanded gap": scrolled
+  /// deep into the revealed region, a re-projection (opening the composer, then
+  /// saving) rebuilds a COLLAPSED tree, re-applies the expansion, and re-lands the
+  /// anchor. The viewport must come back to the same line at the same pixel.
+  @Test func commentingInsideABigRevealedGapKeepsTheScrollPosition() {
+    let file = DiffFixture.file()
+    let hunks = [Self.changeHunk(newStart: 1), Self.changeHunk(newStart: 145)]
+    let gap = GapKey(hunkIndex: 1)  // new lines 2…144 — a 143-line gap
+    let revealed = Self.revealedContext(2..<145)
+    let region = ExpansionState.ResolvedRegion(
+      fromStart: revealed.count, fromEnd: 0, collapsedLines: 0, renderAll: true)
+    let controller = ViewportTestSupport.controller()
+
+    controller.apply(
+      tree: ChunkTreeBuilder.build(file: file, hunks: hunks, mode: .unified), mode: .unified,
+      scrollPreserving: false)
+    #expect(controller.applyExpansion(gap: gap, region: region, revealedLines: revealed))
+
+    // Scroll deep into the revealed region and remember where we are.
+    controller.scroll(toY: 1600)
+    let before = controller.visibleRect.minY
+    let anchor = controller.captureScrollAnchor()
+    #expect(anchor != nil)
+
+    // Re-project (composer open / comment saved) → re-apply expansion → re-land.
+    let comment = ReviewComment(
+      filePath: "a.swift", side: .new, startLine: 145, endLine: 145,
+      anchorSnippet: "new", contextBefore: "", body: "please fix")
+    let reprojected = ChunkTreeBuilder.build(file: file, hunks: hunks, mode: .unified, comments: [comment])
+    controller.apply(tree: reprojected, mode: .unified, scrollPreserving: false)
+    #expect(controller.applyExpansion(gap: gap, region: region, revealedLines: revealed))
+    controller.restoreScrollAnchor(anchor)
+
+    #expect(controller.visibleRect.minY == before)
+  }
+
   // MARK: - partial reveal → head + shrunken expander + tail, then collapse restores
 
   @Test func partialExpandKeepsExpanderThenCollapseRestores() {
