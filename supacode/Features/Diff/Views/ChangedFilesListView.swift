@@ -16,7 +16,6 @@ struct ChangedFilesListView: View {
       }
       content
     }
-    .navigationTitle("Changes")
   }
 
   @ViewBuilder

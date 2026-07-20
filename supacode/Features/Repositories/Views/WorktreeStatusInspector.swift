@@ -10,6 +10,9 @@ struct WorktreeStatusInspectorContainer: View {
   let isCheckingPullRequest: Bool
   let pullRequest: GithubPullRequest?
   let repositoriesStore: StoreOf<RepositoriesFeature>
+  /// Changed-file review for the selected worktree, rendered under the pull
+  /// request in the git pane.
+  let reviewStore: StoreOf<DiffReviewFeature>
   let terminalManager: WorktreeTerminalManager
   let onSelectNotification: (Worktree.ID, WorktreeTerminalNotification) -> Void
   let onSelectSurface: (Worktree.ID, UUID) -> Void
@@ -23,6 +26,7 @@ struct WorktreeStatusInspectorContainer: View {
           pullRequest: pullRequest,
           isFolder: isFolder,
           isCheckingPullRequest: isCheckingPullRequest,
+          reviewStore: reviewStore,
           onPullRequestAction: onPullRequestAction
         )
       case .notifications:
@@ -62,38 +66,90 @@ extension View {
 // MARK: - Git / Pull request pane
 
 /// Inspector pane mirroring the pull-request popover, re-laid out as a grouped
-/// `Form` so it reads cleanly in a narrow inspector column.
+/// `Form` so it reads cleanly in a narrow inspector column, stacked over the
+/// worktree's changed-file list.
+///
+/// With a pull request the two share the column through a draggable
+/// `VSplitView`. Without one, the PR half collapses to a single status line so
+/// the changed files — the thing the user can always act on — keep the column
+/// instead of hiding behind a full-height "No Pull Request" placeholder.
 struct WorktreeGitInspectorView: View {
   let pullRequest: GithubPullRequest?
   let isFolder: Bool
   let isCheckingPullRequest: Bool
+  let reviewStore: StoreOf<DiffReviewFeature>
   let onPullRequestAction: (RepositoriesFeature.PullRequestAction) -> Void
+  /// Last dragged height of the pull-request half. `VSplitView` exposes no
+  /// divider binding, so this is measured on drag and replayed as the initial
+  /// ideal height — read once into `initialPullRequestHeight` so a later write
+  /// can't retroactively fight the drag it came from.
+  @Shared(.appStorage("gitInspectorPullRequestHeight")) private var storedPullRequestHeight = 0.0
+  @State private var initialPullRequestHeight: CGFloat?
+
+  private static let minPullRequestHeight: CGFloat = 140
+  private static let minChangesHeight: CGFloat = 160
+  private static let defaultPullRequestHeight: CGFloat = 260
 
   var body: some View {
     if isFolder {
-      ContentUnavailableView(
-        "Not a Git Repository",
-        systemImage: "folder",
-        description: Text("This folder isn't a git repository.")
-      )
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      // No PR and no local diff to speak of; the list states this itself.
+      ChangedFilesListView(store: reviewStore)
     } else if let pullRequest {
-      GitInspectorContent(pullRequest: pullRequest, onPullRequestAction: onPullRequestAction)
-    } else if isCheckingPullRequest {
-      VStack(spacing: 10) {
-        ProgressView()
-        Text("Checking for pull request…")
-          .foregroundStyle(.secondary)
+      VSplitView {
+        GitInspectorContent(pullRequest: pullRequest, onPullRequestAction: onPullRequestAction)
+          .frame(minHeight: Self.minPullRequestHeight, idealHeight: resolvedInitialHeight)
+          // Sub-point jitter would write UserDefaults on every frame of a drag.
+          .onGeometryChange(for: CGFloat.self) {
+            $0.size.height.rounded()
+          } action: { height in
+            guard height >= Self.minPullRequestHeight else { return }
+            $storedPullRequestHeight.withLock { $0 = Double(height) }
+          }
+        ChangedFilesListView(store: reviewStore)
+          .frame(minHeight: Self.minChangesHeight)
       }
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .onAppear { initialPullRequestHeight = initialPullRequestHeight ?? resolvedInitialHeight }
     } else {
-      ContentUnavailableView(
-        "No Pull Request",
-        systemImage: "arrow.trianglehead.branch",
-        description: Text("This worktree has no open pull request.")
-      )
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      VStack(spacing: 0) {
+        CollapsedPullRequestRow(isChecking: isCheckingPullRequest)
+        Divider()
+        ChangedFilesListView(store: reviewStore)
+      }
     }
+  }
+
+  /// The stored height, clamped away from degenerate values (a never-set 0, or a
+  /// leftover taller than what the column can give the changed files).
+  private var resolvedInitialHeight: CGFloat {
+    if let initialPullRequestHeight { return initialPullRequestHeight }
+    let stored = CGFloat(storedPullRequestHeight)
+    guard stored >= Self.minPullRequestHeight else { return Self.defaultPullRequestHeight }
+    return stored
+  }
+}
+
+/// The one-line stand-in for the pull-request half when there is no pull
+/// request to show, so the changed-file list below keeps the column.
+private struct CollapsedPullRequestRow: View {
+  let isChecking: Bool
+
+  var body: some View {
+    HStack(spacing: 6) {
+      if isChecking {
+        ProgressView().controlSize(.small)
+        Text("Checking for pull request…")
+      } else {
+        Image(systemName: "arrow.trianglehead.branch")
+          .accessibilityHidden(true)
+        Text("No pull request")
+      }
+      Spacer()
+    }
+    .font(.subheadline)
+    .foregroundStyle(.secondary)
+    .padding(.horizontal)
+    .padding(.vertical, 8)
+    .accessibilityElement(children: .combine)
   }
 }
 

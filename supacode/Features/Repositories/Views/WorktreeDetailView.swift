@@ -109,6 +109,7 @@ struct WorktreeDetailView: View {
         isCheckingPullRequest: isCheckingPullRequest,
         pullRequest: inspectorPullRequest,
         repositoriesStore: repositoriesStore,
+        reviewStore: store.scope(state: \.review, action: \.review),
         terminalManager: terminalManager,
         onSelectNotification: selectToolbarNotification,
         onSelectSurface: selectToolbarSurface,

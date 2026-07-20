@@ -286,6 +286,7 @@ final class WorktreeTerminalManager {
 
   // swiftlint:disable:next cyclomatic_complexity
   private func handleTabCommand(_ command: TerminalClient.Command) -> Bool {
+    if handleReviewTabCommand(command) { return true }
     switch command {
     case .createTab(let worktree, let runSetupScriptIfNew, let id, let title):
       Task {
@@ -380,6 +381,17 @@ final class WorktreeTerminalManager {
         // another worktree. The rare validated-then-vanished race falls to the
         // ack watchdog instead.
       }
+    default:
+      return false
+    }
+    return true
+  }
+
+  /// The review surfaces' tab commands (open a diff tab, inject a review batch
+  /// into the agent terminal), peeled out of `handleTabCommand` so that switch
+  /// stays under the body-length budget.
+  private func handleReviewTabCommand(_ command: TerminalClient.Command) -> Bool {
+    switch command {
     case .openDiffTab(let worktree, let filePath, let source):
       // `openDiffTab` dedupes by `(path, source)` and skips surface allocation, so
       // a re-click focuses the existing tab instead of creating a duplicate.
