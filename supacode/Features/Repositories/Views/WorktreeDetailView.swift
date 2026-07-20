@@ -675,8 +675,6 @@ struct WorktreeDetailView: View {
             PinnedScriptToolbarButton(
               script: script,
               isRunning: toolbarState.runningScriptIDs.contains(script.id),
-              terminalManager: terminalManager,
-              isFullScreen: isFullScreen,
               onRun: { onRunNamedScript(script) },
               onStop: { onStopScript(script) }
             )
@@ -1277,8 +1275,6 @@ private enum ScriptRunControl {
 private struct PinnedScriptToolbarButton: View {
   let script: ScriptDefinition
   let isRunning: Bool
-  let terminalManager: WorktreeTerminalManager
-  let isFullScreen: Bool
   let onRun: () -> Void
   let onStop: () -> Void
 
@@ -1304,9 +1300,6 @@ private struct PinnedScriptToolbarButton: View {
     }
     .disabled(!isRunning && !hasCommand)
     .help(ScriptRunControl.helpText(for: script, isRunning: isRunning, hasCommand: hasCommand))
-    // The tinted app-icon glyph opts out of AppKit's vibrant foreground, so
-    // apply the terminal-aware chrome tint manually (mirrors the Open menu).
-    .toolbarTintColorScheme(manager: terminalManager, isFullScreen: isFullScreen)
   }
 }
 
