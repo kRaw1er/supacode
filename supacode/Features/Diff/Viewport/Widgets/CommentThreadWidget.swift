@@ -48,6 +48,20 @@ final class CommentThreadWidget: DiffWidget {
   /// this chunk until drained (B §3) — the harness never hands it to another chunk.
   var occupiesHostExclusively: Bool { isEditing }
 
+  /// Everything that changes what this thread RENDERS. Deliberately excludes the
+  /// composer's in-flight body: the draft lives in the composer store and is bound
+  /// straight into the editor, so typing must not churn the token (that would
+  /// re-mount the host on every keystroke and lose the cursor). Committing does
+  /// change it — the comment lands in `comments` and `isEditing` flips — which is
+  /// exactly when the host must be rebuilt into the read-only display view.
+  var modelToken: AnyHashable {
+    AnyHashable(
+      [
+        "\(model.anchorID)", isEditing ? "1" : "0", model.isCollapsed ? "1" : "0",
+      ] + model.comments.map { "\($0.id)|\($0.updatedAt.timeIntervalSince1970)|\($0.body)|\($0.orphaned)" }
+    )
+  }
+
   var estimatedHeight: CGFloat { ChunkLayoutMetrics.production.commentThreadHeight }
 
   /// The expanded-content height cap; beyond it the thread scrolls internally.

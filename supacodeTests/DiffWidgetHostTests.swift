@@ -54,6 +54,41 @@ struct DiffWidgetHostTests {
     #expect(hostView.reuse(editing, key: .commentThread(anchorID: idB), width: 400) == false)
   }
 
+  /// Committing a comment must swap its host OUT of the live editor. The harness
+  /// used to skip the rebuild whenever the `WidgetKey` matched — and the key is the
+  /// same thread before and after the save — so a committed comment kept rendering
+  /// its `TextEditor` (blinking caret), and because every such host held the SAME
+  /// presented composer store, every open thread on screen mirrored one draft.
+  @Test func committedThreadStopsRenderingTheLiveEditor() {
+    let controller = ViewportTestSupport.controller()
+    let tree = ChunkTree(metrics: .production)
+    var after: ChunkID?
+    for line in 1...20 { after = tree.insert(WidgetTreeFixture.contextLeaf(line), after: after) }
+    let anchorID = UUID()
+    let draft = comment(anchorID, body: "")
+    let composerStore = Store(initialState: CommentComposer.State(draft: draft, isEditing: false)) {
+      CommentComposer()
+    }
+    // Composing: the resolver hands this anchor the presented composer store.
+    controller.widgetResolver = DiffWidgetResolver(
+      comments: [], composerStore: { $0 == anchorID ? composerStore : nil })
+    controller.apply(tree: tree, mode: .unified, scrollPreserving: false)
+    let widgetID = controller.insertCommentWidget(
+      side: .new, startLine: 3, endLine: 3, anchorID: anchorID, estimatedHeight: 60)
+    #expect(widgetID != nil)
+    let hostView = controller.pools[.widget(.commentThread)]?.getView(forKey: widgetID!) as? WidgetHostChunkView
+    #expect(hostView?.isOccupied == true)  // a live editor owns the host
+
+    // Committed: the comment lands in `comments` and the composer closes.
+    controller.widgetResolver = DiffWidgetResolver(
+      comments: [comment(anchorID, body: "please fix")], composerStore: { _ in nil })
+    controller.layoutVisibleChunks()
+
+    let after2 = controller.pools[.widget(.commentThread)]?.getView(forKey: widgetID!) as? WidgetHostChunkView
+    #expect(after2?.mountedKey == .commentThread(anchorID: anchorID))
+    #expect(after2?.isOccupied == false)  // re-mounted read-only: no editor, no caret
+  }
+
   // MARK: - C 6.5 — collapse toggles node height + reaggregate, anchored no-jump
   //                 (even for a widget ABOVE the fold)
 

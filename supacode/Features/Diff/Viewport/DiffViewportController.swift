@@ -647,7 +647,13 @@ final class DiffViewportController: NSObject {
       host.prepareForReuse()
       return
     }
-    if host.mountedKey == widget.key { return }  // already showing this model
+    // Key AND state must match to skip the rebuild: the key alone can't tell an
+    // editing thread from the saved one it becomes, so skipping on the key left a
+    // committed comment rendered by its live editor forever (blinking caret, and
+    // every such host bound to the SAME presented composer store, so they all
+    // mirrored one draft). Matching on both keeps the cursor alive across layout
+    // passes — the reason this fast path exists — while a state change re-mounts.
+    if host.mountedKey == widget.key, host.mountedToken == model.modelToken { return }
     if !host.reuse(model, key: widget.key, width: width) {
       host.prepareForReuse()
       host.mount(model, key: widget.key, width: width, coalescer: coalescer)

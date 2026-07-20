@@ -12,7 +12,7 @@ final class FileHeaderWidget: DiffWidget {
   /// (`old → new`); `addedLines` / `removedLines` mirror pierre's
   /// `createFileHeaderElement` +/- counts. The Phase-10 sticky overlay renders the
   /// **same** `Model`, so the pinned copy is a faithful 1:1 mirror.
-  struct Model: Equatable {
+  struct Model: Hashable {
     var path: String
     var statusText: String
     var addedLines: Int
@@ -79,6 +79,9 @@ final class FileHeaderWidget: DiffWidget {
 
   let key: WidgetKey
   var model: Model
+
+  /// The counts / status text change under the same `WidgetKey` on a re-diff.
+  var modelToken: AnyHashable { AnyHashable(model) }
   private unowned let coalescer: LayoutCoalescer
   private let onCommentOnFile: () -> Void
 

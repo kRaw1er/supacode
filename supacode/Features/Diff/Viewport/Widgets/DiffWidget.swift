@@ -42,8 +42,18 @@ protocol DiffWidget: AnyObject {
   /// externally-owned slot children is not eligible for recycle until drained".
   /// Default `false`; a `.editing` comment thread returns `true`.
   var occupiesHostExclusively: Bool { get }
+
+  /// Identity of this widget's rendered STATE, distinct from `WidgetKey` (which is
+  /// the widget's identity, not its content). The harness skips re-mounting a host
+  /// whose key AND token are unchanged — that fast path is what keeps a live editor's
+  /// cursor alive across layout passes, so a widget whose rendering can change while
+  /// its key stays put MUST fold that into the token or it renders its first state
+  /// forever. Default is a constant: correct for a widget whose body is a pure
+  /// function of its key.
+  var modelToken: AnyHashable { get }
 }
 
 extension DiffWidget {
   var occupiesHostExclusively: Bool { false }
+  var modelToken: AnyHashable { AnyHashable(0) }
 }

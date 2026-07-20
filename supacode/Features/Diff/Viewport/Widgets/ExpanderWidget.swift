@@ -10,10 +10,14 @@ import SwiftUI
 /// host accepts an identity swap.
 @MainActor
 final class ExpanderWidget: DiffWidget {
-  struct Model: Equatable {
+  struct Model: Hashable {
     var gap: GapKey
     var hiddenCount: Int
   }
+
+  /// The hidden-line count is what the label renders and it changes under the same
+  /// `WidgetKey` on a partial expand, so it has to be in the token.
+  var modelToken: AnyHashable { AnyHashable(model) }
 
   let key: WidgetKey
   var model: Model
