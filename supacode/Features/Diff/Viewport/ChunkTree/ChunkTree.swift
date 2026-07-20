@@ -186,6 +186,44 @@ final class ChunkTree {
     }
   }
 
+  /// The rendered row carrying `line` on `side` — an O(log n) DESCENT on the
+  /// aggregated line spans, not a walk. The document-order scan this replaces cost
+  /// O(rows) per lookup, on paths a long feed hits often: anchoring a comment,
+  /// re-landing the scroll anchor, resolving a gutter row.
+  ///
+  /// Line numbers rise monotonically through a file, so at each node the target is
+  /// in the left subtree iff that subtree's span reaches it. A subtree carrying no
+  /// line on this side (all-addition block, `side == .old`) spans nothing and is
+  /// skipped — it cannot hold the target by construction.
+  ///
+  /// Returns the LAST row carrying the number when several do (a split-mode pair
+  /// renders one line per column), matching the anchor rule "the last row of the
+  /// commented line".
+  func locate(line: Int, side: DiffSide, mode: DiffViewMode) -> ChunkHit? {
+    guard let root else { return nil }
+    var node = root
+    var startIndex = 0
+    var startY: CGFloat = 0
+    while true {
+      if let left = node.left, let span = left.subtreeSummary.lines(on: side), line <= span.last {
+        node = left
+        continue
+      }
+      startIndex += node.leftSubtree.count(mode)
+      startY += node.leftSubtree.height(mode)
+      if let span = node.summary.lines(on: side), span.contains(line) {
+        guard let segment = node.chunk.lineSegment,
+          let localRow = segment.renderedRow(carrying: line, on: side, mode: mode)
+        else { return nil }
+        return resolveHit(node, startIndex: startIndex, startY: startY, local: .index(localRow), mode: mode)
+      }
+      startIndex += node.summary.count(mode)
+      startY += node.summary.height(mode)
+      guard let right = node.right else { return nil }
+      node = right
+    }
+  }
+
   // MARK: - Structural mutation
 
   /// Insert `chunk` as the in-order successor of `id` (`nil` prepends). O(log n).

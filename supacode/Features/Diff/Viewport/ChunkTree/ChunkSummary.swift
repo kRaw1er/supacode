@@ -12,6 +12,12 @@ nonisolated struct ChunkSummary: Equatable, Sendable {
   var splitEstHeight: CGFloat
   var unifiedMeasuredDelta: CGFloat  // Σ(measured − estimate) over measured unified rows
   var splitMeasuredDelta: CGFloat
+  /// The span of SOURCE line numbers this subtree carries, per side (`nil` when it
+  /// carries none — an all-addition block spans no old lines). Monotonic within a
+  /// file, which is what lets "which row holds line N" descend the tree in O(log n)
+  /// instead of scanning the document.
+  var oldLines: LineSpan?
+  var newLines: LineSpan?
 
   init(
     unifiedCount: Int,
@@ -19,7 +25,9 @@ nonisolated struct ChunkSummary: Equatable, Sendable {
     unifiedEstHeight: CGFloat,
     splitEstHeight: CGFloat,
     unifiedMeasuredDelta: CGFloat = 0,
-    splitMeasuredDelta: CGFloat = 0
+    splitMeasuredDelta: CGFloat = 0,
+    oldLines: LineSpan? = nil,
+    newLines: LineSpan? = nil
   ) {
     self.unifiedCount = unifiedCount
     self.splitCount = splitCount
@@ -27,6 +35,13 @@ nonisolated struct ChunkSummary: Equatable, Sendable {
     self.splitEstHeight = splitEstHeight
     self.unifiedMeasuredDelta = unifiedMeasuredDelta
     self.splitMeasuredDelta = splitMeasuredDelta
+    self.oldLines = oldLines
+    self.newLines = newLines
+  }
+
+  /// The line span on `side`.
+  func lines(on side: DiffSide) -> LineSpan? {
+    side == .old ? oldLines : newLines
   }
 
   /// The monoid identity — an empty subtree.
@@ -59,8 +74,33 @@ nonisolated struct ChunkSummary: Equatable, Sendable {
       unifiedEstHeight: lhs.unifiedEstHeight + rhs.unifiedEstHeight,
       splitEstHeight: lhs.splitEstHeight + rhs.splitEstHeight,
       unifiedMeasuredDelta: lhs.unifiedMeasuredDelta + rhs.unifiedMeasuredDelta,
-      splitMeasuredDelta: lhs.splitMeasuredDelta + rhs.splitMeasuredDelta
+      splitMeasuredDelta: lhs.splitMeasuredDelta + rhs.splitMeasuredDelta,
+      oldLines: LineSpan.union(lhs.oldLines, rhs.oldLines),
+      newLines: LineSpan.union(lhs.newLines, rhs.newLines)
     )
+  }
+}
+
+/// The inclusive `first…last` source-line span a subtree covers on one side.
+nonisolated struct LineSpan: Equatable, Sendable {
+  var first: Int
+  var last: Int
+
+  init(first: Int, last: Int) {
+    self.first = min(first, last)
+    self.last = max(first, last)
+  }
+
+  init(_ line: Int) {
+    self.init(first: line, last: line)
+  }
+
+  func contains(_ line: Int) -> Bool { line >= first && line <= last }
+
+  static func union(_ lhs: LineSpan?, _ rhs: LineSpan?) -> LineSpan? {
+    guard let lhs else { return rhs }
+    guard let rhs else { return lhs }
+    return LineSpan(first: Swift.min(lhs.first, rhs.first), last: Swift.max(lhs.last, rhs.last))
   }
 }
 

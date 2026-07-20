@@ -143,26 +143,11 @@ extension ChunkTreeBuilder {
     var localRow: Int  // the anchored RENDERED row within that leaf, in `mode`
   }
 
-  /// The LAST rendered row matching `(side, endLine)` in document order (mirrors
-  /// `DiffRowBuilder.lastRowIndex`).
-  ///
-  /// A leaf is skipped by its O(1) `numberSpan` before any projection is built, so the
-  /// walk costs O(#leaves) rather than O(#lines) — the projection is materialized only
-  /// for the (normally one) leaf whose span actually covers the line.
+  /// The rendered row carrying `(side, endLine)` — an O(log n) descent on the tree's
+  /// aggregated line spans. Was a walk over every leaf in the file, per comment.
   private static func findAnchor(in tree: ChunkTree, comment: ReviewComment, mode: DiffViewMode) -> AnchorMatch? {
-    var match: AnchorMatch?
-    for node in tree.inorderNodes() {
-      guard let segment = node.chunk.lineSegment,
-        let span = segment.numberSpan(on: comment.side, deletionCount: segment.windowDeletionCount),
-        span.first <= comment.endLine, comment.endLine <= span.last
-      else { continue }
-      for (localRow, row) in segment.renderedRows(mode).enumerated() where !row.isMarker {
-        if row.number(on: comment.side) == comment.endLine {
-          match = AnchorMatch(nodeID: node.id, localRow: localRow)
-        }
-      }
-    }
-    return match
+    guard let hit = tree.locate(line: comment.endLine, side: comment.side, mode: mode) else { return nil }
+    return AnchorMatch(nodeID: hit.id, localRow: hit.localRow)
   }
 
   static func commentWidget(_ comment: ReviewComment, _ options: Options) -> Chunk {

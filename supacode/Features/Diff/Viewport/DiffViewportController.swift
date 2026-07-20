@@ -1011,29 +1011,18 @@ final class DiffViewportController: NSObject {
     let rowIndex: Int
   }
 
-  /// The `LineLocation` of the rendered row carrying `line` on `side` (an in-order
-  /// scan). Off the hot path: hover / drag-band draw resolve their row from the
-  /// `rowIndex` the forward `hitTest` already produced (`lineRect(rowIndex:)`,
-  /// O(log n)), NOT from a line-number reverse scan. Only the infrequent
-  /// comment-commit (`insertCommentWidget`) still resolves a line number this way.
-  /// `nil` when no rendered row carries that number on that side.
+  /// The `LineLocation` of the rendered row carrying `line` on `side` — an O(log n)
+  /// descent on the tree's aggregated line spans (`ChunkTree.locate`). `nil` when no
+  /// rendered row carries that number on that side.
   func lineLocation(line: Int, side: DiffSide) -> LineLocation? {
-    var hit = tree.seek(index: 0, mode: mode)
-    while let current = hit {
-      if current.chunk.lineAndSide(for: .gutter(side), localRow: current.localRow, mode: mode).line == line {
-        return LineLocation(chunkID: current.id, localRow: current.localRow, rowIndex: current.rowIndex)
-      }
-      hit = tree.successor(of: current, mode: mode)
-    }
-    return nil
+    guard let hit = tree.locate(line: line, side: side, mode: mode) else { return nil }
+    return LineLocation(chunkID: hit.id, localRow: hit.localRow, rowIndex: hit.rowIndex)
   }
 
   /// The document-space rect of the rendered row carrying `line` on `side`, used
   /// to paint the "+" glyph and the drag band. `nil` when the line isn't rendered.
   func lineRect(line: Int, side: DiffSide) -> NSRect? {
-    guard let location = lineLocation(line: line, side: side),
-      let hit = tree.seek(index: location.rowIndex, mode: mode)
-    else { return nil }
+    guard let hit = tree.locate(line: line, side: side, mode: mode) else { return nil }
     return CGRect(x: 0, y: hit.yOrigin, width: documentView.bounds.width, height: hit.rowHeight)
   }
 

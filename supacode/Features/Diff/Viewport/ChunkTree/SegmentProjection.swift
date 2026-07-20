@@ -68,11 +68,14 @@ extension LineSegment {
       unifiedCount = dels + adds + noNewlineUnified
       splitCount = max(dels, adds) + noNewlineSplit
     }
+    let deletionCount = windowDeletionCount
     return ChunkSummary(
       unifiedCount: unifiedCount,
       splitCount: splitCount,
       unifiedEstHeight: CGFloat(unifiedCount) * metrics.lineHeight,
-      splitEstHeight: CGFloat(splitCount) * metrics.lineHeight
+      splitEstHeight: CGFloat(splitCount) * metrics.lineHeight,
+      oldLines: numberSpan(on: .old, deletionCount: deletionCount).map { LineSpan(first: $0.first, last: $0.last) },
+      newLines: numberSpan(on: .new, deletionCount: deletionCount).map { LineSpan(first: $0.first, last: $0.last) }
     )
   }
 
@@ -241,6 +244,36 @@ extension LineSegment {
     guard prefixLines > 0 else { return .none }
     return plan(
       prefixLines: prefixLines, leftRows: boundary + 1, deletionCount: windowDeletionCount, mode: mode)
+  }
+
+  /// The LAST rendered row of this leaf carrying `line` on `side`, or `nil` when the
+  /// leaf doesn't render it. Numbers rise monotonically within a leaf, so this is a
+  /// binary search — O(log rows), no projection built. A leaf carrying a no-newline
+  /// marker (EOF only) falls back to the full projection, where the marker row
+  /// duplicates its parent's numbers and the LAST match is the marker's own row.
+  func renderedRow(carrying line: Int, on side: DiffSide, mode: DiffViewMode) -> Int? {
+    let deletionCount = windowDeletionCount
+    guard !windowHasNoNewlineMarker(deletionCount: deletionCount) else {
+      return renderedRows(mode).lastIndex { $0.number(on: side) == line }
+    }
+    let additionCount = window.count - deletionCount
+    let rowCount =
+      classification == .change && mode == .split ? Swift.max(deletionCount, additionCount) : window.count
+    var low = 0
+    var high = rowCount
+    while low < high {
+      let mid = low + (high - low) / 2
+      let numbers = lineNumbers(atRenderedRow: mid, mode: mode, deletionCount: deletionCount)
+      guard let number = side == .old ? numbers.old : numbers.new else {
+        // No line on this side at `mid` — in split that is the short column's buffer
+        // slot, which only ever trails its side's real rows, so the target is above.
+        high = mid
+        continue
+      }
+      if number == line { return mid }
+      if number < line { low = mid + 1 } else { high = mid }
+    }
+    return nil
   }
 
   /// The inclusive source-number span this leaf carries on `side`, or `nil` when it

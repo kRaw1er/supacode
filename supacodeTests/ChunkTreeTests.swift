@@ -372,6 +372,49 @@ struct ChunkTreeTests {
     }
     #expect(tree.seek(y: tree.totalHeight(.unified) - 1, mode: .unified)?.rowIndex == 999_999)
   }
+
+  // MARK: - line → row is a descent, not a walk
+
+  /// "Which row carries line N" is a load-bearing lookup — anchoring a comment,
+  /// re-landing the scroll anchor, resolving a gutter row — and it used to walk the
+  /// document in order, which is O(rows) per call and unaffordable in a feed of every
+  /// changed file. It descends the aggregated line spans now: pinned by the fact that
+  /// it takes NO in-order step at all, at any document size.
+  @Test func lineLookupDescendsInsteadOfWalking() {
+    let tree = ViewportTestSupport.contextLeaves(Array(1...5000))
+    let before = tree.diagnostics.successorCount
+
+    #expect(tree.locate(line: 4800, side: .new, mode: .unified)?.rowIndex == 4799)
+    #expect(tree.locate(line: 1, side: .new, mode: .unified)?.rowIndex == 0)
+    #expect(tree.locate(line: 7000, side: .new, mode: .unified) == nil)  // past the end
+    #expect(tree.diagnostics.successorCount == before)  // never walks
+  }
+
+  /// The descent resolves the row a line renders on in EITHER mode, including inside a
+  /// change block — where unified renders deletions then additions, and split pairs
+  /// them, so the same line sits at different rows.
+  @Test(arguments: [DiffViewMode.unified, DiffViewMode.split])
+  func lineLookupResolvesChangeBlockRowsPerMode(mode: DiffViewMode) {
+    let hunk = DiffFixture.hunk([
+      DiffFixture.line(.deletion, old: 1, "d1"), DiffFixture.line(.deletion, old: 2, "d2"),
+      DiffFixture.line(.addition, new: 1, "a1"), DiffFixture.line(.addition, new: 2, "a2"),
+    ])
+    let tree = ChunkTreeBuilder.build(
+      file: DiffFixture.file(), hunks: [hunk], mode: mode,
+      options: ChunkTreeBuilder.Options(disableFileHeader: true))
+
+    // Unified: d1 d2 a1 a2 (after the hunk header). Split: (d1,a1) (d2,a2).
+    let a2 = tree.locate(line: 2, side: .new, mode: mode)
+    let d2 = tree.locate(line: 2, side: .old, mode: mode)
+    #expect(a2 != nil)
+    #expect(d2 != nil)
+    if mode == .unified {
+      #expect(d2!.rowIndex < a2!.rowIndex)  // deletions render above the additions
+    } else {
+      #expect(d2!.rowIndex == a2!.rowIndex)  // one paired row carries both sides
+    }
+    #expect(tree.locate(line: 9, side: .new, mode: mode) == nil)  // not in the diff
+  }
 }
 
 /// Deterministic PRNG for the property tests (splitmix64).
