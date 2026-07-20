@@ -6,6 +6,10 @@ struct TerminalClient {
   var send: @MainActor @Sendable (Command) -> Void
   var events: @MainActor @Sendable () -> AsyncStream<Event>
   var tabExists: @MainActor @Sendable (Worktree.ID, TerminalTabID) -> Bool
+  /// True iff the tab exists and is a surface-less diff tab. Lets deeplink
+  /// validation reject terminal-only `surface*` targets aimed at a diff tab with
+  /// a clearer message than the generic "Surface not found".
+  var isDiffTab: @MainActor @Sendable (Worktree.ID, TerminalTabID) -> Bool
   var tabCanRename: @MainActor @Sendable (Worktree.ID, TerminalTabID) -> Bool
   var surfaceExists: @MainActor @Sendable (Worktree.ID, TerminalTabID, UUID) -> Bool
   var surfaceExistsInWorktree: @MainActor @Sendable (Worktree.ID, UUID) -> Bool
@@ -15,6 +19,10 @@ struct TerminalClient {
   /// synchronously before an async dispatch races against AppKit focus reshuffle
   /// (e.g. when a palette dismisses and the leftmost pane reclaims first responder).
   var selectedSurfaceID: @MainActor @Sendable (Worktree.ID) -> UUID?
+  /// True iff the worktree has at least one `.terminal`-kind surface eligible as
+  /// a text sink. Lets the reducer decide send precedence synchronously before
+  /// dispatching (mirrors the `selectedSurfaceID` capture-the-target note above).
+  var hasAgentTerminalSurface: @MainActor @Sendable (Worktree.ID) -> Bool
   var latestUnreadNotification: @MainActor @Sendable () -> NotificationLocation?
   var markNotificationRead: @MainActor @Sendable (Worktree.ID, UUID) -> Void
   /// Marks every notification in every worktree read (menu bar "Mark All as Read").
@@ -67,6 +75,13 @@ struct TerminalClient {
     case destroyTab(Worktree, tabID: TerminalTabID)
     case destroySurface(Worktree, tabID: TerminalTabID, surfaceID: UUID)
     case beginTabRename(Worktree, tabID: TerminalTabID? = nil)
+    /// Open (or focus, deduped by `(path, source)`) a surface-less diff tab for
+    /// `filePath`. `source` distinguishes the working-tree diff from the
+    /// base-branch diff of the same file so they get independent tabs.
+    case openDiffTab(Worktree, filePath: String, source: DiffSource)
+    /// Inject `text` into the worktree's resolved agent terminal surface, then
+    /// switch focus to that terminal tab. `submit` appends `\r` to run it.
+    case insertTextIntoFocusedSurface(Worktree, text: String, submit: Bool)
     case renameTab(Worktree, tabID: TerminalTabID, title: String)
     case prune(keeping: Set<Worktree.ID>, protectingRepositoryIDs: Set<Repository.ID>)
     case setNotificationsEnabled(Bool)
@@ -122,6 +137,10 @@ struct TerminalClient {
     /// blocking-script tab, or the layout insert threw). Lets a CLI completion
     /// ack report the failure instead of waiting for its timeout.
     case surfaceCreationFailed(worktreeID: Worktree.ID, attemptedID: UUID, message: String)
+    /// An `insertTextIntoFocusedSurface` found no terminal surface to send to
+    /// (covers the race where the last terminal surface closed between the
+    /// reducer's pre-gate read and dispatch). Routed into the review reducer.
+    case textInjectionFailed(worktreeID: Worktree.ID, message: String)
   }
 }
 
@@ -130,12 +149,14 @@ extension TerminalClient: DependencyKey {
     send: { _ in fatalError("TerminalClient.send not configured") },
     events: { fatalError("TerminalClient.events not configured") },
     tabExists: { _, _ in fatalError("TerminalClient.tabExists not configured") },
+    isDiffTab: { _, _ in fatalError("TerminalClient.isDiffTab not configured") },
     tabCanRename: { _, _ in fatalError("TerminalClient.tabCanRename not configured") },
     surfaceExists: { _, _, _ in fatalError("TerminalClient.surfaceExists not configured") },
     surfaceExistsInWorktree: { _, _ in fatalError("TerminalClient.surfaceExistsInWorktree not configured") },
     tabID: { _, _ in fatalError("TerminalClient.tabID not configured") },
     selectedTabID: { _ in fatalError("TerminalClient.selectedTabID not configured") },
     selectedSurfaceID: { _ in fatalError("TerminalClient.selectedSurfaceID not configured") },
+    hasAgentTerminalSurface: { _ in fatalError("TerminalClient.hasAgentTerminalSurface not configured") },
     latestUnreadNotification: { fatalError("TerminalClient.latestUnreadNotification not configured") },
     markNotificationRead: { _, _ in fatalError("TerminalClient.markNotificationRead not configured") },
     markAllNotificationsRead: { fatalError("TerminalClient.markAllNotificationsRead not configured") },
@@ -149,12 +170,18 @@ extension TerminalClient: DependencyKey {
     send: { _ in },
     events: { AsyncStream { $0.finish() } },
     tabExists: unimplemented("TerminalClient.tabExists", placeholder: true),
+    // Defaults to "not a diff tab" (rather than `unimplemented`) so the many
+    // existing terminal-surface deeplink tests that reach `validateSurface`
+    // without caring about diff tabs keep their prior behavior. Diff-tab tests
+    // override it explicitly.
+    isDiffTab: { _, _ in false },
     tabCanRename: unimplemented("TerminalClient.tabCanRename", placeholder: true),
     surfaceExists: unimplemented("TerminalClient.surfaceExists", placeholder: true),
     surfaceExistsInWorktree: unimplemented("TerminalClient.surfaceExistsInWorktree", placeholder: true),
     tabID: unimplemented("TerminalClient.tabID", placeholder: nil),
     selectedTabID: unimplemented("TerminalClient.selectedTabID", placeholder: nil),
     selectedSurfaceID: unimplemented("TerminalClient.selectedSurfaceID", placeholder: nil),
+    hasAgentTerminalSurface: unimplemented("TerminalClient.hasAgentTerminalSurface", placeholder: false),
     latestUnreadNotification: unimplemented("TerminalClient.latestUnreadNotification", placeholder: nil),
     markNotificationRead: unimplemented("TerminalClient.markNotificationRead"),
     markAllNotificationsRead: unimplemented("TerminalClient.markAllNotificationsRead"),

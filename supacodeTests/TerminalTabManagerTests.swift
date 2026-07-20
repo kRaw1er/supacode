@@ -15,6 +15,15 @@ struct TerminalTabManagerTests {
     #expect(ids == [first, third, second])
   }
 
+  @Test func createTabThreadsKindAndDefaultsToTerminal() {
+    let manager = TerminalTabManager()
+    let terminal = manager.createTab(title: "term", icon: nil)
+    let diff = manager.createTab(title: "diff", icon: nil, kind: .diff)
+    #expect(manager.tabs.first { $0.id == terminal }?.kind == .terminal)
+    #expect(manager.tabs.first { $0.id == diff }?.kind == .diff)
+    #expect(manager.tabs.last?.kind == .diff)
+  }
+
   @Test func closeTabSelectsAdjacent() {
     let manager = TerminalTabManager()
     let first = manager.createTab(title: "one", icon: nil)

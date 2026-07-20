@@ -1,0 +1,151 @@
+import AppKit
+import Testing
+
+@testable import supacode
+
+/// Phase 3 — the gutter substrate: per-file gutter width, retina pixel-snapping,
+/// and the tint / change-bar paint tokens recorded into a `RecordingContext`
+/// (3.11–3.13 + the 1-based/0-based numbering and measured-once extensions).
+@MainActor
+struct GutterRendererTests {
+  private func renderer(scale: CGFloat) -> GutterRenderer {
+    GutterRenderer(metrics: ViewportTestSupport.metrics(gutter: 48), scale: scale, palette: .shared)
+  }
+
+  // MARK: - 3.11 gutter width for digit counts
+
+  @Test func gutterWidthForDigits() {
+    #expect(GutterRenderer.gutterWidth(maxDigits: 3, advance: 8) == 48)  // (3 + 2 + 1) · 8
+    #expect(GutterRenderer.gutterWidth(maxDigits: 5, advance: 8) == 64)  // (5 + 2 + 1) · 8
+    #expect(GutterRenderer.gutterWidth(maxDigits: 1, advance: 8) == 48)  // floors at 3 digits
+  }
+
+  // MARK: - 3.12 retina snap lands on the backing grid at 1× / 2× / 1.5×
+
+  @Test func retinaSnapLandsOnPixelGrid() {
+    for scale in [CGFloat(1), 2, 1.5] {
+      let gutter = renderer(scale: scale)
+      for value in [CGFloat(0.3), 3.3, 52.0, 100.7, 19.9] {
+        let onGrid = gutter.snap(value) * scale  // must be an integer number of backing pixels
+        #expect(abs(onGrid - onGrid.rounded()) < 1e-9, "off-grid at scale \(scale), v \(value)")
+      }
+    }
+    // The dashed-deletion period is exactly `lineHeight / round(lineHeight/2)`.
+    #expect(GutterRenderer.dashPeriod(lineHeight: 20) == 2)
+    #expect(GutterRenderer.dashPeriod(lineHeight: ViewportTestSupport.metrics(gutter: 48).lineHeight) == 2)
+  }
+
+  // MARK: - 3.13 draw records tint + change-bar rects (add=solid / del=dashed)
+
+  @Test func gutterDrawsTintAndBarRects() {
+    let gutter = renderer(scale: 2)
+    let rowRect = CGRect(x: 0, y: 0, width: 800, height: 20)
+    let geometry = LineRowGeometry(rowRect: rowRect, barX: 52)
+
+    // Addition: one full-row tint + one SOLID bar rect.
+    let add = RecordingContext()
+    gutter.draw(row: geometry, origin: .addition, in: add)
+    #expect(add.fills.count == 2)
+    #expect(add.fills[0] == CGRect(x: 0, y: 0, width: 800, height: 20))  // tint
+    #expect(add.fills[1] == CGRect(x: 52, y: 0, width: 4, height: 20))  // solid bar
+
+    // Deletion: one tint + a DASHED bar (5 segments over a 20pt row, period 2).
+    let del = RecordingContext()
+    gutter.draw(row: geometry, origin: .deletion, in: del)
+    #expect(del.fills.count == 6)
+    #expect(del.fills[0] == CGRect(x: 0, y: 0, width: 800, height: 20))  // tint
+    for dash in del.fills[1...] {
+      #expect(dash.minX == 52)
+      #expect(dash.width == 4)
+      #expect(dash.height == 2)  // dash-on period
+    }
+
+    // Context: nothing painted.
+    let context = RecordingContext()
+    gutter.draw(row: geometry, origin: .context, in: context)
+    #expect(context.fills.isEmpty)
+  }
+
+  // MARK: - opaque number-column fill (pierre parity) on changed rows only
+
+  @Test func numberColumnFillPaintsOnChangedRowsOnly() {
+    let gutter = renderer(scale: 2)
+    let band = CGRect(x: 4, y: 0, width: 48, height: 20)  // integral at 2× ⇒ snap is identity
+
+    // Addition / deletion: exactly one opaque fill over the band.
+    for origin in [DiffLineOrigin.addition, .deletion] {
+      let rec = RecordingContext()
+      gutter.drawNumberColumn(band, origin: origin, in: rec)
+      #expect(rec.fills == [band], "expected one number-column fill for \(origin)")
+    }
+
+    // Context / no-newline marker: no fill (numberColumnFill returns nil) — numbers keep
+    // the plain background, not a change tint.
+    for origin in [DiffLineOrigin.context, .noNewlineMarker] {
+      let rec = RecordingContext()
+      gutter.drawNumberColumn(band, origin: origin, in: rec)
+      #expect(rec.fills.isEmpty, "expected no number-column fill for \(origin)")
+    }
+  }
+
+  @Test func numberColumnFillIsBackingSnapped() {
+    let gutter = renderer(scale: 2)
+    // A fractional band must land on the backing grid (× scale is integral).
+    let rec = RecordingContext()
+    gutter.drawNumberColumn(CGRect(x: 4.3, y: 0.7, width: 47.9, height: 20.4), origin: .addition, in: rec)
+    #expect(rec.fills.count == 1)
+    let filled = rec.fills[0]
+    for edge in [filled.minX, filled.minY, filled.maxX, filled.maxY] {
+      #expect(abs(edge * 2 - (edge * 2).rounded()) < 1e-9, "off-grid edge \(edge)")
+    }
+  }
+
+  // MARK: - 1-based display / 0-based index parity + gutter width == digits
+
+  @Test func lineNumbering1BasedIndex0Based() {
+    let lines = (0..<5).map {
+      DiffLine(origin: .context, oldLineNumber: $0 + 1, newLineNumber: $0 + 1, content: "c", noNewlineAtEof: false)
+    }
+    let segment = LineSegment(
+      hunkID: HunkID(fileID: "f", index: 0), lines: lines, window: 0..<5, classification: .context)
+    let rows = segment.renderedRows(.unified)
+    for index in rows.indices {
+      #expect(rows[index].newNumber == index + 1)  // 0-based index ⇒ 1-based display
+    }
+    // Gutter width scales with the digit count of the largest line number.
+    #expect(String(1000).count == 4)
+    #expect(GutterRenderer.gutterWidth(maxDigits: String(1000).count, advance: 8) == 56)  // (4 + 2 + 1) · 8
+    #expect(GutterRenderer.gutterWidth(maxDigits: String(5).count, advance: 8) == 48)  // 1 digit floors at 3
+  }
+
+  // MARK: - gutter width measured once, patched in place, no drift
+
+  @Test func gutterWidthMeasuredOncePatchedInPlace() {
+    // The gutter is MEASURED once per visible window (largest rendered line number) and
+    // PATCHED into `DiffMetrics` in place via `withGutter(forMaxLineNumber:)`. Re-running
+    // the patch across successive re-layouts must NOT drift the width — a per-frame drift
+    // would shift the code column horizontally on every scroll.
+    let base = ViewportTestSupport.metrics(gutter: 48)  // charWidth 8
+    let advance = base.charWidth
+
+    // Measure once for a 3-digit max line number, then re-layout many times at the SAME
+    // max: the patched width is byte-identical every iteration, and re-patching an
+    // already-patched metrics is a fixed point (the patch reads `charWidth`, never the
+    // live `gutterWidth`, so it cannot accumulate).
+    let measured = base.withGutter(forMaxLineNumber: 100).gutterWidth
+    var metrics = base
+    for _ in 0..<8 {
+      metrics = metrics.withGutter(forMaxLineNumber: 100)
+      #expect(metrics.gutterWidth == measured)  // measured once, no accumulation across re-layouts
+    }
+
+    // The width changes ONLY when the digit count crosses a boundary; inside a digit band
+    // it is flat, and it steps by exactly one advance per extra digit — no jitter.
+    let threeLow = base.withGutter(forMaxLineNumber: 100).gutterWidth
+    let threeHigh = base.withGutter(forMaxLineNumber: 999).gutterWidth
+    let four = base.withGutter(forMaxLineNumber: 1000).gutterWidth
+    #expect(threeLow == threeHigh)  // no drift inside the 3-digit band
+    #expect(four - threeHigh == advance)  // +1 digit ⇒ +1 advance
+    #expect(base.withGutter(forMaxLineNumber: 1).gutterWidth == threeLow)  // floors at 3 digits
+  }
+}

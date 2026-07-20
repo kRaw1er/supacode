@@ -50,6 +50,18 @@ final class WorktreeTerminalState {
     let isFocused: Bool
   }
 
+  /// Ephemeral per-diff-tab metadata. Not persisted (diff tabs die with the app).
+  /// The diff content/document lives in `DiffReviewFeature.State.openDiffs[filePath]`
+  /// (Phase 2/3); this payload is only the tab↔path link the tab bar needs.
+  struct DiffTabPayload: Equatable, Sendable {
+    var filePath: String
+    /// Which diff this tab renders. Part of the dedup key so a working-tree tab
+    /// and a base-branch tab of the same file coexist (Phase 2).
+    var source: DiffSource
+  }
+
+  private static let diffTabIcon = "plus.forwardslash.minus"
+
   private struct SurfaceLaunchMetadata {
     let usesZmx: Bool
     let context: ghostty_surface_context_e
@@ -91,6 +103,11 @@ final class WorktreeTerminalState {
   /// mid-operation states (e.g. the supersede clear-then-record in
   /// `runBlockingScript`) never reach TCA.
   @ObservationIgnored private var pendingRunningScriptsProjectionEmit = false
+  /// Ephemeral per-diff-tab metadata keyed by tab. Presence here is the local
+  /// "this is a surface-less diff tab" guard; `tabManager.tabs[...].kind == .diff`
+  /// is the display source of truth, kept in lockstep by create / close. Not
+  /// persisted — diff tabs die with the app.
+  private var diffTabs: [TerminalTabID: DiffTabPayload] = [:]
   private var blockingScriptLaunchDirectories: [TerminalTabID: URL] = [:]
   private var lastBlockingScriptTabByKind: [BlockingScriptKind: TerminalTabID] = [:]
   private var pendingSetupScript: Bool
@@ -598,6 +615,63 @@ final class WorktreeTerminalState {
     return tabId
   }
 
+  /// A diff tab has no `trees` entry, so it never reaches Ghostty surface code.
+  private func isDiffTab(_ id: TerminalTabID) -> Bool { diffTabs[id] != nil }
+
+  /// File path backing a diff tab, or nil for a terminal tab.
+  func diffFilePath(for tabID: TerminalTabID) -> String? { diffTabs[tabID]?.filePath }
+
+  /// Diff source backing a diff tab, or nil for a terminal tab.
+  func diffSource(for tabID: TerminalTabID) -> DiffSource? { diffTabs[tabID]?.source }
+
+  /// Opens a diff tab for `(filePath, source)` without allocating a Ghostty
+  /// surface, or focuses the existing one for the same pair (dedupe). The same
+  /// path under a different `source` gets its own tab.
+  @discardableResult
+  func openDiffTab(filePath: String, source: DiffSource) -> TerminalTabID {
+    if let existing = diffTabs.first(where: { $0.value.filePath == filePath && $0.value.source == source })?.key {
+      selectTab(existing)
+      return existing
+    }
+    return createDiffTab(filePath: filePath, source: source)
+  }
+
+  @discardableResult
+  private func createDiffTab(filePath: String, source: DiffSource) -> TerminalTabID {
+    let fileName = URL(filePath: filePath, directoryHint: .notDirectory).lastPathComponent
+    // Base-branch tabs disambiguate their title so a working-tree tab and a
+    // base tab of the same file are distinguishable in the tab bar.
+    let title = source.displayName.map { "\(fileName) · \($0)" } ?? fileName
+    let tabID = tabManager.createTab(
+      title: title,
+      icon: Self.diffTabIcon,
+      kind: .diff,
+    )
+    diffTabs[tabID] = DiffTabPayload(filePath: filePath, source: source)
+    // No `splitTree(for:)` / `createSurface` — a diff tab owns no surface.
+    // `tabManager.createTab` already set `selectedTabId`; do not route through
+    // `selectTab` / `focusSurface`, which are the terminal-tab focus path.
+    emitDiffTabProjection(for: tabID)
+    updateShouldHideTabBar()
+    onTabCreated?()
+    return tabID
+  }
+
+  /// A diff tab has no `trees` entry, so `emitTabProjection` early-returns. Emit
+  /// a surface-less projection directly so `terminalsStore.terminalTabs[id:]`
+  /// gains a leaf and `TerminalTabsRowView` renders the tab.
+  private func emitDiffTabProjection(for tabID: TerminalTabID) {
+    let projection = WorktreeTabProjection(
+      tabID: tabID,
+      surfaceIDs: [],
+      activeSurfaceID: nil,
+      unseenNotificationCount: 0,
+    )
+    guard lastTabProjections[tabID] != projection else { return }
+    lastTabProjections[tabID] = projection
+    onTabProjectionChanged?(projection)
+  }
+
   func listSurfaces(tabID: TerminalTabID) -> [[String: String]] {
     let focusedID = focusedSurfaceIdByTab[tabID]
     return surfaces.compactMap { surfaceID, _ in
@@ -686,6 +760,41 @@ final class WorktreeTerminalState {
     terminalStateLogger.info("focusAndInsertText: sending \(text.count) chars to surface \(focusedId)")
     surface.requestFocus()
     surface.sendText(text)
+  }
+
+  /// True iff this worktree has at least one `.terminal`-kind surface eligible
+  /// as a text sink for a review batch (5.6). A `.diff` tab is never eligible.
+  var hasAgentTerminalSurface: Bool { resolveTerminalTextSink() != nil }
+
+  /// Injects `text` into the worktree's agent terminal, then switches the center
+  /// selection to that terminal tab (Orca handoff — 5.6/5.7). Returns `false`
+  /// (caller blocks + warns) when no terminal surface exists.
+  @discardableResult
+  func insertTextIntoTerminalSurface(_ text: String) -> Bool {
+    guard let sink = resolveTerminalTextSink() else {
+      terminalStateLogger.warning("insertTextIntoTerminalSurface: no terminal surface to send to")
+      return false
+    }
+    selectTab(sink.tabID)
+    guard let surface = surfaces[sink.surfaceID] else { return false }
+    surface.requestFocus()
+    surface.sendText(text)
+    return true
+  }
+
+  /// Resolves the precedence rule via the pure `TerminalTextSinkResolver` so the
+  /// selection logic stays unit-testable without a `GhosttySurfaceView`.
+  private func resolveTerminalTextSink() -> (tabID: TerminalTabID, surfaceID: UUID)? {
+    TerminalTextSinkResolver.resolve(
+      orderedTabs: tabManager.tabs.map { ($0.id, $0.kind) },
+      selectedTabID: tabManager.selectedTabId,
+      focusedSurfaceByTab: focusedSurfaceIdByTab,
+      surfaceIDsByTab: Dictionary(
+        uniqueKeysWithValues: tabManager.tabs.compactMap { tab in
+          trees[tab.id].map { (tab.id, $0.leaves().map(\.id)) }
+        }
+      )
+    )
   }
 
   func syncFocus(windowIsKey: Bool, windowIsVisible: Bool) {
@@ -828,6 +937,11 @@ final class WorktreeTerminalState {
   }
 
   func closeTab(_ tabId: TerminalTabID) {
+    // Diff tabs have no `trees` entry, so `removeTree` below early-returns and
+    // never tears down the projection leaf. Do it explicitly here.
+    if diffTabs.removeValue(forKey: tabId) != nil {
+      if lastTabProjections.removeValue(forKey: tabId) != nil { onTabRemoved?(tabId) }
+    }
     let closedBlockingKind = blockingScripts.removeValue(forKey: tabId)
     cleanupBlockingScriptLaunchDirectory(for: tabId)
     // Clear lingering tab tracking for completed or non-blocking tabs.
@@ -2068,6 +2182,9 @@ final class WorktreeTerminalState {
   }
 
   private func focusSurface(in tabId: TerminalTabID) {
+    // A diff tab owns no surface; selecting or closing-into it must not spawn
+    // one via the `splitTree(for:)` allocation below.
+    guard !isDiffTab(tabId) else { return }
     if let focusedId = focusedSurfaceIdByTab[tabId], let surface = surfaces[focusedId] {
       focusSurface(surface, in: tabId)
       return
@@ -2104,6 +2221,9 @@ final class WorktreeTerminalState {
   // surfaces selected" (no id → guard short-circuits the dim check for every
   // leaf).
   func activeSurfaceID(for tabId: TerminalTabID) -> UUID? {
+    // Already nil via the empty `trees` lookup, but explicit so a diff tab can
+    // never be treated as owning a surface.
+    guard !isDiffTab(tabId) else { return nil }
     if let stored = focusedSurfaceIdByTab[tabId], surfaces[stored] != nil {
       return stored
     }

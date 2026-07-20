@@ -9,6 +9,9 @@ struct WorktreeTerminalTabsView: View {
   /// `TerminalTabFeature` stores via `\.terminalTabs[id:]` from here, so the
   /// tab-bar surface area stays bounded to terminal state.
   let terminalsStore: StoreOf<TerminalsFeature>
+  /// Scoped diff-review store: the `.diff` tab branch reads the per-file
+  /// `DiffDocument` from here (`openDiffs[path]`).
+  let reviewStore: StoreOf<DiffReviewFeature>
   let shouldRunSetupScript: Bool
   let forceAutoFocus: Bool
   let createTab: () -> Void
@@ -62,13 +65,24 @@ struct WorktreeTerminalTabsView: View {
       }
       if let selectedId = state.tabManager.selectedTabId {
         TerminalTabContentStack(tabs: state.tabManager.tabs, selectedTabId: selectedId) { tabId in
-          TerminalSplitTreePane(
-            tabId: tabId,
-            terminalState: state,
-            terminalsStore: terminalsStore,
-            unfocusedSplitOverlay: unfocusedSplitOverlay,
-            dividerColor: dividerColor
-          )
+          switch state.tabManager.tabs.first(where: { $0.id == tabId })?.kind ?? .terminal {
+          case .terminal:
+            TerminalSplitTreePane(
+              tabId: tabId,
+              terminalState: state,
+              terminalsStore: terminalsStore,
+              unfocusedSplitOverlay: unfocusedSplitOverlay,
+              dividerColor: dividerColor
+            )
+          case .diff:
+            // The `.diff` branch never touches `TerminalSplitTreePane`, so
+            // `splitTree(for:)` is never reached for a diff tab.
+            DiffTabContentView(
+              store: reviewStore,
+              filePath: state.diffFilePath(for: tabId) ?? "",
+              source: state.diffSource(for: tabId) ?? .workingTree
+            )
+          }
         }
       } else {
         EmptyTerminalPaneView(message: "No terminals open")

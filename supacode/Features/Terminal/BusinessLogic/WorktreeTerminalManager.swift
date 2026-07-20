@@ -286,6 +286,7 @@ final class WorktreeTerminalManager {
 
   // swiftlint:disable:next cyclomatic_complexity
   private func handleTabCommand(_ command: TerminalClient.Command) -> Bool {
+    if handleReviewTabCommand(command) { return true }
     switch command {
     case .createTab(let worktree, let runSetupScriptIfNew, let id, let title):
       Task {
@@ -386,6 +387,29 @@ final class WorktreeTerminalManager {
     return true
   }
 
+  /// The review surfaces' tab commands (open a diff tab, inject a review batch
+  /// into the agent terminal), peeled out of `handleTabCommand` so that switch
+  /// stays under the body-length budget.
+  private func handleReviewTabCommand(_ command: TerminalClient.Command) -> Bool {
+    switch command {
+    case .openDiffTab(let worktree, let filePath, let source):
+      // `openDiffTab` dedupes by `(path, source)` and skips surface allocation, so
+      // a re-click focuses the existing tab instead of creating a duplicate.
+      _ = state(for: worktree).openDiffTab(filePath: filePath, source: source)
+    case .insertTextIntoFocusedSurface(let worktree, let text, let submit):
+      // `\r` submits, mirroring `.focusSurface`'s input handling. Use the
+      // non-creating lookup so a send never spins up an empty terminal state.
+      let payload = text + (submit ? "\r" : "")
+      let injected = stateIfExists(for: worktree.id)?.insertTextIntoTerminalSurface(payload) ?? false
+      if !injected {
+        emit(.textInjectionFailed(worktreeID: worktree.id, message: "No agent terminal to send to."))
+      }
+    default:
+      return false
+    }
+    return true
+  }
+
   private func handleSearchCommand(_ command: TerminalClient.Command) -> Bool {
     switch command {
     case .startSearch(let worktree):
@@ -402,7 +426,8 @@ final class WorktreeTerminalManager {
       .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .performBindingAction,
       .performBindingActionOnSurface, .selectTab, .selectTabAtIndex, .focusSurface, .splitSurface,
       .destroyTab, .destroySurface, .renameTab, .setImagePasteAgents, .prune, .setNotificationsEnabled,
-      .enforceNotificationRetentionLimit, .setSelectedWorktreeID, .refreshTabBarVisibility, .beginTabRename:
+      .enforceNotificationRetentionLimit, .setSelectedWorktreeID, .refreshTabBarVisibility, .beginTabRename,
+      .openDiffTab, .insertTextIntoFocusedSurface:
       return false
     }
     return true
@@ -420,7 +445,8 @@ final class WorktreeTerminalManager {
       .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .startSearch, .searchSelection,
       .navigateSearchNext, .navigateSearchPrevious, .endSearch, .selectTab, .selectTabAtIndex,
       .focusSurface, .splitSurface, .destroyTab, .destroySurface, .renameTab, .prune, .setNotificationsEnabled,
-      .enforceNotificationRetentionLimit, .setSelectedWorktreeID, .refreshTabBarVisibility, .beginTabRename:
+      .enforceNotificationRetentionLimit, .setSelectedWorktreeID, .refreshTabBarVisibility, .beginTabRename,
+      .openDiffTab, .insertTextIntoFocusedSurface:
       return false
     }
     return true
@@ -462,7 +488,8 @@ final class WorktreeTerminalManager {
       .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .performBindingAction,
       .performBindingActionOnSurface, .setImagePasteAgents, .startSearch, .searchSelection, .navigateSearchNext,
       .navigateSearchPrevious, .endSearch, .selectTab, .selectTabAtIndex, .focusSurface,
-      .splitSurface, .destroyTab, .destroySurface, .renameTab, .beginTabRename:
+      .splitSurface, .destroyTab, .destroySurface, .renameTab, .beginTabRename, .openDiffTab,
+      .insertTextIntoFocusedSurface:
       assertionFailure("Unhandled terminal command reached management handler: \(command)")
     }
   }
@@ -853,6 +880,11 @@ final class WorktreeTerminalManager {
 
   func tabExists(worktreeID: Worktree.ID, tabID: TerminalTabID) -> Bool {
     states[worktreeID]?.hasTab(tabID) ?? false
+  }
+
+  /// True iff the tab is a surface-less diff tab (backed by a file path).
+  func isDiffTab(worktreeID: Worktree.ID, tabID: TerminalTabID) -> Bool {
+    states[worktreeID]?.diffFilePath(for: tabID) != nil
   }
 
   func tabCanRename(worktreeID: Worktree.ID, tabID: TerminalTabID) -> Bool {

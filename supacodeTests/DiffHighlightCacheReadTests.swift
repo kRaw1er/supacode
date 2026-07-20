@@ -1,0 +1,165 @@
+import Foundation
+import Testing
+
+@testable import supacode
+
+/// Phase A — the pull-model READ side. Warms a REAL `DiffHighlightEngine` through the
+/// async `styleRuns` write path (the only thing that fills the span cache today), then
+/// asserts the additive pure reads (`cachedRuns`, `missingBlobLines`) and the
+/// `SyntaxRunsProvider` seam observe exactly what was written, in the 0-based blob-line
+/// space the cache stores. `@MainActor` because the engine is.
+@MainActor
+struct DiffHighlightCacheReadTests {
+
+  /// A multi-line Swift blob whose warmed lines carry real, keyword-bearing runs — so a
+  /// non-empty `cachedRuns` result is MEANINGFUL (the query classified `struct`/`let`,
+  /// not just tokenized whitespace).
+  private static let swiftSource = """
+    struct Foo {
+      let bar = 42
+      func baz() -> Int { bar }
+    }
+
+    """
+
+  private var queryName: String {
+    DiffHighlightEngine.grammarQueryName(forPath: "a.swift") ?? ""
+  }
+
+  private func warmedEngine(blobOID: String, lines: Range<Int>) async -> DiffHighlightEngine {
+    let engine = DiffHighlightEngine()
+    let input = HighlightBlobInput(blobOID: blobOID, utf16: DiffFixture.blob(Self.swiftSource), path: "a.swift")
+    _ = await engine.styleRuns(for: input, visibleLines: lines)
+    return engine
+  }
+
+  /// `grammarQueryName` resolves the swift grammar for a `.swift` path and `nil` for a
+  /// path with no bundled grammar.
+  @Test func grammarQueryNameResolvesByPath() {
+    #expect(DiffHighlightEngine.grammarQueryName(forPath: "a.swift") == "swift")
+    #expect(DiffHighlightEngine.grammarQueryName(forPath: "notes.unknownext") == nil)
+  }
+
+  /// `cachedRuns` returns non-empty, keyword-bearing runs for the warmed blob lines and
+  /// `[:]` for an unknown blobOID (nothing warmed) — a pure read of what `styleRuns`
+  /// merged.
+  @Test func cachedRunsHitAndMiss() async {
+    let engine = await warmedEngine(blobOID: "cache-read-hit", lines: 0..<4)
+
+    let hit = engine.cachedRuns(blobOID: "cache-read-hit", queryName: queryName, blobLines: 0..<4)
+    let runs = hit.values.flatMap { $0 }
+    #expect(!runs.isEmpty)
+    #expect(runs.contains { $0.capture.hasPrefix("keyword") })
+
+    // Unknown blob ⇒ nothing cached.
+    #expect(engine.cachedRuns(blobOID: "never-warmed", queryName: queryName, blobLines: 0..<4).isEmpty)
+    // Every returned key is inside the requested range (subset semantics).
+    #expect(hit.keys.allSatisfy { (0..<4).contains($0) })
+  }
+
+  /// `cachedRuns` returns only the subset of cached lines that intersect the requested
+  /// range: a range past what was warmed yields `[:]`.
+  @Test func cachedRunsPartialWindow() async {
+    let engine = await warmedEngine(blobOID: "cache-read-partial", lines: 0..<4)
+    // Lines 0..<2 were warmed and carry runs; 100..<200 was never queried.
+    #expect(!engine.cachedRuns(blobOID: "cache-read-partial", queryName: queryName, blobLines: 0..<2).isEmpty)
+    #expect(engine.cachedRuns(blobOID: "cache-read-partial", queryName: queryName, blobLines: 100..<200).isEmpty)
+  }
+
+  /// After warming `0..<N`, `missingBlobLines` over `0..<N` is empty (every line was
+  /// queried — a token-less line is PRESENT, not missing); a not-yet-queried range is
+  /// returned whole; an entirely-uncached blob reports the whole input range missing.
+  @Test func missingBlobLinesCoalescing() async {
+    let engine = await warmedEngine(blobOID: "cache-read-missing", lines: 0..<4)
+
+    // Fully warmed range ⇒ nothing missing.
+    #expect(engine.missingBlobLines(blobOID: "cache-read-missing", queryName: queryName, blobLines: 0..<4).isEmpty)
+
+    // A range never queried ⇒ returned as-is.
+    #expect(
+      engine.missingBlobLines(blobOID: "cache-read-missing", queryName: queryName, blobLines: 4..<54) == [4..<54])
+
+    // An entirely-uncached blob ⇒ the whole input range.
+    #expect(engine.missingBlobLines(blobOID: "cold", queryName: queryName, blobLines: 0..<50) == [0..<50])
+
+    // An empty input range is trivially fully covered.
+    #expect(engine.missingBlobLines(blobOID: "cold", queryName: queryName, blobLines: 5..<5).isEmpty)
+  }
+
+  /// LOOP GUARD: after a warm, EVERY queried line is covered — including a token-LESS
+  /// (blank) line and lines PAST the blob end — so `missingBlobLines` reports nothing to
+  /// re-query. Without covered-tracking those lines have no runs entry, are re-reported
+  /// missing every layout, and the warmer runs away (warm→repaint→layout→warm), pegging
+  /// the main thread (<60fps). `swiftSource` line 4 is blank; `0..<20` runs past the
+  /// 5-line blob.
+  @Test func warmCoversTokenlessAndBeyondBlobLinesSoWarmConverges() async {
+    let engine = await warmedEngine(blobOID: "loop-guard", lines: 0..<20)
+    // The blank line 4 was queried → NOT missing (it simply has no tokens).
+    #expect(engine.missingBlobLines(blobOID: "loop-guard", queryName: queryName, blobLines: 4..<5).isEmpty)
+    // Lines past the blob end were requested → covered → NOT missing (they render plain).
+    #expect(engine.missingBlobLines(blobOID: "loop-guard", queryName: queryName, blobLines: 5..<20).isEmpty)
+    // The whole requested window converges to zero gaps ⇒ the warmer stops re-launching.
+    #expect(engine.missingBlobLines(blobOID: "loop-guard", queryName: queryName, blobLines: 0..<20).isEmpty)
+    // A line NEVER requested (past the covered window) is still missing (would warm once).
+    #expect(
+      engine.missingBlobLines(blobOID: "loop-guard", queryName: queryName, blobLines: 20..<25) == [20..<25])
+  }
+
+  /// PERF-REGRESSION GUARD (ratio-based, machine-independent — mirrors
+  /// `DiffViewportScalePerfTests`' scale-invariance style): the HOT single-line read
+  /// `cachedRuns(blobLine:)` must be O(1) — a direct dict probe — NOT O(cache-size). The
+  /// "gets slow EVERYWHERE after scrolling to the end of the file" regression was this
+  /// read scanning the ENTIRE span map (which grows to the whole file) once per drawn row
+  /// per frame. A ~20×-larger cache must read a single line in ~the same time.
+  @Test func singleLineCacheReadIsScaleInvariant() async {
+    func warmed(lines count: Int, oid: String) async -> DiffHighlightEngine {
+      let engine = DiffHighlightEngine()
+      let content = (0..<count).map { "let x\($0) = \($0)" }.joined(separator: "\n") + "\n"
+      let input = HighlightBlobInput(blobOID: oid, utf16: DiffFixture.blob(content), path: "a.swift")
+      _ = await engine.styleRuns(for: input, visibleLines: 0..<count)
+      return engine
+    }
+    let query = DiffHighlightEngine.grammarQueryName(forPath: "a.swift") ?? ""
+    let small = await warmed(lines: 200, oid: "scale-small")
+    let large = await warmed(lines: 4000, oid: "scale-large")
+
+    func readTime(_ engine: DiffHighlightEngine, _ oid: String, line: Int, iterations: Int) -> Duration {
+      let clock = ContinuousClock()
+      let start = clock.now
+      for _ in 0..<iterations { _ = engine.cachedRuns(blobOID: oid, queryName: query, blobLine: line) }
+      return clock.now - start
+    }
+    // Warm up (JIT / first-touch), then measure.
+    _ = readTime(small, "scale-small", line: 100, iterations: 20_000)
+    _ = readTime(large, "scale-large", line: 2000, iterations: 20_000)
+    let smallTime = readTime(small, "scale-small", line: 100, iterations: 100_000)
+    let largeTime = readTime(large, "scale-large", line: 2000, iterations: 100_000)
+
+    // O(1): the 20×-bigger cache reads in ~the same time. The generous 8× guard catches an
+    // O(cache) regression (~20×+) while tolerating machine noise; O(1) lands near 1–2×.
+    #expect(
+      largeTime < smallTime * 8,
+      "single-line read scaled with cache size (large=\(largeTime) vs small=\(smallTime)): O(cache) regression")
+  }
+
+  /// `SyntaxRunsProvider.live(engine)` returns the SAME runs as `cachedRuns` for a warmed
+  /// line, and `.empty` returns `[]`.
+  @Test func providerLiveMatchesCacheAndEmptyIsBlank() async {
+    let engine = await warmedEngine(blobOID: "provider-live", lines: 0..<4)
+    let name = queryName
+
+    // Pick a warmed line that actually has runs.
+    let cached = engine.cachedRuns(blobOID: "provider-live", queryName: name, blobLines: 0..<4)
+    let line = cached.first { !$0.value.isEmpty }?.key ?? 0
+
+    let live = SyntaxRunsProvider.live(engine)
+    #expect(
+      live.runs("provider-live", name, line)
+        == engine.cachedRuns(blobOID: "provider-live", queryName: name, blobLine: line))
+    #expect(!live.runs("provider-live", name, line).isEmpty)
+
+    // A miss (unknown blob) is empty, and the stub is always empty.
+    #expect(live.runs("never-warmed", name, line).isEmpty)
+    #expect(SyntaxRunsProvider.empty.runs("provider-live", name, line).isEmpty)
+  }
+}

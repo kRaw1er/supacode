@@ -10,6 +10,15 @@ let zmxBinaryPath: Path = ".build/zmx/bin/zmx"
 let embedGhosttyResourcesScriptPath: Path = "scripts/embed-ghostty-resources.sh"
 let embedRuntimeAssetsScriptPath: Path = "scripts/embed-runtime-assets.sh"
 
+// Prebuilt static C xcframework of tree-sitter grammars (Phase 4). Mirrors the
+// GhosttyKit `.foreignBuild` below so Xcode links the static lib + embeds its
+// modulemap directly, sidestepping SPM's C-target modulemap path.
+let grammarsXCFrameworkPath: Path = ".build/treesitter/TreeSitterGrammars.xcframework"
+let grammarsBuildScriptPath: Path = "scripts/build-treesitter-grammars.sh"
+let grammarsFingerprintInputScript = """
+"${SRCROOT}/\(grammarsBuildScriptPath.pathString)" --print-fingerprint
+"""
+
 func shellScript(_ path: Path) -> String {
   "\"${SRCROOT}/\(path.pathString)\""
 }
@@ -22,6 +31,14 @@ let appResources: ResourceFileElements = [
   "supacode/AppIcon.icon",
   "supacode/Assets.xcassets",
   "supacode/notification.wav",
+  // Third-party license notices shipped in the bundle. libgit2 is GPLv2 with a
+  // linking exception (permits the closed-source combination) whose notice
+  // clause is mandatory — see supacode/Licenses/libgit2-COPYING.txt.
+  "supacode/Licenses",
+  // Bundled tree-sitter `highlights.scm` queries (Phase 4), loaded at runtime by
+  // language name. A folder reference preserves the per-language subdirectory
+  // structure the syntax highlighter looks up. Populated by the grammars build.
+  .folderReference(path: "supacode/Resources/TreeSitterQueries"),
 ]
 
 let appBuildableFolders: [BuildableFolder] = [
@@ -38,23 +55,38 @@ let appDependencies: [TargetDependency] = [
   .target(name: "SupacodeSettingsShared"),
   .target(name: "SupacodeSettingsFeature"),
   .target(name: "GhosttyKit"),
+  .target(name: "TreeSitterGrammars"),
   .target(name: "supacode-cli"),
   .external(name: "ComposableArchitecture"),
   .external(name: "CustomDump"),
   .external(name: "Dependencies"),
+  // `Deque` backs the Phase-2 diff viewport `ViewReuseQueue` (CodeEditTextView
+  // `Utils/ViewReuseQueue.swift` port). Same swift-collections package as the
+  // already-linked `OrderedCollections` product, just its `DequeModule` product.
+  .external(name: "DequeModule"),
   .external(name: "IdentifiedCollections"),
   .external(name: "Kingfisher"),
+  .external(name: "libgit2"),
   .external(name: "OrderedCollections"),
   .external(name: "PostHog"),
   .external(name: "Sentry"),
   .external(name: "Sharing"),
   .external(name: "Sparkle"),
+  .external(name: "SwiftTreeSitter"),
+  // neon adoption (Phase 0). The `Neon` product transitively links its `TreeSitterClient`
+  // / `RangeState` / `Rearrange` targets and the `SwiftTreeSitterLayer` product.
+  .external(name: "Neon"),
+  // Phase 4 `DiffHighlightEngine` imports `SwiftTreeSitterLayer` (LanguageLayer /
+  // ContentSnapshot / LanguageProvider) directly, so name its product explicitly
+  // rather than leaning on the transitive `Neon` link.
+  .external(name: "SwiftTreeSitterLayer"),
 ]
 
 let testDependencies: [TargetDependency] = [
   .target(name: "GhosttyKit"),
   .target(name: "SupacodeSettingsShared"),
   .target(name: "SupacodeSettingsFeature"),
+  .target(name: "TreeSitterGrammars"),
   .target(name: "supacode"),
   .external(name: "Clocks"),
   .external(name: "ComposableArchitecture"),
@@ -63,9 +95,18 @@ let testDependencies: [TargetDependency] = [
   .external(name: "Dependencies"),
   .external(name: "DependenciesTestSupport"),
   .external(name: "IdentifiedCollections"),
+  .external(name: "libgit2"),
   .external(name: "OrderedCollections"),
   .external(name: "PostHog"),
   .external(name: "Sharing"),
+  .external(name: "SwiftTreeSitter"),
+  // neon smoke test (NeonSmokeTests) imports `Neon`, `SwiftTreeSitterLayer`, and the
+  // `TreeSitterClient` module. Only SPM *products* are valid `.external(name:)`
+  // entries in Tuist — `TreeSitterClient` is a package *target* (not a product), so
+  // it can't be named here; the test reaches it as a transitive module through the
+  // `Neon` product (which links it), importable in the Xcode build graph.
+  .external(name: "Neon"),
+  .external(name: "SwiftTreeSitterLayer"),
 ]
 
 // Tests are split into three host-app bundles so xcodebuild can run them in
@@ -214,6 +255,20 @@ let project = Project(
         .script(ghosttyFingerprintInputScript),
       ],
       output: .xcframework(path: ghosttyXCFrameworkPath, linking: .static)
+    ),
+    .foreignBuild(
+      name: "TreeSitterGrammars",
+      destinations: .macOS,
+      script: """
+        "${SRCROOT}/\(grammarsBuildScriptPath.pathString)"
+        """,
+      inputs: [
+        .file("mise.toml"),
+        .file(grammarsBuildScriptPath),
+        .file("scripts/treesitter-grammars.lock"),
+        .script(grammarsFingerprintInputScript),
+      ],
+      output: .xcframework(path: grammarsXCFrameworkPath, linking: .static)
     ),
     .target(
       name: "SupacodeSettingsShared",

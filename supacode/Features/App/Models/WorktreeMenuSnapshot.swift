@@ -106,7 +106,7 @@ extension AppFeature.Action {
         .setupScriptConsumed, .worktreeProjectionChanged, .tabProjectionChanged,
         .tabRemoved, .tabRenamed, .worktreeStateTornDown, .tabProgressDisplayChanged,
         .surfacesClosed, .agentHookEventReceived, .terminalHasAnySurfaceChanged,
-        .surfaceCreationFailed:
+        .surfaceCreationFailed, .textInjectionFailed:
         return false
       }
     // Hot agent-storm paths: per-tab churn never mutates snapshot inputs.
@@ -114,7 +114,7 @@ extension AppFeature.Action {
     // change that DOES affect a snapshot input flows back through a separate
     // `.terminalEvent.notificationIndicatorChanged` (counted above) or a
     // `.repositories` cache invalidation (the cacheInvalidations gate above).
-    case .agentPresence, .terminals, .commandPalette, .updates, .usage:
+    case .agentPresence, .terminals, .review, .commandPalette, .updates, .usage:
       return false
     // Lifecycle / UI / effect-dispatch actions never write snapshot inputs
     // directly; any downstream mutation flows back through a classified arm.

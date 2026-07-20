@@ -1,0 +1,5 @@
+0 widget=hunkHeader old=- new=- type=widget
+1 old=L1 new=R1 type=context
+2 old=L2 new=R2 type=change
+3 old=L3 new=buffer type=single
+4 old=L4 new=R3 type=context

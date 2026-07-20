@@ -246,6 +246,9 @@ struct SupacodeApp: App {
         tabExists: { worktreeID, tabID in
           terminalManager.tabExists(worktreeID: worktreeID, tabID: tabID)
         },
+        isDiffTab: { worktreeID, tabID in
+          terminalManager.isDiffTab(worktreeID: worktreeID, tabID: tabID)
+        },
         tabCanRename: { worktreeID, tabID in
           terminalManager.tabCanRename(worktreeID: worktreeID, tabID: tabID)
         },
@@ -266,6 +269,9 @@ struct SupacodeApp: App {
             let tabID = state.tabManager.selectedTabId
           else { return nil }
           return state.activeSurfaceID(for: tabID)
+        },
+        hasAgentTerminalSurface: { worktreeID in
+          terminalManager.stateIfExists(for: worktreeID)?.hasAgentTerminalSurface ?? false
         },
         latestUnreadNotification: {
           terminalManager.latestUnreadNotificationLocation()
@@ -519,6 +525,7 @@ struct SupacodeApp: App {
       Group {
         TerminalCommands(ghosttyShortcuts: ghosttyShortcuts)
         TerminalTabSelectionCommands(store: store)
+        DiffNavigationCommands()
       }
       WindowCommands(ghosttyShortcuts: ghosttyShortcuts)
       CommandGroup(after: .textEditing) {

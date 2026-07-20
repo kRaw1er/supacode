@@ -1,0 +1,8 @@
+path=Sources/App.swift|status=Modified|+3|-1|sticky=false
+path=Sources/App.swift|status=Modified|+3|-1|sticky=true
+path=Old/Name.swift → New/Name.swift|status=Renamed|+2|-2|sticky=false
+path=Old/Name.swift → New/Name.swift|status=Renamed|+2|-2|sticky=true
+path=Docs/readme.md|status=Added|+10|-0|sticky=false
+path=Docs/readme.md|status=Added|+10|-0|sticky=true
+path=Legacy/Gone.swift|status=Deleted|+0|-5|sticky=false
+path=Legacy/Gone.swift|status=Deleted|+0|-5|sticky=true

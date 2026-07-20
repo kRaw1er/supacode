@@ -358,6 +358,111 @@ struct AppFeatureCommandPaletteTests {
     #expect(sent.value == [.performBindingAction(worktree, action: "new_split:right")])
   }
 
+  @Test(.dependencies) func filesChangedTickFansOutToBothSidebarStatsAndReview() async {
+    // A single `worktreeInfoWatcher.filesChanged` tick (forwarded from AppFeature's
+    // one subscription) must feed BOTH the sidebar +N/-N stat
+    // (`.worktreeLineChangesLoaded`) and the inspector re-load (`.review(...)`) —
+    // proving the shared-tick coupling (9.3 dual-source eventual consistency).
+    let worktree = makeWorktree(
+      id: "/tmp/repo-fanout/wt-1",
+      name: "wt-1",
+      repoRoot: "/tmp/repo-fanout"
+    )
+    let repository = makeRepository(id: "/tmp/repo-fanout", worktrees: [worktree])
+    var repositoriesState = RepositoriesFeature.State()
+    repositoriesState.repositories = [repository]
+    repositoriesState.selection = .worktree(worktree.id)
+    var state = AppFeature.State(
+      repositories: repositoriesState,
+      settings: SettingsFeature.State()
+    )
+    state.review.selectedWorktree = worktree
+    let clock = TestClock()
+    let sidebarStatCalled = LockIsolated(false)
+    let store = TestStore(initialState: state) {
+      AppFeature()
+    } withDependencies: {
+      $0.continuousClock = clock
+      $0[GitClientDependency.self].lineChanges = { _ in
+        sidebarStatCalled.setValue(true)
+        return (added: 4, removed: 2)
+      }
+      $0.diffClient.changedFiles = { _, _ in WorktreeDiff(files: [], isUnbornHead: false, operation: .none) }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.repositories(.worktreeInfoEvent(.filesChanged(worktreeID: worktree.id))))
+    // The review fan-out schedules its debounced re-load off the tick …
+    await store.receive(\.review.filesChanged)
+    await clock.advance(by: .milliseconds(250))
+    await store.receive(\.review.loaded)
+    await store.finish()
+    // … and the SAME tick drove the sidebar +N/-N stat's `lineChanges` read
+    // (dual-source eventual consistency, 9.3).
+    #expect(sidebarStatCalled.value)
+  }
+
+  @Test(.dependencies) func surfaceDeeplinkTargetingDiffTabIsRejected() async {
+    // A `surface` deeplink aimed at a surface-less diff tab must be rejected with a
+    // clear "Not a terminal tab" alert and must not mutate any terminal surface.
+    let worktree = makeWorktree(
+      id: "/tmp/repo-diff/wt-1",
+      name: "wt-1",
+      repoRoot: "/tmp/repo-diff"
+    )
+    let repository = makeRepository(id: "/tmp/repo-diff", worktrees: [worktree])
+    var repositoriesState = RepositoriesFeature.State()
+    repositoriesState.repositories = [repository]
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: repositoriesState,
+        settings: SettingsFeature.State()
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.tabExists = { _, _ in true }
+      $0.terminalClient.isDiffTab = { _, _ in true }
+      $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
+    }
+    store.exhaustivity = .off
+
+    let tabID = UUID()
+    await store.send(
+      .deeplink(.worktree(id: worktree.id, action: .surface(tabID: tabID, surfaceID: UUID(), input: nil))))
+    await store.finish()
+
+    // No surface-mutating command reached the terminal (a benign worktree
+    // selection may precede validation, but never a `.focusSurface`).
+    #expect(
+      sent.value.contains {
+        if case .focusSurface = $0 { return true }
+        return false
+      } == false
+    )
+    #expect(store.state.alert != nil)
+  }
+
+  @Test(.dependencies) func openDiffFileForwardsToReviewOpenFile() async {
+    let worktree = makeWorktree(
+      id: "/tmp/repo-diff/wt-1",
+      name: "wt-1",
+      repoRoot: "/tmp/repo-diff"
+    )
+    var state = AppFeature.State()
+    state.review.selectedWorktree = worktree
+    let store = TestStore(initialState: state) {
+      AppFeature()
+    }
+    // `.review(.openFile)` resolves the worktree from `review.selectedWorktree`
+    // and dispatches an async terminal command; keep the assertion on the forward.
+    store.exhaustivity = .off
+
+    await store.send(.commandPalette(.delegate(.openDiffFile(worktree.id, filePath: "a.swift"))))
+    await store.receive(\.review.openFile)
+  }
+
   @Test(.dependencies) func closePullRequestDispatchesAction() async {
     let store = TestStore(initialState: AppFeature.State()) {
       AppFeature()

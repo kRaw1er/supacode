@@ -109,6 +109,7 @@ struct WorktreeDetailView: View {
         isCheckingPullRequest: isCheckingPullRequest,
         pullRequest: inspectorPullRequest,
         repositoriesStore: repositoriesStore,
+        reviewStore: store.scope(state: \.review, action: \.review),
         terminalManager: terminalManager,
         onSelectNotification: selectToolbarNotification,
         onSelectSurface: selectToolbarSurface,
@@ -279,6 +280,7 @@ struct WorktreeDetailView: View {
           worktree: selectedWorktree,
           manager: terminalManager,
           terminalsStore: store.scope(state: \.terminals, action: \.terminals),
+          reviewStore: store.scope(state: \.review, action: \.review),
           shouldRunSetupScript: shouldRunSetupScript,
           forceAutoFocus: shouldFocusTerminal,
           createTab: { store.send(.newTerminal) }
