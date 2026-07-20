@@ -62,6 +62,8 @@ extension RepositoriesFeature {
         item.branchName = worktree.name
         item.subtitle = worktree.detail.isEmpty ? nil : worktree.detail
         item.workingDirectory = worktree.workingDirectory
+        item.workingDirectoryPath = worktree.location.workingDirectoryPath
+        item.isAttached = worktree.isAttached
         item.isMainWorktree = isMain
         item.isPinned = isPinned
         item.isMissing = worktree.isMissing
@@ -75,12 +77,9 @@ extension RepositoriesFeature {
         if let existing, existing.branchName != worktree.name {
           item.pullRequestBranchAtQueryTime = nil
         }
-        // Archived rows keep running scripts only while the delete script is
-        // active; any leftover scripts are stale and would render as misleading
-        // running-state dots in the archived bucket.
-        if state.isWorktreeArchived(id), item.lifecycle != .deletingScript,
-          !item.runningScripts.isEmpty
-        {
+        // Stale leftover scripts would render as misleading running-state dots
+        // in the archived bucket (see `stripsArchivedRunningScripts`).
+        if state.stripsArchivedRunningScripts(for: id, lifecycle: item.lifecycle), !item.runningScripts.isEmpty {
           item.runningScripts.removeAll()
         }
         rebuilt.append(item)
@@ -107,6 +106,8 @@ extension RepositoriesFeature {
           )
         item.name = pendingName
         item.branchName = pendingName
+        // The worktree doesn't exist yet, so the repo root stands in for its path.
+        item.workingDirectoryPath = repository.rootURL.path(percentEncoded: false)
         item.customTitle = pending.customization?.title
         item.customTint = pending.customization?.color
         item.lifecycle =

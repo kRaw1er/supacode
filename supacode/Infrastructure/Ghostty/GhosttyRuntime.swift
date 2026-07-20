@@ -8,6 +8,14 @@ import UniformTypeIdentifiers
 final class GhosttyRuntime {
   private static let logger = SupaLogger("Ghostty")
 
+  /// Live-pointer registries for C callbacks. A queued main-queue callback
+  /// (e.g. a wakeup) can fire after its runtime deinit freed the app, so
+  /// dereferencing the raw userdata/app pointer would be use-after-free;
+  /// every resolution validates membership first. Registered in init,
+  /// removed in deinit.
+  private static var liveUserdataBits: Set<UInt> = []
+  private static var liveAppBits: Set<UInt> = []
+
   final class SurfaceReference {
     let surface: ghostty_surface_t
     var isValid = true
@@ -29,9 +37,8 @@ final class GhosttyRuntime {
   /// Whether the user has toggled background opacity to force
   /// an opaque window, overriding the configured transparency.
   private(set) var isBackgroundOpaque = false
-  /// User's intended `background-opacity` from their Ghostty config.
-  /// Stashed because we override Ghostty's value to 0 so its surface
-  /// renders transparent — the window provides the only tint.
+  /// User's intended `background-opacity` from their Ghostty config, used to
+  /// tint the translucent window chrome behind the surfaces.
   private var userBackgroundOpacity: Double = 1
 
   func toggleIsBackgroundOpaque() {
@@ -39,7 +46,7 @@ final class GhosttyRuntime {
   }
   var onConfigChange: (() -> Void)?
 
-  init() {
+  init(initialColorScheme: ColorScheme? = nil) {
     guard let loaded = Self.loadConfig() else {
       preconditionFailure("ghostty_config_new failed")
     }
@@ -74,6 +81,8 @@ final class GhosttyRuntime {
       preconditionFailure("ghostty_app_new failed")
     }
     self.app = app
+    Self.liveUserdataBits.insert(UInt(bitPattern: Unmanaged.passUnretained(self).toOpaque()))
+    Self.liveAppBits.insert(UInt(bitPattern: app))
 
     let center = NotificationCenter.default
     observers.append(
@@ -107,14 +116,21 @@ final class GhosttyRuntime {
           ghostty_app_keyboard_changed(app)
         }
       })
+
+    // Seed the resolved scheme so `backgroundColor()` (the window tint +
+    // appearance source) reads the user's real light/dark theme before the
+    // first paint, not Ghostty's default-light resolution.
+    setColorScheme(initialColorScheme ?? Self.resolvedLaunchColorScheme())
   }
 
   isolated deinit {
+    Self.liveUserdataBits.remove(UInt(bitPattern: Unmanaged.passUnretained(self).toOpaque()))
     let center = NotificationCenter.default
     for observer in observers {
       center.removeObserver(observer)
     }
     if let app {
+      Self.liveAppBits.remove(UInt(bitPattern: app))
       ghostty_app_free(app)
     }
     if let config {
@@ -132,6 +148,21 @@ final class GhosttyRuntime {
     if let app {
       ghostty_app_tick(app)
     }
+  }
+
+  // The user's appearance preference resolved against the live system scheme,
+  // used to seed Ghostty's theme conditional before the first paint.
+  private static func resolvedLaunchColorScheme() -> ColorScheme {
+    @Shared(.settingsFile) var settingsFile
+    return settingsFile.global.appearanceMode.resolved(systemColorScheme: systemColorScheme())
+  }
+
+  // Read the system appearance without `NSApp`, which is still nil while the
+  // runtime is built during `SupacodeApp.init`. `GhosttyColorSchemeSyncView`
+  // later reconciles against `NSApp.effectiveAppearance` (a no-op when equal),
+  // so this only needs to be right for the first paint.
+  private static func systemColorScheme() -> ColorScheme {
+    UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark" ? .dark : .light
   }
 
   func setColorScheme(_ scheme: ColorScheme) {
@@ -237,7 +268,7 @@ final class GhosttyRuntime {
   }
 
   private static func runtime(from userdata: UnsafeMutableRawPointer?) -> GhosttyRuntime? {
-    guard let userdata else { return nil }
+    guard let userdata, liveUserdataBits.contains(UInt(bitPattern: userdata)) else { return nil }
     return Unmanaged<GhosttyRuntime>.fromOpaque(userdata).takeUnretainedValue()
   }
 
@@ -412,7 +443,7 @@ final class GhosttyRuntime {
     target: ghostty_target_s,
     action: ghostty_action_s
   ) -> Bool {
-    guard let app = ghostty_app_t(bitPattern: appBits) else { return false }
+    guard liveAppBits.contains(appBits), let app = ghostty_app_t(bitPattern: appBits) else { return false }
     if let runtime = runtime(fromApp: app) {
       if action.tag == GHOSTTY_ACTION_CONFIG_CHANGE, target.tag == GHOSTTY_TARGET_APP {
         let config = action.action.config_change.config
@@ -521,7 +552,7 @@ final class GhosttyRuntime {
     } else {
       userOpacity = 1
     }
-    // Last-write-wins: overrides must follow theme to keep `background-opacity = 0` on the surface.
+    // Last-write-wins: overrides must follow theme so the bundled padding wins.
     loadBundledTheme(into: config, enabled: themeSyncEnabled)
     loadBundledOverrides(into: config)
     ghostty_config_finalize(config)
@@ -535,12 +566,13 @@ final class GhosttyRuntime {
     return min(max(value, 0), 1)
   }
 
-  /// Applies Supacode-specific config (padding values, transparent surface)
-  /// that takes precedence over user settings.
+  /// Applies Supacode-specific config (padding values) that takes precedence
+  /// over user settings.
   ///
-  /// `background-opacity = 0` makes Ghostty's surface render with alpha 0 so
-  /// the window's tint is the only visual layer; the user's intended value is
-  /// captured separately in `loadConfig` for window-level use.
+  /// No `background-opacity` override: surfaces render translucent at the
+  /// theme's opacity and keep their own OSC 11 color. The window tint behind
+  /// them is masked out by `WindowTintBackdrop` so a surface composites over
+  /// blur, not the tint (no double background).
   ///
   /// Shell integration is intentionally left untouched (no `shell-integration`
   /// override): surfaces run the real shell with zmx injected as a Ghostty
@@ -549,7 +581,6 @@ final class GhosttyRuntime {
   internal static let bundledOverridesString = """
     window-padding-x = 14
     window-padding-y = 12,0
-    background-opacity = 0
     """
 
   /// Reports Supacode in `TERM_PROGRAM` so programs detect the real host
@@ -600,7 +631,7 @@ final class GhosttyRuntime {
     let contents = """
       theme = light:\(lightPath),dark:\(darkPath)
       background-opacity = 0.9
-      background-blur = macos-glass-regular
+      background-blur = true
       """
     let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("supacode-theme.conf")
     do {
@@ -670,9 +701,8 @@ final class GhosttyRuntime {
     return value & (1 << 0) != 0
   }
 
-  // The user's intended opacity, applied at the window level. The Ghostty
-  // surface itself is forced to `background-opacity = 0` so the tint
-  // doesn't double up.
+  // The user's intended opacity, applied at the window level to tint the
+  // translucent chrome behind the surfaces.
   func backgroundOpacity() -> Double {
     userBackgroundOpacity
   }
@@ -707,23 +737,38 @@ final class GhosttyRuntime {
     return nil
   }
 
+  // The user's `split-divider-color`, or nil when unset so the caller keeps
+  // Supacode's asset divider. Ghostty leaves the key null unless set explicitly.
+  func splitDividerColor() -> Color? {
+    guard let config else { return nil }
+    var color = ghostty_config_color_s()
+    let key = "split-divider-color"
+    guard ghostty_config_get(config, &color, key, UInt(key.lengthOfBytes(using: .utf8))) else {
+      return nil
+    }
+    return Color(nsColor: NSColor(ghostty: color))
+  }
+
   func backgroundColor() -> NSColor {
     backgroundColorFromConfig() ?? NSColor.windowBackgroundColor
   }
 
-  func scrollbarAppearanceName() -> NSAppearance.Name {
-    backgroundColor().isLightColor ? .aqua : .darkAqua
+  // Installed by the terminal manager: resolves the focused surface's background
+  // color (OSC 11 override or theme). Lets the window chrome follow the selected
+  // surface without the AppKit layer reaching into the manager directly.
+  var focusedSurfaceBackgroundColorProvider: (() -> NSColor?)?
+
+  // The color that tints the whole window: the focused surface's background, or
+  // the theme background as a fallback (no surface / provider not yet installed).
+  func windowTintColor() -> NSColor {
+    if let provider = focusedSurfaceBackgroundColorProvider, let color = provider() {
+      return color
+    }
+    return backgroundColor()
   }
 
-  // Uses the app's effective appearance — fine for Supacode's single-window
-  // model. If per-window appearance overrides are added, thread the owning
-  // window through and resolve under `window.effectiveAppearance` instead.
-  func backgroundColorScheme() -> ColorScheme {
-    var isLight = false
-    NSApp.effectiveAppearance.performAsCurrentDrawingAppearance {
-      isLight = backgroundColor().isLightColor
-    }
-    return isLight ? .light : .dark
+  func scrollbarAppearanceName() -> NSAppearance.Name {
+    backgroundColor().isLightColor ? .aqua : .darkAqua
   }
 
   private func backgroundColorFromConfig() -> NSColor? {
@@ -782,14 +827,37 @@ final class GhosttyRuntime {
 
 extension Notification.Name {
   static let ghosttyRuntimeConfigDidChange = Notification.Name("ghosttyRuntimeConfigDidChange")
+  // Posted when the focused surface's resolved background color changes (focus
+  // move or OSC 11), so window chrome re-tints to follow it.
+  static let ghosttyFocusedSurfaceBackgroundDidChange = Notification.Name(
+    "ghosttyFocusedSurfaceBackgroundDidChange")
+  // Posted when a tint mask region (the terminal body container) lays out or
+  // attaches/detaches from its window, so `WindowTintBackdrop` re-cuts the hole
+  // it masks out of the window tint. Handled synchronously so the mask never lags
+  // a frame behind the region: a stale hole flashes the transparent backing.
+  static let ghosttyTintMaskRegionDidChange = Notification.Name("ghosttyTintMaskRegionDidChange")
 }
 
 extension NSColor {
-  fileprivate var isLightColor: Bool {
+  var isLightColor: Bool {
     luminance > 0.5
   }
 
-  fileprivate var luminance: Double {
+  // Component-wise sRGB comparison; NSColor equality is color-space fragile.
+  // Half an 8-bit step: absorbs conversion jitter while keeping adjacent
+  // OSC 11 values (exactly 1/255 apart, subject to float rounding) distinct.
+  func matchesTint(_ other: NSColor) -> Bool {
+    let tolerance = 0.5 / 255
+    guard let lhs = usingColorSpace(.sRGB), let rhs = other.usingColorSpace(.sRGB) else {
+      return false
+    }
+    return abs(lhs.redComponent - rhs.redComponent) < tolerance
+      && abs(lhs.greenComponent - rhs.greenComponent) < tolerance
+      && abs(lhs.blueComponent - rhs.blueComponent) < tolerance
+      && abs(lhs.alphaComponent - rhs.alphaComponent) < tolerance
+  }
+
+  var luminance: Double {
     var red: CGFloat = 0
     var green: CGFloat = 0
     var blue: CGFloat = 0

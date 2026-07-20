@@ -23,8 +23,16 @@ struct PullRequestMergeQueueStatusTests {
 
     #expect(status?.position == 3)
     #expect(status?.positionLabel == "Position 3")
-    #expect(status?.estimatedTimeLabel == "~10 min left")
-    #expect(status?.detail == "Position 3 · ~10 min left")
+    // The abbreviated minute unit is format-version sensitive ("min" vs "mins"), so take the spelling from the
+    // formatter and assert the magnitude ourselves.
+    #expect(Self.tenMinutes.hasPrefix("10 "))
+    #expect(status?.estimatedTimeLabel == "~\(Self.tenMinutes) left")
+    #expect(status?.detail == "Position 3 · ~\(Self.tenMinutes) left")
+  }
+
+  private static var tenMinutes: String {
+    Duration.seconds(600)
+      .formatted(.units(allowed: [.days, .hours, .minutes], width: .abbreviated, maximumUnitCount: 2))
   }
 
   @Test func dropsEstimatedTimeWhenZeroOrMissing() {
@@ -92,13 +100,11 @@ struct PullRequestMergeQueueStatusTests {
     let queued = makePullRequest(mergeQueueEntry: entry)
     let open = makePullRequest(mergeStateStatus: "CLEAN")
 
-    // The toolbar accessory badge and the status button both tint brown to match the sidebar + popover.
+    // The toolbar accessory badge tints brown to match the sidebar + popover.
     #expect(
       WorktreePullRequestDisplay(worktreeName: "feature", pullRequest: queued).pullRequestBadgeStyle?.color == .brown)
     #expect(
       WorktreePullRequestDisplay(worktreeName: "feature", pullRequest: open).pullRequestBadgeStyle?.color == .green)
-    #expect(PullRequestStatusModel(pullRequest: queued)?.badgeColor == .brown)
-    #expect(PullRequestStatusModel(pullRequest: open)?.badgeColor == .green)
   }
 
   @Test func sidebarIconResolvesQueued() {

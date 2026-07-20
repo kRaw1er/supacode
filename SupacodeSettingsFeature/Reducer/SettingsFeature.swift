@@ -42,6 +42,10 @@ public struct SettingsFeature {
   @ObservableState
   public struct State: Equatable {
     public var appearanceMode: AppearanceMode
+    /// Kept raw, never normalized against `installedOpenActions`. Any settings write
+    /// persists this, so folding an uninstalled editor down to "auto" would write that
+    /// fallback to disk and lose the user's choice even if they reinstall. Readers
+    /// normalize against `installed` instead.
     public var defaultEditorID: String
     public var updateChannel: UpdateChannel
     public var updatesAutomaticallyCheckForUpdates: Bool
@@ -51,6 +55,7 @@ public struct SettingsFeature {
     public var systemNotificationsEnabled: Bool
     public var muteNotificationsForActiveSurface: Bool
     public var moveNotifiedWorktreeToTop: Bool
+    public var notificationRetentionLimit: NotificationRetentionLimit
     public var analyticsEnabled: Bool
     public var crashReportsEnabled: Bool
     public var githubIntegrationEnabled: Bool
@@ -74,7 +79,11 @@ public struct SettingsFeature {
     public var autoUpdateAgentIntegrationsEnabled: Bool
     public var confirmQuitMode: ConfirmQuitMode
     public var terminateSessionsOnQuit: Bool
+    public var remoteSessionPersistenceEnabled: Bool
+    public var appVisibility: AppVisibility
     public var cliInstallState = CLIInstallState.checking
+    /// Installed editors in menu order, resolved once off the picker's body.
+    public var installedOpenActions: [OpenWorktreeAction]
     /// Aggregate per-agent install state for the unified integration row.
     public var agentIntegrationStates: [SkillAgent: AgentIntegrationRowState] = [:]
     /// `nil` when the settings window is closed; non-nil selects the visible section.
@@ -90,9 +99,10 @@ public struct SettingsFeature {
     }
 
     public init(settings: GlobalSettings = .default) {
-      let normalizedDefaultEditorID = OpenWorktreeAction.normalizedDefaultEditorID(settings.defaultEditorID)
+      @Dependency(\.openActionAvailability) var openActionAvailability
+      installedOpenActions = openActionAvailability.installedActions()
       appearanceMode = settings.appearanceMode
-      defaultEditorID = normalizedDefaultEditorID
+      defaultEditorID = settings.defaultEditorID
       updateChannel = settings.updateChannel
       updatesAutomaticallyCheckForUpdates = settings.updatesAutomaticallyCheckForUpdates
       updatesAutomaticallyDownloadUpdates = settings.updatesAutomaticallyDownloadUpdates
@@ -101,6 +111,7 @@ public struct SettingsFeature {
       systemNotificationsEnabled = settings.systemNotificationsEnabled
       muteNotificationsForActiveSurface = settings.muteNotificationsForActiveSurface
       moveNotifiedWorktreeToTop = settings.moveNotifiedWorktreeToTop
+      notificationRetentionLimit = settings.notificationRetentionLimit
       analyticsEnabled = settings.analyticsEnabled
       crashReportsEnabled = settings.crashReportsEnabled
       githubIntegrationEnabled = settings.githubIntegrationEnabled
@@ -123,6 +134,8 @@ public struct SettingsFeature {
       autoUpdateAgentIntegrationsEnabled = settings.autoUpdateAgentIntegrationsEnabled
       confirmQuitMode = settings.confirmQuitMode
       terminateSessionsOnQuit = settings.terminateSessionsOnQuit
+      remoteSessionPersistenceEnabled = settings.remoteSessionPersistenceEnabled
+      appVisibility = settings.appVisibility
       defaultWorktreeBaseDirectoryPath =
         SupacodePaths.normalizedWorktreeBaseDirectoryPath(settings.defaultWorktreeBaseDirectoryPath) ?? ""
     }
@@ -139,6 +152,7 @@ public struct SettingsFeature {
         systemNotificationsEnabled: systemNotificationsEnabled,
         muteNotificationsForActiveSurface: muteNotificationsForActiveSurface,
         moveNotifiedWorktreeToTop: moveNotifiedWorktreeToTop,
+        notificationRetentionLimit: notificationRetentionLimit,
         analyticsEnabled: analyticsEnabled,
         crashReportsEnabled: crashReportsEnabled,
         githubIntegrationEnabled: githubIntegrationEnabled,
@@ -163,7 +177,9 @@ public struct SettingsFeature {
         agentPresenceBadgesEnabled: agentPresenceBadgesEnabled,
         autoUpdateAgentIntegrationsEnabled: autoUpdateAgentIntegrationsEnabled,
         confirmQuitMode: confirmQuitMode,
-        terminateSessionsOnQuit: terminateSessionsOnQuit
+        terminateSessionsOnQuit: terminateSessionsOnQuit,
+        remoteSessionPersistenceEnabled: remoteSessionPersistenceEnabled,
+        appVisibility: appVisibility
       )
     }
   }
@@ -174,6 +190,7 @@ public struct SettingsFeature {
     case repositoriesChanged([SettingsRepositorySummary])
     case setSelection(SettingsSection?)
     case setSystemNotificationsEnabled(Bool)
+    case setAppVisibility(AppVisibility)
     case setAutomatedActionPolicy(AutomatedActionPolicy)
     case showNotificationPermissionAlert(errorMessage: String?)
     case updateShortcut(id: AppShortcutID, override: AppShortcutOverride?)
@@ -256,17 +273,13 @@ public struct SettingsFeature {
         .cancellable(id: RefreshAgentIntegrationStatesID(), cancelInFlight: true)
 
       case .settingsLoaded(let settings):
-        let normalizedDefaultEditorID = OpenWorktreeAction.normalizedDefaultEditorID(settings.defaultEditorID)
         let normalizedWorktreeBaseDirPath =
           SupacodePaths.normalizedWorktreeBaseDirectoryPath(settings.defaultWorktreeBaseDirectoryPath)
         let normalizedSettings: GlobalSettings
-        if normalizedDefaultEditorID == settings.defaultEditorID,
-          normalizedWorktreeBaseDirPath == settings.defaultWorktreeBaseDirectoryPath
-        {
+        if normalizedWorktreeBaseDirPath == settings.defaultWorktreeBaseDirectoryPath {
           normalizedSettings = settings
         } else {
           var updatedSettings = settings
-          updatedSettings.defaultEditorID = normalizedDefaultEditorID
           updatedSettings.defaultWorktreeBaseDirectoryPath = normalizedWorktreeBaseDirPath
           normalizedSettings = persistGlobalSettings(updatedSettings)
         }
@@ -280,6 +293,7 @@ public struct SettingsFeature {
         state.systemNotificationsEnabled = normalizedSettings.systemNotificationsEnabled
         state.muteNotificationsForActiveSurface = normalizedSettings.muteNotificationsForActiveSurface
         state.moveNotifiedWorktreeToTop = normalizedSettings.moveNotifiedWorktreeToTop
+        state.notificationRetentionLimit = normalizedSettings.notificationRetentionLimit
         state.analyticsEnabled = normalizedSettings.analyticsEnabled
         state.crashReportsEnabled = normalizedSettings.crashReportsEnabled
         state.githubIntegrationEnabled = normalizedSettings.githubIntegrationEnabled
@@ -302,6 +316,8 @@ public struct SettingsFeature {
         state.autoUpdateAgentIntegrationsEnabled = normalizedSettings.autoUpdateAgentIntegrationsEnabled
         state.confirmQuitMode = normalizedSettings.confirmQuitMode
         state.terminateSessionsOnQuit = normalizedSettings.terminateSessionsOnQuit
+        state.remoteSessionPersistenceEnabled = normalizedSettings.remoteSessionPersistenceEnabled
+        state.appVisibility = normalizedSettings.appVisibility
         state.defaultWorktreeBaseDirectoryPath = normalizedSettings.defaultWorktreeBaseDirectoryPath ?? ""
         state.syncGlobalDefaults(from: normalizedSettings)
         synchronizeRepositorySelection(for: &state)
@@ -325,6 +341,14 @@ public struct SettingsFeature {
 
       case .setSystemNotificationsEnabled(let isEnabled):
         state.systemNotificationsEnabled = isEnabled
+        state.syncGlobalDefaults(from: state.globalSettings)
+        return persist(state)
+
+      case .setAppVisibility(let visibility):
+        // MenuBarExtra echoes the current value on every scene evaluation;
+        // persisting each echo would loop scene -> persist -> scene.
+        guard state.appVisibility != visibility else { return .none }
+        state.appVisibility = visibility
         state.syncGlobalDefaults(from: state.globalSettings)
         return persist(state)
 

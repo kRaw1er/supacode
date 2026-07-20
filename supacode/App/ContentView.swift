@@ -127,6 +127,18 @@ struct ContentView: View {
       }
       store.send(.repositories(.revealSelectedWorktreeInSidebar))
     }
+    .focusedSceneAction(
+      \.expandAllSidebarGroupsAction,
+      enabled: !repositoriesStore.repositories.isEmpty
+    ) {
+      store.send(.repositories(.setAllSidebarGroupsExpanded(true)))
+    }
+    .focusedSceneAction(
+      \.collapseAllSidebarGroupsAction,
+      enabled: !repositoriesStore.repositories.isEmpty
+    ) {
+      store.send(.repositories(.setAllSidebarGroupsExpanded(false)))
+    }
     .background {
       CommandPaletteOverlayHost(
         store: store,
@@ -135,6 +147,7 @@ struct ContentView: View {
       )
     }
     .background(WindowTabbingDisabler())
+    .background(WindowTintBackdrop(runtime: terminalManager.ghosttyRuntime))
     .background(WindowChromeObserver(runtime: terminalManager.ghosttyRuntime))
     .background(
       WindowTitleHost(
@@ -142,6 +155,22 @@ struct ContentView: View {
         terminalManager: terminalManager
       )
     )
+    .background(OpenActionIconWarmHost(store: store))
+  }
+}
+
+/// Confines the `installedOpenActions` read so a resolved availability sweep
+/// warms the icon cache off the main thread without invalidating ContentView.
+private struct OpenActionIconWarmHost: View {
+  let store: StoreOf<AppFeature>
+  @Environment(OpenActionIconStore.self) private var iconStore: OpenActionIconStore?
+
+  var body: some View {
+    let installed = store.installedOpenActions
+    return Color.clear
+      .task(id: installed) {
+        await iconStore?.warm(installed)
+      }
   }
 }
 
@@ -160,7 +189,8 @@ private struct CommandPaletteOverlayHost: View {
     let paletteStore = store.scope(state: \.commandPalette, action: \.commandPalette)
     return CommandPalettePanelHost(
       store: paletteStore,
-      items: CommandPaletteFeature.commandPaletteItems(
+      items: CommandPaletteFeature.items(
+        in: paletteStore.mode,
         from: repositoriesStore.state,
         ghosttyCommands: ghosttyShortcuts.commandPaletteEntries,
         scripts: store.allScripts,

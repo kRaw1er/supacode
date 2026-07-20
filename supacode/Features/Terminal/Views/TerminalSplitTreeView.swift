@@ -15,6 +15,8 @@ struct TerminalSplitTreeView: View {
   // and `unfocused-split-opacity` config values. Fill is nil when the config
   // is unreadable; callers must skip the overlay in that case.
   let unfocusedSplitOverlay: (fill: Color?, opacity: Double)
+  // Resolved `split-divider-color`, or the asset fallback when the user hasn't set it.
+  let dividerColor: Color
   let action: (Operation) -> Void
 
   private static let dragType = UTType(exportedAs: "sh.supacode.ghosttySurfaceId")
@@ -39,6 +41,7 @@ struct TerminalSplitTreeView: View {
         terminalState: terminalState,
         activeSurfaceID: activeSurfaceID,
         unfocusedSplitOverlay: unfocusedSplitOverlay,
+        dividerColor: dividerColor,
         action: action
       )
       .id(node.structuralIdentity)
@@ -57,6 +60,7 @@ struct TerminalSplitTreeView: View {
     let terminalState: WorktreeTerminalState
     let activeSurfaceID: UUID?
     let unfocusedSplitOverlay: (fill: Color?, opacity: Double)
+    let dividerColor: Color
     let action: (Operation) -> Void
 
     var body: some View {
@@ -85,7 +89,7 @@ struct TerminalSplitTreeView: View {
             set: {
               action(.resize(node: node, ratio: Double($0)))
             }),
-          dividerColor: Color(nsColor: .separatorColor),
+          dividerColor: dividerColor,
           resizeIncrements: .init(width: 1, height: 1),
           left: {
             SubtreeView(
@@ -93,6 +97,7 @@ struct TerminalSplitTreeView: View {
               terminalState: terminalState,
               activeSurfaceID: activeSurfaceID,
               unfocusedSplitOverlay: unfocusedSplitOverlay,
+              dividerColor: dividerColor,
               action: action
             )
           },
@@ -102,6 +107,7 @@ struct TerminalSplitTreeView: View {
               terminalState: terminalState,
               activeSurfaceID: activeSurfaceID,
               unfocusedSplitOverlay: unfocusedSplitOverlay,
+              dividerColor: dividerColor,
               action: action
             )
           },
@@ -374,6 +380,7 @@ struct TerminalSplitTreeAXContainer: NSViewRepresentable {
   let terminalState: WorktreeTerminalState
   let activeSurfaceID: UUID?
   let unfocusedSplitOverlay: (fill: Color?, opacity: Double)
+  let dividerColor: Color
   let action: (TerminalSplitTreeView.Operation) -> Void
 
   func makeNSView(context: Context) -> TerminalSplitAXContainerView {
@@ -387,6 +394,7 @@ struct TerminalSplitTreeAXContainer: NSViewRepresentable {
         terminalState: terminalState,
         activeSurfaceID: activeSurfaceID,
         unfocusedSplitOverlay: unfocusedSplitOverlay,
+        dividerColor: dividerColor,
         action: action
       ),
       panes: tree.visibleLeaves()
@@ -395,7 +403,7 @@ struct TerminalSplitTreeAXContainer: NSViewRepresentable {
 }
 
 @MainActor
-final class TerminalSplitAXContainerView: NSView {
+final class TerminalSplitAXContainerView: NSView, WindowTintMaskRegion {
   // Typed `NSHostingView<TerminalSplitTreeView>` (no `AnyView`) so re-assigning
   // `rootView` on every update lets SwiftUI diff against a stable concrete view
   // type instead of re-walking an erased tree.
@@ -435,6 +443,18 @@ final class TerminalSplitAXContainerView: NSView {
       // Assistive tech may cache the AX tree; nudge it to re-query when pane membership/order changes.
       NSAccessibility.post(element: self, notification: .layoutChanged)
     }
+  }
+
+  // Drive the window tint mask: this container's bounds are the hole cut out of
+  // the tint, so the terminal body composites over blur instead of doubling it.
+  override func layout() {
+    super.layout()
+    NotificationCenter.default.post(name: .ghosttyTintMaskRegionDidChange, object: self)
+  }
+
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+    NotificationCenter.default.post(name: .ghosttyTintMaskRegionDidChange, object: self)
   }
 
   override func isAccessibilityElement() -> Bool {

@@ -122,6 +122,8 @@ private nonisolated enum DeeplinkParser {
       return .worktree(id: worktreeID, action: .pin)
     case "unpin":
       return .worktree(id: worktreeID, action: .unpin)
+    case "appearance":
+      return parseWorktreeAppearance(worktreeID: worktreeID, queryItems: queryItems)
     case "tab":
       return parseWorktreeTab(
         worktreeID: worktreeID,
@@ -134,6 +136,23 @@ private nonisolated enum DeeplinkParser {
       logger.warning("Unrecognized worktree action: \(action)")
       return nil
     }
+  }
+
+  private static func parseWorktreeAppearance(
+    worktreeID: Worktree.ID,
+    queryItems: [URLQueryItem]
+  ) -> Deeplink? {
+    let titleItem = queryItems.first { $0.name == "title" }
+    let colorItem = queryItems.first { $0.name == "color" }
+    guard titleItem != nil || colorItem != nil else {
+      logger.warning("Appearance deeplink missing title or color query param")
+      return nil
+    }
+    let title = titleItem.map { $0.value ?? "" }
+    // An empty color passes through so execution rejects it with a visible
+    // alert (and CLI ok=false) instead of a log-only drop here.
+    let color = colorItem.map { $0.value ?? "" }
+    return .worktree(id: worktreeID, action: .appearance(title: title, color: color))
   }
 
   private static func parseWorktreeScript(
@@ -168,6 +187,7 @@ private nonisolated enum DeeplinkParser {
   ) -> Deeplink? {
     // "tab/<tab-uuid>" → focus tab.
     // "tab/new" → create new tab.
+    // "tab/<tab-uuid>/rename" → rename tab.
     // "tab/<tab-uuid>/destroy" → close tab.
     // "tab/<tab-uuid>/surface/<surface-uuid>" → focus surface.
     // "tab/<tab-uuid>/surface/<surface-uuid>/split" → split surface.
@@ -181,7 +201,8 @@ private nonisolated enum DeeplinkParser {
     if thirdSegment == "new" {
       let input = queryItems.first(where: { $0.name == "input" })?.value
       let id = queryItems.first(where: { $0.name == "id" })?.value.flatMap(UUID.init(uuidString:))
-      return .worktree(id: worktreeID, action: .tabNew(input: input, id: id))
+      let title = queryItems.first(where: { $0.name == "title" })?.value
+      return .worktree(id: worktreeID, action: .tabNew(input: input, id: id, title: title))
     }
 
     guard let tabUUID = UUID(uuidString: thirdSegment) else {
@@ -189,6 +210,16 @@ private nonisolated enum DeeplinkParser {
       return nil
     }
 
+    if pathSegments.count >= 4, pathSegments[3] == "rename" {
+      guard let titleItem = queryItems.first(where: { $0.name == "title" }) else {
+        logger.warning("Tab rename deeplink missing title")
+        return nil
+      }
+      return .worktree(
+        id: worktreeID,
+        action: .tabRename(tabID: tabUUID, title: titleItem.value ?? "")
+      )
+    }
     if pathSegments.count >= 4, pathSegments[3] == "destroy" {
       return .worktree(id: worktreeID, action: .tabDestroy(tabID: tabUUID))
     }

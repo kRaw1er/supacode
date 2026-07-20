@@ -1,3 +1,5 @@
+import Foundation
+import SupacodeSettingsShared
 import Testing
 
 @testable import supacode
@@ -66,6 +68,22 @@ struct SidebarActiveClassificationTests {
     )
     #expect(classification == .agent)
   }
+  @Test func ompBadgeClassifiesRowAsAgent() {
+    var state = makeState(name: "omp")
+    state.agentSnapshot.agents = [.init(agent: .omp, activity: .idle)]
+
+    let classification = SidebarActiveClassification.classify(state)
+
+    #expect(classification == .agent)
+  }
+  @Test func grokBadgeClassifiesRowAsAgent() {
+    var state = makeState(name: "grok")
+    state.agentSnapshot.agents = [.init(agent: .grok, activity: .idle)]
+
+    let classification = SidebarActiveClassification.classify(state)
+
+    #expect(classification == .agent)
+  }
 
   @Test func runningOnly() {
     let classification = SidebarActiveClassification.classify(
@@ -85,9 +103,46 @@ struct SidebarActiveClassificationTests {
     // The bucket priority ordering is the user contract; lock it explicitly
     // so a future shuffle of the enum case order can't silently re-rank.
     let expected: [SidebarActiveClassification] = [
+      .errored,
       .unreadAwaitingRunning, .unreadAwaiting, .unreadAgentRunning, .unreadAgent,
       .unreadRunning, .awaitingRunning, .awaiting, .agentRunning, .agent, .running,
     ]
     #expect(SidebarActiveClassification.allCases == expected)
+  }
+
+  @Test func agentErrorClassifiesAsErrored() {
+    var state = makeState(name: "broken")
+    state.agentSnapshot.hasError = true
+
+    #expect(SidebarActiveClassification.classify(state) == .errored)
+  }
+
+  @Test func agentErrorOutranksEveryOtherActiveState() {
+    // A session needing a manual restart must float above unread / awaiting /
+    // agent / running, so the error is checked before the four-flag classifier.
+    var state = makeState(name: "broken")
+    state.agentSnapshot.hasError = true
+    state.hasUnseenNotifications = true
+    state.agentSnapshot.agents = [.init(agent: .claude, activity: .error)]
+
+    let classification = SidebarActiveClassification.classify(state)
+
+    #expect(classification == .errored)
+    #expect(classification! < .unreadAwaitingRunning)
+  }
+  private func makeState(name: String) -> SidebarItemFeature.State {
+    SidebarItemFeature.State(
+      id: SidebarItemID("/tmp/repo/wt-\(name)"),
+      repositoryID: "/tmp/repo",
+      kind: .gitWorktree,
+      name: name,
+      branchName: name,
+      subtitle: nil,
+      workingDirectory: URL(fileURLWithPath: "/tmp/repo/wt-\(name)"),
+      repositoryAccent: nil,
+      isMainWorktree: false,
+      isPinned: false,
+      hasMergedBadge: false
+    )
   }
 }

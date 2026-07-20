@@ -1,6 +1,6 @@
-import AppKit
+import Foundation
 
-public enum OpenTarget: Equatable, Sendable {
+public nonisolated enum OpenTarget: Equatable, Sendable {
   case workingDirectory
   case url(URL)
   case search(String, excludeDirectories: String? = nil, maxDepth: Int = 3)
@@ -8,7 +8,7 @@ public enum OpenTarget: Equatable, Sendable {
   public static let `default`: Self = .workingDirectory
 }
 
-public enum OpenBehavior: Equatable, Sendable {
+public nonisolated enum OpenBehavior: Equatable, Sendable {
   public struct WorkspaceConfiguration: Equatable, Sendable {
     public var createsNewApplicationInstance: Bool
     public var arguments: [Argument]
@@ -41,7 +41,7 @@ public enum OpenBehavior: Equatable, Sendable {
 }
 
 /// How to open a remote SSH worktree through an editor's Remote-SSH CLI.
-public struct RemoteOpenInvocation: Equatable, Sendable {
+public nonisolated struct RemoteOpenInvocation: Equatable, Sendable {
   public var executable: OpenBehavior.ProcessExecutable
   /// argv following the resolved executable (and its prefix).
   public var arguments: [String]
@@ -52,18 +52,17 @@ public struct RemoteOpenInvocation: Equatable, Sendable {
   }
 }
 
-public enum OpenWorktreeAction: CaseIterable, Identifiable {
-  public enum MenuIcon {
-    case app(NSImage)
-    case symbol(String)
-  }
-
+/// A pure value: it never touches `NSWorkspace`. Availability and icons are
+/// resolved off the menu-build path (`OpenActionAvailabilityClient`).
+public nonisolated enum OpenWorktreeAction: CaseIterable, Identifiable, Hashable, Sendable {
   case alacritty
   case androidStudio
   case antigravity
   case editor
   case finder
   case cursor
+  case trae
+  case traeCN
   case githubDesktop
   case fork
   case gitkraken
@@ -74,6 +73,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
   case intellijEAP
   case kitty
   case nova
+  case phpstorm
   case pycharm
   case rider
   case rubymine
@@ -103,6 +103,8 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .androidStudio: "Android Studio"
     case .antigravity: "Antigravity"
     case .cursor: "Cursor"
+    case .trae: "Trae"
+    case .traeCN: "Trae CN"
     case .githubDesktop: "GitHub Desktop"
     case .gitkraken: "GitKraken"
     case .gitup: "GitUp"
@@ -112,6 +114,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .intellijEAP: "IntelliJ IDEA EAP"
     case .kitty: "Kitty"
     case .nova: "Nova"
+    case .phpstorm: "PhpStorm"
     case .pycharm: "PyCharm"
     case .rider: "Rider"
     case .rubymine: "RubyMine"
@@ -139,33 +142,26 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .finder: "Finder"
     case .editor: "$EDITOR"
     case .alacritty, .androidStudio, .antigravity, .cursor, .fork, .githubDesktop, .gitkraken,
-      .gitup, .ghostty, .goland, .intellij, .intellijEAP, .kitty, .nova, .pycharm, .rider, .rubymine,
-      .rustrover, .smartgit, .sourcetree, .sublimeMerge, .terminal, .vscode, .vscodeInsiders,
-      .vscodium, .warp, .webstorm, .wezterm, .windsurf, .xcode, .zed, .zedPreview:
+      .gitup, .ghostty, .goland, .intellij, .intellijEAP, .kitty, .nova, .phpstorm, .pycharm,
+      .rider, .rubymine, .rustrover, .smartgit, .sourcetree, .sublimeMerge, .terminal, .trae,
+      .traeCN, .vscode, .vscodeInsiders, .vscodium, .warp, .webstorm, .wezterm, .windsurf, .xcode,
+      .zed, .zedPreview:
       title
     }
   }
 
-  public var menuIcon: MenuIcon? {
-    switch self {
-    case .editor:
-      return .symbol("apple.terminal")
-    default:
-      guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
-      else { return nil }
-      return .app(NSWorkspace.shared.icon(forFile: appURL.path))
-    }
+  /// The SF Symbol standing in for this action, or `nil` when it renders the
+  /// app's own icon. Only `$EDITOR` has no bundle to draw from.
+  public var menuSymbolName: String? {
+    self == .editor ? "apple.terminal" : nil
   }
 
-  public var isInstalled: Bool {
+  /// Whether availability depends on an installed app bundle. Finder always
+  /// exists and `$EDITOR` resolves through the shell, so both are unconditional.
+  public var requiresInstalledApplication: Bool {
     switch self {
-    case .finder, .editor:
-      return true
-    case .alacritty, .androidStudio, .antigravity, .cursor, .fork, .githubDesktop, .gitkraken,
-      .gitup, .ghostty, .goland, .intellij, .intellijEAP, .kitty, .nova, .pycharm, .rider, .rubymine,
-      .rustrover, .smartgit, .sourcetree, .sublimeMerge, .terminal, .vscode, .vscodeInsiders,
-      .vscodium, .warp, .webstorm, .wezterm, .windsurf, .xcode, .zed, .zedPreview:
-      return NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) != nil
+    case .finder, .editor: false
+    default: true
     }
   }
 
@@ -177,6 +173,8 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .androidStudio: "android-studio"
     case .antigravity: "antigravity"
     case .cursor: "cursor"
+    case .trae: "trae"
+    case .traeCN: "trae-cn"
     case .fork: "fork"
     case .githubDesktop: "github-desktop"
     case .gitkraken: "gitkraken"
@@ -187,6 +185,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .intellijEAP: "intellijEAP"
     case .kitty: "kitty"
     case .nova: "nova"
+    case .phpstorm: "phpstorm"
     case .pycharm: "pycharm"
     case .rider: "rider"
     case .rubymine: "rubymine"
@@ -216,6 +215,8 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .androidStudio: "com.google.android.studio"
     case .antigravity: "com.google.antigravity"
     case .cursor: "com.todesktop.230313mzl4w4u92"
+    case .trae: "com.trae.app"
+    case .traeCN: "cn.trae.app"
     case .fork: "com.DanPristupov.Fork"
     case .githubDesktop: "com.github.GitHubClient"
     case .gitkraken: "com.axosoft.gitkraken"
@@ -226,6 +227,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .intellijEAP: "com.jetbrains.intellij-EAP"
     case .kitty: "net.kovidgoyal.kitty"
     case .nova: "com.panic.Nova"
+    case .phpstorm: "com.jetbrains.PhpStorm"
     case .pycharm: "com.jetbrains.pycharm"
     case .rider: "com.jetbrains.rider"
     case .rubymine: "com.jetbrains.rubymine"
@@ -256,16 +258,18 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
         .default,
       ]
     case .alacritty, .androidStudio, .antigravity, .cursor, .editor, .finder, .fork, .githubDesktop,
-      .gitkraken, .gitup, .ghostty, .goland, .intellij, .intellijEAP, .kitty, .nova, .pycharm, .rider,
-      .rubymine, .rustrover, .smartgit, .sourcetree, .sublimeMerge, .terminal, .vscode,
-      .vscodeInsiders, .vscodium, .warp, .webstorm, .wezterm, .windsurf, .zed, .zedPreview:
+      .gitkraken, .gitup, .ghostty, .goland, .intellij, .intellijEAP, .kitty, .nova, .phpstorm,
+      .pycharm, .rider, .rubymine, .rustrover, .smartgit, .sourcetree, .sublimeMerge, .terminal,
+      .trae, .traeCN, .vscode, .vscodeInsiders, .vscodium, .warp, .webstorm, .wezterm, .windsurf,
+      .zed, .zedPreview:
       [.default]
     }
   }
 
   public var openBehaviors: [OpenBehavior] {
     switch self {
-    case .androidStudio, .goland, .intellij, .intellijEAP, .rider, .webstorm, .pycharm, .rubymine, .rustrover:
+    case .androidStudio, .goland, .intellij, .intellijEAP, .phpstorm, .rider, .webstorm, .pycharm,
+      .rubymine, .rustrover:
       [
         .workspace(
           configuration:
@@ -284,8 +288,8 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
         .default,
       ]
     case .alacritty, .antigravity, .cursor, .editor, .finder, .fork, .githubDesktop, .gitkraken, .gitup,
-      .ghostty, .kitty, .nova, .smartgit, .sourcetree, .sublimeMerge, .terminal, .vscode, .vscodeInsiders,
-      .vscodium, .warp, .wezterm, .windsurf, .xcode:
+      .ghostty, .kitty, .nova, .smartgit, .sourcetree, .sublimeMerge, .terminal, .trae, .traeCN,
+      .vscode, .vscodeInsiders, .vscodium, .warp, .wezterm, .windsurf, .xcode:
       [.default]
     }
   }
@@ -300,7 +304,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
         executable: .appRelativePath("Contents/MacOS/cli"),
         arguments: [Self.zedSSHURL(host: host, remotePath: remotePath)]
       )
-    case .vscode, .vscodeInsiders, .vscodium, .cursor, .windsurf, .antigravity:
+    case .vscode, .vscodeInsiders, .vscodium, .cursor, .trae, .traeCN, .windsurf, .antigravity:
       // VS Code parses `ssh-remote+host:2222` as a literal hostname, so it has no
       // inline port syntax (microsoft/vscode-remote-release #515): a non-default
       // port is inexpressible, so return `nil`. The path is a literal positional
@@ -325,6 +329,8 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .vscodeInsiders: "code-insiders"
     case .vscodium: "codium"
     case .cursor: "cursor"
+    case .trae: "trae"
+    case .traeCN: "trae-cn"
     case .windsurf: "windsurf"
     case .antigravity: "antigravity"
     default: nil
@@ -353,10 +359,12 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     return "ssh://\(host.sshURLAuthority)\(encodedPath)"
   }
 
-  public nonisolated static let automaticSettingsID = "auto"
+  public static let automaticSettingsID = "auto"
 
   public static let editorPriority: [OpenWorktreeAction] = [
     .cursor,
+    .trae,
+    .traeCN,
     .zed,
     .zedPreview,
     .vscode,
@@ -368,6 +376,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     .intellij,
     .intellijEAP,
     .webstorm,
+    .phpstorm,
     .pycharm,
     .rubymine,
     .rider,
@@ -397,46 +406,60 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
   public static let menuOrder: [OpenWorktreeAction] =
     editorPriority + [.xcode] + [.finder] + terminalPriority + gitClientPriority + [.editor]
 
-  public static func normalizedDefaultEditorID(_ settingsID: String?) -> String {
+  public static func normalizedDefaultEditorID(
+    _ settingsID: String?,
+    installed: [OpenWorktreeAction]
+  ) -> String {
     guard let settingsID, settingsID != automaticSettingsID else {
       return automaticSettingsID
     }
     guard let action = allCases.first(where: { $0.settingsID == settingsID }),
-      action.isInstalled
+      installed.contains(action)
     else {
       return automaticSettingsID
     }
     return settingsID
   }
 
+  /// What to present for a repository the resolution pass has not reached yet: a cold
+  /// launch, or one just added. Resolving the same chain minus the repository's own
+  /// `supacode.json` keeps the value from jumping when the pass lands, which skipping
+  /// to `preferredDefault` would not: it ignores the user's default editor.
+  public static func unresolvedDefault(
+    defaultEditorID: String?,
+    installed: [OpenWorktreeAction]
+  ) -> OpenWorktreeAction {
+    fromSettingsID(nil, defaultEditorID: defaultEditorID, installed: installed)
+  }
+
   public static func fromSettingsID(
     _ settingsID: String?,
-    defaultEditorID: String?
+    defaultEditorID: String?,
+    installed: [OpenWorktreeAction]
   ) -> OpenWorktreeAction {
     if let settingsID, settingsID != automaticSettingsID,
       let action = allCases.first(where: { $0.settingsID == settingsID })
     {
       return action
     }
-    let normalizedDefaultEditorID = normalizedDefaultEditorID(defaultEditorID)
+    let normalizedDefaultEditorID = normalizedDefaultEditorID(defaultEditorID, installed: installed)
     if normalizedDefaultEditorID != automaticSettingsID,
       let action = allCases.first(where: { $0.settingsID == normalizedDefaultEditorID })
     {
       return action
     }
-    return preferredDefault()
+    return preferredDefault(installed: installed)
   }
 
-  public static var availableCases: [OpenWorktreeAction] {
-    menuOrder.filter(\.isInstalled)
+  public static func availableSelection(
+    _ selection: OpenWorktreeAction,
+    installed: [OpenWorktreeAction]
+  ) -> OpenWorktreeAction {
+    installed.contains(selection) ? selection : preferredDefault(installed: installed)
   }
 
-  public static func availableSelection(_ selection: OpenWorktreeAction) -> OpenWorktreeAction {
-    selection.isInstalled ? selection : preferredDefault()
-  }
-
-  public static func preferredDefault() -> OpenWorktreeAction {
-    defaultPriority.first(where: \.isInstalled) ?? .finder
+  public static func preferredDefault(installed: [OpenWorktreeAction]) -> OpenWorktreeAction {
+    defaultPriority.first { installed.contains($0) } ?? .finder
   }
 
   private static let xcodeSearchExcludedDirectories =
