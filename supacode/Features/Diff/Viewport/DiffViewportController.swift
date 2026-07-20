@@ -259,11 +259,19 @@ final class DiffViewportController: NSObject {
   /// not re-trigger the `boundsDidChange → relayout` feedback loop.
   private var isAdjustingScroll = false
 
-  /// The content width each widget's height was last measured at (Phase 6
-  /// `LayoutCoalescer`). A `nil` entry means "never measured" — the first report
-  /// always applies; a width change re-measures (a widget wraps differently at a
-  /// new width). Keyed by `WidgetKey` (per-instance identity), not `ChunkID`.
-  private var widgetMeasuredWidth: [WidgetKey: CGFloat] = [:]
+  /// Each widget's last measured `(width, height)` (Phase 6 `LayoutCoalescer`). A
+  /// `nil` entry means "never measured" — the first report always applies; a width
+  /// change re-measures (a widget wraps differently at a new width). Keyed by
+  /// `WidgetKey` (per-instance identity), not `ChunkID`.
+  ///
+  /// This is the SURVIVING record of a measurement: the tree stores it as a per-node
+  /// delta, and a re-projection mints new nodes, so a measured height would be lost on
+  /// every rebuild (a re-diff, a comment edit, a collapse toggle). The mounted host
+  /// doesn't re-report either — its SwiftUI content didn't change, so there's no
+  /// geometry change to observe — leaving the widget in an `estimatedHeight` slot:
+  /// a collapsed thread padded out to the estimate, an expanded one clipped. `apply`
+  /// re-seeds the fresh nodes from here.
+  private var widgetMeasured: [WidgetKey: (width: CGFloat, height: CGFloat)] = [:]
 
   /// Phase 7 — per-gap expansion bookkeeping (mutated by the `applyExpansion` /
   /// `collapseExpansion` splice in `DiffViewportExpansion.swift`, so not
@@ -361,6 +369,10 @@ final class DiffViewportController: NSObject {
     let anchor = scrollPreserving ? captureAnchor() : nil
     tree = newTree
     mode = newMode
+    // Carry measured widget heights across the rebuild BEFORE the first sizing pass,
+    // so the document grows to its true height in one go instead of laying out at the
+    // estimate and settling a frame later (the visible "widgets jump on reload").
+    restoreMeasuredWidgetHeights()
     adoptGutterForLineNumbers()
     measurePass = 0
     // Fresh content ⇒ force the next layout to re-fire its visible-line window even
@@ -654,6 +666,11 @@ final class DiffViewportController: NSObject {
     // mirrored one draft). Matching on both keeps the cursor alive across layout
     // passes — the reason this fast path exists — while a state change re-mounts.
     if host.mountedKey == widget.key, host.mountedToken == model.modelToken { return }
+    // A state change (collapse, commit, edit) invalidates what this widget measured
+    // in its PREVIOUS state — carrying that height into the next re-projection would
+    // reserve a collapsed thread the expanded one's slot. The re-mount below reports
+    // the new height, which re-seeds the record.
+    if host.mountedKey == widget.key { invalidateMeasuredHeight(widget.key) }
     if !host.reuse(model, key: widget.key, width: width) {
       host.prepareForReuse()
       host.mount(model, key: widget.key, width: width, coalescer: coalescer)
@@ -1044,17 +1061,44 @@ final class DiffViewportController: NSObject {
   /// it has never been measured (so the first report always applies). Height is
   /// read back from the tree (est + measured delta) in the current `mode`.
   func measuredHeight(forWidget key: WidgetKey) -> (width: CGFloat, height: CGFloat)? {
-    guard let width = widgetMeasuredWidth[key], let node = tree.widgetNode(for: key) else { return nil }
-    return (width, node.summary.height(mode))
+    guard let measured = widgetMeasured[key], let node = tree.widgetNode(for: key) else { return nil }
+    return (measured.width, node.summary.height(mode))
   }
 
   /// Write a widget's measured height back into the tree (O(log n) re-aggregate)
-  /// and record the width it was measured at. No relayout here — the coalescer
-  /// captures / restores the scroll anchor once around the whole batch.
+  /// and record the `(width, height)` it was measured at. No relayout here — the
+  /// coalescer captures / restores the scroll anchor once around the whole batch.
+  ///
+  /// Written to BOTH modes: a widget is one full-width row either way, so its height
+  /// doesn't depend on the mode, and recording only the current one left the other
+  /// at the estimate — a jump on the next unified↔split flip.
   func setMeasuredHeight(_ key: WidgetKey, width: CGFloat, height: CGFloat) {
     guard let node = tree.widgetNode(for: key) else { return }
-    tree.setMeasuredHeight(height, chunk: node.id, localRow: 0, mode: mode)
-    widgetMeasuredWidth[key] = width
+    tree.setMeasuredHeight(height, chunk: node.id, localRow: 0, mode: .unified)
+    tree.setMeasuredHeight(height, chunk: node.id, localRow: 0, mode: .split)
+    widgetMeasured[key] = (width, height)
+  }
+
+  /// Drop a widget's measured record so the next re-projection reserves its estimate
+  /// and waits for a fresh report, rather than restoring a height measured in a state
+  /// this widget is no longer in.
+  func invalidateMeasuredHeight(_ key: WidgetKey) {
+    widgetMeasured[key] = nil
+  }
+
+  /// Re-seed a freshly-projected tree's widget nodes with the heights their widgets
+  /// were already measured at. Without this every rebuild drops back to
+  /// `estimatedHeight` and no new report arrives to correct it (the mounted SwiftUI
+  /// content is unchanged, so nothing observes a geometry change), which is what made
+  /// widget slots jump on every reload. Entries measured at a different width are
+  /// skipped — those genuinely need re-measuring. O(#measured widgets).
+  private func restoreMeasuredWidgetHeights() {
+    let width = documentView.bounds.width
+    for (key, measured) in widgetMeasured {
+      guard measured.width == width, let node = tree.widgetNode(for: key) else { continue }
+      tree.setMeasuredHeight(measured.height, chunk: node.id, localRow: 0, mode: .unified)
+      tree.setMeasuredHeight(measured.height, chunk: node.id, localRow: 0, mode: .split)
+    }
   }
 
   /// Capture the current scroll anchor (first fully-visible chunk). Public alias

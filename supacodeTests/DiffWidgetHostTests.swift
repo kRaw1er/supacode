@@ -89,6 +89,39 @@ struct DiffWidgetHostTests {
     #expect(after2?.isOccupied == false)  // re-mounted read-only: no editor, no caret
   }
 
+  /// A measured widget height survives a re-projection. The measurement is stored as a
+  /// per-NODE delta and a rebuild mints new nodes, so every reload dropped back to
+  /// `estimatedHeight` — and no new report corrected it, because the mounted SwiftUI
+  /// content is unchanged and nothing observes a geometry change. That is the
+  /// "widget slots jump on reload" bug: a collapsed thread padded to the estimate.
+  @Test func measuredWidgetHeightSurvivesReprojection() {
+    let controller = ViewportTestSupport.controller()
+    let anchorID = UUID()
+    let key = WidgetKey.commentThread(anchorID: anchorID)
+    func project() -> ChunkTree {
+      let tree = ChunkTree(metrics: .production)
+      var after: ChunkID?
+      for line in 1...10 { after = tree.insert(WidgetTreeFixture.contextLeaf(line), after: after) }
+      tree.insert(
+        .widget(Widget(key: key, estimatedHeight: 88, payload: .commentThread(anchorID: anchorID))), after: after)
+      return tree
+    }
+    controller.apply(tree: project(), mode: .unified, scrollPreserving: false)
+
+    // The mounted thread measures far shorter than the estimate (a collapsed thread).
+    let coalescer = LayoutCoalescer(host: controller)
+    coalescer.enqueueMeasuredHeight(key: key, width: controller.documentView.bounds.width, height: 32)
+    coalescer.tick()
+    #expect(controller.tree.widgetNode(for: key)?.summary.height(.unified) == 32)
+
+    // Re-project (a reload / re-diff): the fresh node must come back already measured.
+    controller.apply(tree: project(), mode: .unified, scrollPreserving: true)
+    #expect(controller.tree.widgetNode(for: key)?.summary.height(.unified) == 32)
+    // ...in BOTH modes: a widget is one full-width row either way, so a mode flip
+    // must not drop it back to the estimate.
+    #expect(controller.tree.widgetNode(for: key)?.summary.height(.split) == 32)
+  }
+
   // MARK: - C 6.5 — collapse toggles node height + reaggregate, anchored no-jump
   //                 (even for a widget ABOVE the fold)
 
