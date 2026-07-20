@@ -301,7 +301,7 @@ struct DiffViewportControllerTests {
     let frame = controller.frame(forChunk: ids[10])
     #expect(frame?.minY == 200)  // leaf 10 at y = 200
     #expect(frame?.height == 20)  // one-line leaf
-    #expect(controller.frame(forChunk: ChunkID(raw: 999_999)) == nil)
+    #expect(controller.frame(forChunk: ChunkID.allocate()) == nil)  // an id no tree ever placed
   }
 
   // MARK: - 1M-row scroll stays bounded (automated proxy for the MANUAL smoke)

@@ -169,13 +169,14 @@ struct WordDiffBackgroundPainterTests {
         cache: cache, palette: .shared, styleGeneration: 0, wordDiffEnabled: true, syntaxVersion: 0,
         wordDiffVersion: wordDiffVersion)
     }
-    view.configure(segment: segment, chunkID: ChunkID(raw: 1), context: context(wordDiffVersion: 0))
+    let chunkID = ChunkID.allocate()  // one leaf, re-painted at a new word-diff version
+    view.configure(segment: segment, chunkID: chunkID, context: context(wordDiffVersion: 0))
     let typesetCount = cache.count
     #expect(typesetCount > 0)
     // Word-diff "arrives" → bump ONLY `wordDiffVersion` (content / width / style
     // unchanged). Because `wordDiffVersion` is excluded from the CTLine key, the
     // glyphs are recomposited/redrawn but NOT re-typeset — the cache does not grow.
-    view.configure(segment: segment, chunkID: ChunkID(raw: 1), context: context(wordDiffVersion: 1))
+    view.configure(segment: segment, chunkID: chunkID, context: context(wordDiffVersion: 1))
     #expect(cache.count == typesetCount)
   }
 }

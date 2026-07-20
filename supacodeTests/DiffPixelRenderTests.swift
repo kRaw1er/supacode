@@ -61,7 +61,7 @@ struct DiffPixelRenderTests {
     let view = LineRowView()
     view.frame = CGRect(x: 0, y: 0, width: 800, height: 60)
     view.configure(
-      segment: segment, chunkID: ChunkID(raw: 1), rowHeight: 20,
+      segment: segment, chunkID: ChunkID.allocate(), rowHeight: 20,
       font: .monospacedSystemFont(ofSize: 12, weight: .regular), mode: .unified)
 
     let rep = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds), "no rep")

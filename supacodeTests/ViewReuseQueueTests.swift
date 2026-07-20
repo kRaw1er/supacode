@@ -114,7 +114,7 @@ struct ViewReuseQueueTests {
     let beta = segment(content: "beta", newLine: 2)
     let font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
 
-    view.configure(segment: alpha, chunkID: ChunkID(raw: 1), rowHeight: 20, font: font, mode: .unified)
+    view.configure(segment: alpha, chunkID: ChunkID.allocate(), rowHeight: 20, font: font, mode: .unified)
     #expect(view.firstRowText == "alpha")
 
     view.prepareForReuse()
@@ -122,9 +122,10 @@ struct ViewReuseQueueTests {
     #expect(view.configuredRowCount == 0)
 
     // Reconfigure onto a different leaf: only the new content, never a ghost.
-    view.configure(segment: beta, chunkID: ChunkID(raw: 2), rowHeight: 20, font: font, mode: .unified)
+    let betaID = ChunkID.allocate()
+    view.configure(segment: beta, chunkID: betaID, rowHeight: 20, font: font, mode: .unified)
     #expect(view.firstRowText == "beta")
-    #expect(view.configuredChunkID == ChunkID(raw: 2))
+    #expect(view.configuredChunkID == betaID)
   }
 
   private func segment(content: String, newLine: Int) -> LineSegment {

@@ -84,7 +84,7 @@ struct DiffSyntaxRenderTests {
     let view = LineRowView()
     view.configure(
       segment: contextSegment("let x = 1"),
-      chunkID: ChunkID(raw: 1),
+      chunkID: ChunkID.allocate(),
       context: context(newStyleRuns: [1: [StyleRun(range: 0..<3, capture: "keyword")]])
     )
     let ctLine = try #require(view.firstRowCTLines?.first, "the row must produce a CTLine")
@@ -105,7 +105,7 @@ struct DiffSyntaxRenderTests {
 
   @Test func plainLineWithoutStyleRunsHasUniformForeground() throws {
     let view = LineRowView()
-    view.configure(segment: contextSegment("let x = 1"), chunkID: ChunkID(raw: 1), context: context())
+    view.configure(segment: contextSegment("let x = 1"), chunkID: ChunkID.allocate(), context: context())
     let ctLine = try #require(view.firstRowCTLines?.first)
     #expect(
       sameColor(foreground(ctLine, at: 1), foreground(ctLine, at: 6)),
@@ -119,7 +119,7 @@ struct DiffSyntaxRenderTests {
     let view = LineRowView()
     view.configure(
       segment: contextSegment("func f()"),
-      chunkID: ChunkID(raw: 1),
+      chunkID: ChunkID.allocate(),
       context: context(newStyleRuns: [
         1: [StyleRun(range: 0..<4, capture: "keyword"), StyleRun(range: 5..<6, capture: "function")]
       ])

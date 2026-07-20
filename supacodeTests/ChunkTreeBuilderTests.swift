@@ -278,6 +278,16 @@ struct ChunkTreeBuilderTests {
     let first = ChunkTreeBuilder.build(file: DiffFixture.file(), hunks: [hunk], mode: .unified)
     let second = ChunkTreeBuilder.build(file: DiffFixture.file(), hunks: [hunk], mode: .unified)
     #expect(first.inorderChunks() == second.inorderChunks())
+
+    // Structural equality is about CONTENT. The node ids of two builds share
+    // nothing: a `ChunkID` addresses a node in one tree and is meaningless against
+    // any other, which is exactly why nothing that outlives a re-projection may key
+    // off one. Pinned so a return to per-tree numbering (where a stale id silently
+    // addressed a live node) fails here.
+    let firstIDs = Set(first.inorderNodes().map(\.id))
+    let secondIDs = Set(second.inorderNodes().map(\.id))
+    #expect(firstIDs.isDisjoint(with: secondIDs))
+    #expect(second.inorderNodes().allSatisfy { first.nodesByID[$0.id] == nil })
   }
 
   @Test func commentThreadInsertedAfterAnchorRow() {

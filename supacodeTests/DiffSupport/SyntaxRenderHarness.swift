@@ -78,7 +78,7 @@ enum SyntaxRenderHarness {
     let view = LineRowView()
     view.configure(
       segment: contextSegment(content, lineNumber: lineNumber),
-      chunkID: ChunkID(raw: UInt64(lineNumber)),
+      chunkID: ChunkID.allocate(),
       context: context(new: newRuns))
     guard let ctLine = view.firstRowCTLines?.first else { return nil }
     return CTRunColorProbe.foreground(ctLine, at: offset)

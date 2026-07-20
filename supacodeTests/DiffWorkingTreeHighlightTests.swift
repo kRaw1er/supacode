@@ -49,7 +49,7 @@ struct DiffWorkingTreeHighlightTests {
     let view = LineRowView()
     view.configure(
       segment: segment,
-      chunkID: ChunkID(raw: UInt64(newLineNumber)),
+      chunkID: ChunkID.allocate(),
       context: LineRowRenderContext(
         metrics: .resolve(), rowHeight: ChunkLayoutMetrics.production.lineHeight, mode: .unified, width: 4000,
         cache: CTLineCache(), palette: .shared, styleGeneration: 0, syntaxProvider: .live(engine), oldBlobOID: nil,

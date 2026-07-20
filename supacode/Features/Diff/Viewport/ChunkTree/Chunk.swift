@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 // MARK: - Stable identities
 
@@ -16,12 +17,35 @@ nonisolated struct HunkID: Hashable, Sendable {
   var index: Int
 }
 
-/// Per-node identity the recycled view is keyed by (`hit.id`). Allocated
-/// monotonically by the tree in document order, so two deterministic builds of
-/// the same inputs mint the same id sequence (structural equality holds). NOT
-/// `WidgetKey` — `WidgetKey` resolves the MODEL, `ChunkID` keys the view.
+/// Per-node identity, unique for the lifetime of the process. NOT `WidgetKey` —
+/// `WidgetKey` resolves the MODEL, `ChunkID` addresses a NODE.
+///
+/// **A `ChunkID` must never outlive the tree that minted it.** It answers "which
+/// node", not "which content", so it is meaningless against any other tree —
+/// anything that has to survive a re-projection (a scroll anchor, a measured
+/// height, a gap's revealed nodes) keys off a domain identity instead:
+/// `WidgetKey`, `HunkID`, `GapKey`, or a `(lineNumber, side)` pair.
+///
+/// Ids are allocated from ONE process-wide counter rather than per-tree, so that
+/// rule is enforced by construction: an id from a stale tree can never collide
+/// with a live node, it simply misses. (Per-tree numbering made every stale id
+/// address an unrelated node, which is how re-applying an expansion after a
+/// rebuild silently deleted whatever had inherited those ids.) There is
+/// deliberately no public initializer — `allocate()` is the only source, so an id
+/// can never be conjured to match something.
 nonisolated struct ChunkID: Hashable, Sendable {
-  var raw: UInt64
+  let raw: UInt64
+
+  private init(raw: UInt64) {
+    self.raw = raw
+  }
+
+  private static let counter = Atomic<UInt64>(0)
+
+  /// Mint a fresh id. Monotonic and never reused within the process.
+  static func allocate() -> ChunkID {
+    ChunkID(raw: counter.wrappingAdd(1, ordering: .relaxed).newValue)
+  }
 }
 
 // MARK: - Chunk (C3 descriptor #2 — render / chunk kind)

@@ -82,10 +82,6 @@ final class ChunkTree {
     return nodesByID[cid]
   }
 
-  /// Monotonic id allocator — document order on a from-scratch build, so two
-  /// deterministic builds mint the same id sequence.
-  var nextRaw: UInt64 = 0
-
   /// Instrumentation the fixtures assert on (seek pressure, build calls).
   var diagnostics = Diagnostics()
 

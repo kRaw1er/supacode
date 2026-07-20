@@ -3,10 +3,7 @@ import Foundation
 // MARK: - Node construction & registration
 
 extension ChunkTree {
-  func allocID() -> ChunkID {
-    defer { nextRaw += 1 }
-    return ChunkID(raw: nextRaw)
-  }
+  func allocID() -> ChunkID { ChunkID.allocate() }
 
   func makeNode(for chunk: Chunk, heightDeltas: [Int: LineHeightDelta]?) -> ChunkNode {
     let summary = leafSummary(for: chunk, heightDeltas: heightDeltas)

@@ -31,7 +31,7 @@ struct DiffSyntaxRenderMatrixTests {
     let view = LineRowView()
     view.configure(
       segment: segment,
-      chunkID: ChunkID(raw: 1),
+      chunkID: ChunkID.allocate(),
       context: LineRowRenderContext(
         metrics: .resolve(), rowHeight: ChunkLayoutMetrics.production.lineHeight, mode: .unified, width: width,
         cache: CTLineCache(), palette: .shared, styleGeneration: 0,
@@ -60,7 +60,7 @@ struct DiffSyntaxRenderMatrixTests {
     // Runs are provided ONLY on the old side; a context row reads the NEW side.
     let view = LineRowView()
     view.configure(
-      segment: context, chunkID: ChunkID(raw: 1),
+      segment: context, chunkID: ChunkID.allocate(),
       context: LineRowRenderContext(
         metrics: .resolve(), rowHeight: ChunkLayoutMetrics.production.lineHeight, mode: .unified, width: 4000,
         cache: CTLineCache(), palette: .shared, styleGeneration: 0,
@@ -82,7 +82,7 @@ struct DiffSyntaxRenderMatrixTests {
     // Narrow width forces a wrap into multiple sub-lines.
     let view = LineRowView()
     view.configure(
-      segment: segment, chunkID: ChunkID(raw: 1),
+      segment: segment, chunkID: ChunkID.allocate(),
       context: LineRowRenderContext(
         metrics: .resolve(), rowHeight: ChunkLayoutMetrics.production.lineHeight, mode: .unified, width: 240,
         cache: CTLineCache(), palette: .shared, styleGeneration: 0,

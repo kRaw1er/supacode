@@ -70,7 +70,7 @@ struct DiffSyntaxPipelineRenderTests {
     let view = LineRowView()
     view.configure(
       segment: contextSegment(content, newLineNumber: newLineNumber),
-      chunkID: ChunkID(raw: UInt64(newLineNumber)),
+      chunkID: ChunkID.allocate(),
       context: context(engine: engine, input: input))
     let ctLine = try #require(view.firstRowCTLines?.first, "row \(newLineNumber) must produce a CTLine")
     let token = try #require(

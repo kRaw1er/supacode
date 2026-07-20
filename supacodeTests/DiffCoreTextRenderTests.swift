@@ -53,14 +53,15 @@ struct DiffCoreTextRenderTests {
   @Test func lineRowViewReMeasuresOnWidthChange() {
     let view = LineRowView()
     let segment = longLineSegment(String(repeating: "abcd ", count: 120))  // 600 chars
+    let chunkID = ChunkID.allocate()  // the SAME leaf, re-configured at a new width
 
-    view.configure(segment: segment, chunkID: ChunkID(raw: 1), context: context(width: 300))
+    view.configure(segment: segment, chunkID: chunkID, context: context(width: 300))
     let narrow = view.measuredRowHeights
     #expect(narrow.count == 1)
     #expect(narrow[0] > ChunkLayoutMetrics.production.lineHeight)  // wrapped
     #expect(narrow[0].truncatingRemainder(dividingBy: ChunkLayoutMetrics.production.lineHeight) == 0)  // whole rows
 
-    view.configure(segment: segment, chunkID: ChunkID(raw: 1), context: context(width: 2000))
+    view.configure(segment: segment, chunkID: chunkID, context: context(width: 2000))
     let wide = view.measuredRowHeights
     #expect(wide[0] < narrow[0])  // wider ⇒ fewer sub-lines ⇒ shorter, no jump
     #expect(view.totalMeasuredHeight == wide[0])
@@ -92,12 +93,12 @@ struct DiffCoreTextRenderTests {
     // 1. Structure: the change leaf lays out 2 rows, the context leaf 1, all short
     //    (unwrapped) ⇒ exactly one row height each.
     let changeView = LineRowView()
-    changeView.configure(segment: change, chunkID: ChunkID(raw: 1), context: context(width: 800))
+    changeView.configure(segment: change, chunkID: ChunkID.allocate(), context: context(width: 800))
     #expect(changeView.measuredRowHeights == [20, 20])
     #expect(changeView.firstRowText == "let x = 1")
 
     let contextView = LineRowView()
-    contextView.configure(segment: contextSegment, chunkID: ChunkID(raw: 2), context: context(width: 800))
+    contextView.configure(segment: contextSegment, chunkID: ChunkID.allocate(), context: context(width: 800))
     #expect(contextView.measuredRowHeights == [20])
     #expect(contextView.firstRowText == "return x")
 
@@ -187,7 +188,8 @@ struct DiffCoreTextRenderTests {
 
     let gen0 = DiffPalette.shared.styleGeneration
     let view = LineRowView()  // the recyclable shell reused across palettes
-    view.configure(segment: segment, chunkID: ChunkID(raw: 1), context: recycleContext(styleGeneration: gen0))
+    let chunkID = ChunkID.allocate()  // one leaf, re-configured across palette generations
+    view.configure(segment: segment, chunkID: chunkID, context: recycleContext(styleGeneration: gen0))
     #expect(cache.count == 1)  // typeset one wrapped line under the current generation
 
     // A palette / theme swap: bump the generation and drop the shared glyph cache
@@ -200,14 +202,14 @@ struct DiffCoreTextRenderTests {
 
     // Recycle the SAME shell under the new generation → it re-typesets fresh (a
     // cache miss, one new entry), never a stale hit; the row shows re-rendered text.
-    view.configure(segment: segment, chunkID: ChunkID(raw: 1), context: recycleContext(styleGeneration: gen1))
+    view.configure(segment: segment, chunkID: chunkID, context: recycleContext(styleGeneration: gen1))
     #expect(cache.count == 1)
     #expect(view.firstRowText == "let recycled = true")
 
     // The generation is part of the cache key, so a pre-swap render can never serve
     // post-swap glyphs: re-rendering at the OLD generation mints a DISTINCT entry.
     let stale = LineRowView()
-    stale.configure(segment: segment, chunkID: ChunkID(raw: 2), context: recycleContext(styleGeneration: gen0))
+    stale.configure(segment: segment, chunkID: ChunkID.allocate(), context: recycleContext(styleGeneration: gen0))
     #expect(cache.count == 2)  // gen0 and gen1 occupy separate cache namespaces
   }
 
