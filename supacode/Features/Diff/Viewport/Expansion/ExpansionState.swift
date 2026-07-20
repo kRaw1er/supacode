@@ -23,6 +23,25 @@ nonisolated enum ExpansionState: Equatable, Sendable {
   static let collapsedContextThreshold = 1
 }
 
+/// A file's live gap reveal: which regions are open, and the blob lines already
+/// sliced for them. Travels together because neither half means anything alone —
+/// a region without its lines renders nothing, lines without a region belong
+/// nowhere — and because a projection needs BOTH to build the document the user is
+/// actually looking at.
+nonisolated struct GapReveal: Equatable, Sendable {
+  var state: ExpansionState
+  /// Revealed context lines per gap index, sorted by new-side line number.
+  var lines: [Int: [DiffLine]]
+
+  init(state: ExpansionState = .collapsed, lines: [Int: [DiffLine]] = [:]) {
+    self.state = state
+    self.lines = lines
+  }
+
+  /// Everything collapsed — the shape of a file nobody has expanded yet.
+  static let none = GapReveal()
+}
+
 /// One collapsed gap's revealed slice — pierre `HunkExpansionRegion { fromStart;
 /// fromEnd }` (types.ts:698). `fromStart` = lines revealed from the TOP of the
 /// gap (downward from the hunk above); `fromEnd` = from the BOTTOM (upward toward

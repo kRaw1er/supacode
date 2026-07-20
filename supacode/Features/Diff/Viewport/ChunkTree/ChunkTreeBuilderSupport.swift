@@ -106,6 +106,70 @@ extension ChunkTreeBuilder {
   }
 }
 
+// MARK: - Gap construction (shared by the projection and the live splice)
+
+extension ChunkTreeBuilder {
+  /// The ordered chunks for a gap's revealed region. Fully revealed
+  /// (`collapsedLines == 0`) ⇒ one `.contextExpanded` segment, no expander (the
+  /// eager-slice cap means a whole-file expand's remaining lines window in on
+  /// scroll, a separate mechanism). Partial ⇒ `head + shrunken expander + tail`.
+  /// `revealedLines` is guaranteed non-empty by the caller.
+  static func gapChunks(
+    gap: GapKey,
+    region: ExpansionState.ResolvedRegion,
+    revealedLines: [DiffLine],
+    metrics: ChunkLayoutMetrics
+  ) -> [Chunk] {
+    if region.collapsedLines <= 0 {
+      return gapSegmentChunks(revealedLines, gap: gap)
+    }
+    let headCount = min(max(region.fromStart, 0), revealedLines.count)
+    let tailCount = min(max(region.fromEnd, 0), revealedLines.count - headCount)
+    let head = Array(revealedLines.prefix(headCount))
+    let tail = tailCount > 0 ? Array(revealedLines.suffix(tailCount)) : []
+    var chunks: [Chunk] = []
+    chunks += gapSegmentChunks(head, gap: gap)
+    chunks.append(shrunkenExpander(gap: gap, hidden: region.collapsedLines, head: head, tail: tail, metrics: metrics))
+    chunks += gapSegmentChunks(tail, gap: gap)
+    return chunks
+  }
+
+  /// Split a revealed run into `≤ maxLeafSpan` `.contextExpanded` leaves over a
+  /// shared COW backing (mirrors `ChunkTreeBuilder.appendSegments`).
+  static func gapSegmentChunks(_ lines: [DiffLine], gap: GapKey) -> [Chunk] {
+    guard !lines.isEmpty else { return [] }
+    let span = ChunkLayoutMetrics.maxLeafSpan
+    var chunks: [Chunk] = []
+    var low = 0
+    while low < lines.count {
+      let high = min(low + span, lines.count)
+      chunks.append(
+        .lineSegment(
+          LineSegment(region: .gap(gap), lines: lines, window: low..<high, classification: .contextExpanded)))
+      low = high
+    }
+    return chunks
+  }
+
+  /// The still-hidden expander leaf for a partial reveal — same `WidgetKey` (so the
+  /// gap identity survives) with the shrunken `hidden` count and a best-effort range
+  /// derived from the revealed edges.
+  private static func shrunkenExpander(
+    gap: GapKey, hidden: Int, head: [DiffLine], tail: [DiffLine], metrics: ChunkLayoutMetrics
+  ) -> Chunk {
+    let anchor = head.last?.newLineNumber ?? tail.first?.newLineNumber ?? 0
+    let lower = (head.last?.newLineNumber).map { $0 + 1 } ?? anchor
+    let upper = tail.first?.newLineNumber ?? (lower + hidden)
+    return .widget(
+      Widget(
+        key: .expander(gap),
+        estimatedHeight: metrics.expanderHeight,
+        payload: .expander(anchor: anchor, range: lower..<max(upper, lower), hidden: hidden)
+      )
+    )
+  }
+}
+
 // MARK: - Comment post-pass (splits after the anchor row, S/Phase-6)
 
 extension ChunkTreeBuilder {

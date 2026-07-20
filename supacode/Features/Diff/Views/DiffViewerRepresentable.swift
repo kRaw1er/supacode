@@ -100,7 +100,6 @@ struct DiffViewerRepresentable: NSViewRepresentable {
       tree: tree, mode: mode, fileID: file.id,
       blobs: .init(old: oldBlob, new: newBlob, disabled: highlightingDisabled), scrollPreserving: false)
     coordinator.rebuildKeyboardNav()
-    coordinator.syncExpansion(expansion: expansion, revealed: revealed, hunks: hunks, file: file, rebuilt: true)
     coordinator.keyboardNav?.revealFirstChange()
     coordinator.lastSignature = signature
     coordinator.lastMode = mode
@@ -137,30 +136,20 @@ struct DiffViewerRepresentable: NSViewRepresentable {
       sigChanged || (generationChanged && !expansionChanged) || (modeChanged && !comments.isEmpty)
 
     if contentChanged {
-      // Content changed (re-diff / comment insert-remove / composer open-close):
-      // re-project the tree, re-apply the live expansion state (the fresh tree is
-      // COLLAPSED — expansions live only in the tree that was spliced), rebuild the
-      // keyboard nav, and only THEN re-land the scroll anchor.
-      //
-      // The anchor is captured up front and restored last on purpose. Restoring inside
-      // `applyDocument` re-lands it against the collapsed document: it is shorter, so
-      // the clamp drags the viewport up, and a line that was inside a revealed gap
-      // isn't in the document at all yet, so the anchor falls through to "nearest
-      // surviving" and snaps to the top of the expanded hunk. Re-applying the
-      // expansions afterwards restored the content but not the position — which is the
-      // jump-to-top (and the short document behind the clipped tail) seen when
-      // commenting on a file with an expanded gap.
+      // Content changed (re-diff / comment insert-remove / composer open-close): the
+      // projection is built from the LIVE reveal, so it comes out already expanded —
+      // the same document the user is looking at, in one pass. There is no
+      // collapsed intermediate to re-land the anchor against and no catch-up splice
+      // afterwards, which is what used to throw the viewport to the top of an
+      // expanded hunk and leave the tail clipped behind a too-short document.
       //
       // Blobs + tree ATOMICALLY (see `applyDocument`): applying the tree first and the blobs
       // second paints one frame of the new content in the PREVIOUS file's colors.
-      let anchor = controller.captureScrollAnchor()
       controller.applyDocument(
         tree: buildTree(), mode: mode, fileID: file.id,
-        blobs: .init(old: oldBlob, new: newBlob, disabled: highlightingDisabled), scrollPreserving: false)
+        blobs: .init(old: oldBlob, new: newBlob, disabled: highlightingDisabled), scrollPreserving: true)
       coordinator.lastHighlightBlobKey = highlightBlobKey
       coordinator.rebuildKeyboardNav()
-      coordinator.syncExpansion(expansion: expansion, revealed: revealed, hunks: hunks, file: file, rebuilt: true)
-      controller.restoreScrollAnchor(anchor)
     } else {
       if modeChanged {
         // Only the unified↔split preference flipped: O(log #hunks) re-seek, no rebuild.
@@ -169,8 +158,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
       }
       if expansionChanged || revealedChanged {
         // An expand / collapse without a re-diff: splice ONLY the changed gaps.
-        coordinator.syncExpansion(
-          expansion: expansion, revealed: revealed, hunks: hunks, file: file, rebuilt: false)
+        coordinator.syncExpansion(expansion: expansion, revealed: revealed, hunks: hunks, file: file)
       }
       // Pull-model: re-warm the span cache when the blobs / size gate change without a
       // full re-project (e.g. the size gate resolving after the first batch).
@@ -206,10 +194,13 @@ struct DiffViewerRepresentable: NSViewRepresentable {
   // MARK: - Projection
 
   private func buildTree() -> ChunkTree {
-    // The pure rebuild renders at the loaded context with collapsed-gap expanders;
-    // the live `expansion` / `revealed` is re-applied incrementally on top via
-    // `Coordinator.syncExpansion` (O(log n) splice), never baked into a full rebuild.
-    ChunkTreeBuilder.build(file: file, hunks: hunks, mode: mode, comments: comments)
+    // The projection takes the live reveal as an INPUT, so a rebuild lands already
+    // expanded. A gap whose slice hasn't arrived yet stays an expander and is spliced
+    // in by `syncExpansion` when `.gapSliceLoaded` brings it — the incremental path is
+    // still O(log n) and still the only one used for an expand that isn't a rebuild.
+    ChunkTreeBuilder.build(
+      file: file, hunks: hunks, mode: mode, reveal: GapReveal(state: expansion, lines: revealed),
+      comments: comments)
   }
 
   private func makeResolver(_ coordinator: Coordinator) -> DiffWidgetResolver {
@@ -416,15 +407,14 @@ struct DiffViewerRepresentable: NSViewRepresentable {
 
     // MARK: - Incremental expansion (F7 — O(log n) splice, NOT a rebuild)
 
-    /// Reconcile the live `expansion` / `revealed` against the tree via per-gap
-    /// `applyExpansion` / `collapseExpansion`. `rebuilt` ⇒ the tree was just re-projected
-    /// collapsed, so diff against a collapsed baseline (re-apply every expanded gap);
-    /// otherwise diff against the last-applied state (splice only the changed gaps).
+    /// Splice the gaps whose reveal changed WITHOUT a re-projection — an expander tap,
+    /// or the slice arriving for one. A re-projection needs no counterpart: the builder
+    /// takes the reveal as an input, so a fresh tree is already in its revealed shape.
     func syncExpansion(
-      expansion: ExpansionState, revealed: [Int: [DiffLine]], hunks: [DiffHunk], file: FileChange, rebuilt: Bool
+      expansion: ExpansionState, revealed: [Int: [DiffLine]], hunks: [DiffHunk], file: FileChange
     ) {
-      let from = rebuilt ? .collapsed : lastExpansion
-      let baseCounts = rebuilt ? [:] : lastRevealedCounts
+      let from = lastExpansion
+      let baseCounts = lastRevealedCounts
       // Reuse the reducer's exact gap geometry (pure over `hunks`).
       let geometry = DiffDocument(file: file, hunks: hunks)
       for gap in 0...hunks.count {

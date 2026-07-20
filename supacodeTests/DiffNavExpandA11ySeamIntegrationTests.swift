@@ -217,7 +217,7 @@ struct DiffNavExpandA11ySeamIntegrationTests {
 
     // Round-trip the reducer's expansion + revealed back through the coordinator.
     coord.syncExpansion(
-      expansion: expandedExpansion, revealed: revealed, hunks: hunks, file: file, rebuilt: false)
+      expansion: expandedExpansion, revealed: revealed, hunks: hunks, file: file)
     #expect(renderedNewNumbers(coord.controller.tree).contains(20))  // gap interior spliced in
     #expect(coord.controller.tree === treeInstance)  // SAME instance — an O(log n) splice, not a rebuild
     #expect(coord.controller.tree.widgetNode(for: .expander(GapKey(fileID: "a.swift", hunkIndex: 1))) == nil)  // expander consumed
@@ -236,7 +236,7 @@ struct DiffNavExpandA11ySeamIntegrationTests {
 
     // Round-trip the collapse → the expander is restored and the gap re-hidden, same instance.
     coord.syncExpansion(
-      expansion: .collapsed, revealed: [:], hunks: hunks, file: file, rebuilt: false)
+      expansion: .collapsed, revealed: [:], hunks: hunks, file: file)
     #expect(!renderedNewNumbers(coord.controller.tree).contains(20))
     #expect(coord.controller.tree.widgetNode(for: .expander(GapKey(fileID: "a.swift", hunkIndex: 1))) != nil)
     #expect(coord.controller.tree === treeInstance)
@@ -284,7 +284,7 @@ struct DiffNavExpandA11ySeamIntegrationTests {
 
     // Round-trip the reducer's expansion + revealed back through the coordinator: the
     // gap interior (new line 20) now materializes in the viewport.
-    coord.syncExpansion(expansion: .full, revealed: revealed, hunks: hunks, file: file, rebuilt: false)
+    coord.syncExpansion(expansion: .full, revealed: revealed, hunks: hunks, file: file)
     #expect(renderedNewNumbers(coord.controller.tree).contains(20))
   }
 

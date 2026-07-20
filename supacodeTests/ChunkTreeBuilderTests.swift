@@ -356,6 +356,61 @@ struct ChunkTreeBuilderTests {
     ).new
   }
 
+  // MARK: - The projection is built from the LIVE reveal
+
+  /// A rebuild must land in the shape the user is looking at. The projection used to
+  /// come out fully collapsed and have the expansions spliced back on afterwards,
+  /// which meant every rebuild passed through a document that was shorter than the
+  /// real one and missing the revealed lines entirely — and anything computed against
+  /// that intermediate (a comment's anchor, the scroll anchor, the document height)
+  /// was computed against a document that never existed on screen.
+  @Test func projectionBuildsGapsInTheirRevealedShape() {
+    let file = DiffFixture.file()
+    let hunks = [
+      DiffFixture.hunk([DiffFixture.line(.addition, new: 1, "a")], oldStart: 1, newStart: 1),
+      DiffFixture.hunk([DiffFixture.line(.addition, new: 20, "z")], oldStart: 20, newStart: 20),
+    ]
+    let revealed = (2..<20).map {
+      DiffLine(origin: .context, oldLineNumber: $0, newLineNumber: $0, content: "gap\($0)", noNewlineAtEof: false)
+    }
+
+    let collapsed = ChunkTreeBuilder.build(file: file, hunks: hunks, mode: .unified, options: headerless)
+    #expect(collapsed.widgetNode(for: .expander(GapKey(fileID: file.id, hunkIndex: 1))) != nil)
+    #expect(collapsed.locate(line: 10, side: .new, mode: .unified) == nil)  // gap interior hidden
+
+    let expanded = ChunkTreeBuilder.build(
+      file: file, hunks: hunks, mode: .unified,
+      reveal: GapReveal(state: .full, lines: [1: revealed]), options: headerless)
+    #expect(expanded.widgetNode(for: .expander(GapKey(fileID: file.id, hunkIndex: 1))) == nil)  // fully revealed
+    #expect(expanded.locate(line: 10, side: .new, mode: .unified) != nil)  // the gap line IS in the document
+    #expect(expanded.totalHeight(.unified) > collapsed.totalHeight(.unified))
+  }
+
+  /// ...and a comment on a revealed gap line therefore anchors to that line, instead
+  /// of falling through to the "anchor not found" tail of the document.
+  @Test func commentOnARevealedGapLineAnchorsToIt() {
+    let file = DiffFixture.file()
+    let hunks = [
+      DiffFixture.hunk([DiffFixture.line(.addition, new: 1, "a")], oldStart: 1, newStart: 1),
+      DiffFixture.hunk([DiffFixture.line(.addition, new: 20, "z")], oldStart: 20, newStart: 20),
+    ]
+    let revealed = (2..<20).map {
+      DiffLine(origin: .context, oldLineNumber: $0, newLineNumber: $0, content: "gap\($0)", noNewlineAtEof: false)
+    }
+    let comment = ReviewComment(
+      filePath: "a.swift", side: .new, startLine: 10, endLine: 10,
+      anchorSnippet: "gap10", contextBefore: "", body: "note")
+
+    let tree = ChunkTreeBuilder.build(
+      file: file, hunks: hunks, mode: .unified, reveal: GapReveal(state: .full, lines: [1: revealed]),
+      options: headerless, comments: [comment])
+
+    let widgetRow = Self.rowIndex(ofWidget: .commentThread(anchorID: comment.id), in: tree, mode: .unified)
+    #expect(widgetRow != nil)
+    #expect(Self.newNumber(atRow: widgetRow! - 1, in: tree, mode: .unified) == 10)  // directly under its line
+    #expect(widgetRow! < tree.rowCount(.unified) - 1)  // NOT parked at the end of the document
+  }
+
   // MARK: - Count oracle & deep fixture
 
   @Test func verifyHunkLineValuesOracle() {

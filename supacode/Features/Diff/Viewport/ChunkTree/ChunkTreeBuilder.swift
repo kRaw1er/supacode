@@ -63,12 +63,14 @@ enum ChunkTreeBuilder {
     hunks: [DiffHunk],
     mode: DiffViewMode,
     expanded: Set<Int> = [],
+    reveal: GapReveal = .none,
     options: Options = Options(),
     comments: [ReviewComment] = []
   ) -> ChunkTree {
     let tree = ChunkTree(metrics: options.metrics)
     tree.diagnostics.buildRowsCallCount += 1
-    appendFile(into: tree, file: file, hunks: hunks, expanded: expanded, options: options, comments: comments)
+    appendFile(
+      into: tree, file: file, hunks: hunks, expanded: expanded, reveal: reveal, options: options, comments: comments)
     insertComments(into: tree, comments: comments, mode: mode, options: options)
     return tree
   }
@@ -82,11 +84,14 @@ enum ChunkTreeBuilder {
     file: FileChange,
     hunks: [DiffHunk],
     expanded: Set<Int>,
+    reveal: GapReveal = .none,
     options: Options = Options(),
     comments: [ReviewComment] = []
   ) {
     var after: ChunkID? = tree.lastNodeID
-    for chunk in classify(file: file, hunks: hunks, expanded: expanded, options: options, comments: comments) {
+    for chunk in classify(
+      file: file, hunks: hunks, expanded: expanded, reveal: reveal, options: options, comments: comments)
+    {
       after = tree.insert(chunk, after: after)
     }
   }
@@ -96,6 +101,7 @@ enum ChunkTreeBuilder {
     file: FileChange,
     hunks: [DiffHunk],
     expanded: Set<Int>,
+    reveal: GapReveal = .none,
     options: Options = Options(),
     comments: [ReviewComment] = []
   ) -> [Chunk] {
@@ -127,7 +133,8 @@ enum ChunkTreeBuilder {
       appendHunks(
         &chunks, hunks: hunks,
         context: BuildContext(
-          fileID: fileID, expanded: expanded, options: options, commented: CommentedLines.from(comments)))
+          fileID: fileID, expanded: expanded, reveal: reveal, hunkCount: hunks.count, options: options,
+          commented: CommentedLines.from(comments)))
       return chunks
     }
     if !hunks.contains(where: { !$0.lines.isEmpty }) {
@@ -137,7 +144,8 @@ enum ChunkTreeBuilder {
     appendHunks(
       &chunks, hunks: hunks,
       context: BuildContext(
-        fileID: fileID, expanded: expanded, options: options, commented: CommentedLines.from(comments)))
+        fileID: fileID, expanded: expanded, reveal: reveal, hunkCount: hunks.count, options: options,
+        commented: CommentedLines.from(comments)))
     return chunks
   }
 
@@ -146,6 +154,11 @@ enum ChunkTreeBuilder {
   private struct BuildContext {
     let fileID: FileID
     let expanded: Set<Int>
+    /// The live gap reveal. A projection built WITHOUT it renders a document the user
+    /// is not looking at — every revealed gap folded back into an expander — which is
+    /// why it has to be an input here rather than something spliced in afterwards.
+    let reveal: GapReveal
+    let hunkCount: Int
     let options: Options
     let commented: CommentedLines
   }
@@ -304,9 +317,22 @@ enum ChunkTreeBuilder {
     context: BuildContext
   ) {
     guard !range.isEmpty, !context.expanded.contains(anchor) else { return }
-    chunks.append(
-      expanderWidget(
-        fileID: context.fileID, hunkIndex: hunkIndex, anchor: anchor, range: range, hidden: range.count,
-        context.options))
+    let gap = GapKey(fileID: context.fileID, hunkIndex: hunkIndex)
+    let revealedLines = context.reveal.lines[hunkIndex] ?? []
+    let region = context.reveal.state.resolve(
+      gap: hunkIndex, rangeSize: range.count, isTrailing: hunkIndex == context.hunkCount)
+    // Revealed ⇒ project the gap in its revealed shape (head / shrunken expander /
+    // tail) through the SAME constructor the live splice uses, so a projection and a
+    // splice can never disagree about what a revealed gap looks like. Not revealed —
+    // or the slice hasn't arrived yet — leaves the full expander.
+    let wantsReveal = region.renderAll || region.fromStart > 0 || region.fromEnd > 0
+    guard wantsReveal, !revealedLines.isEmpty else {
+      chunks.append(
+        expanderWidget(
+          fileID: context.fileID, hunkIndex: hunkIndex, anchor: anchor, range: range, hidden: range.count,
+          context.options))
+      return
+    }
+    chunks += gapChunks(gap: gap, region: region, revealedLines: revealedLines, metrics: context.options.metrics)
   }
 }

@@ -725,13 +725,16 @@ struct DiffReviewFeature {
         Self.applyHighlightAndRenderGates(
           &document, key: key,
           loaded: LoadedFileDiff(file: document.file, hunks: hunks, oldBlob: old, newBlob: new))
+        // Re-anchor this document's comments (5.1); orphans are marked, never
+        // dropped. Runs BEFORE the revealed slices are dropped, and over the gap
+        // lines as well as the hunks: a comment on a line revealed by expanding a
+        // gap is anchored to a line the diff itself never carries, so matching it
+        // against the hunks alone finds nothing and flags a perfectly healthy
+        // comment as orphaned.
+        Self.relocateComments(&state, key: key, lines: Self.anchorableLines(document))
         // A re-diff re-materializes revealed slices against the fresh geometry; the
         // declarative `expansion` (gap-index keyed) persists across the re-diff.
         document.revealed.removeAll()
-        // Re-anchor this document's comments against the fresh lines (5.1);
-        // orphans are marked, never dropped. The tree-backed viewport projects
-        // `hunks` + `comments` directly — no flat row rebuild (Phase 13 swap).
-        Self.relocateComments(&state, key: key, lines: hunks.flatMap(\.lines))
         state.openDiffs[key] = document
         return .none
 
@@ -770,10 +773,13 @@ struct DiffReviewFeature {
         Self.applyHighlightAndRenderGates(
           &document, key: key,
           loaded: LoadedFileDiff(file: batch.file, hunks: batch.hunks, oldBlob: oldBlob, newBlob: newBlob))
+        // Same as `.diffLoaded`: re-anchor over hunks AND revealed gap lines before
+        // the slices are dropped, so a comment on a revealed line isn't orphaned for
+        // being outside the diff.
+        Self.relocateComments(&state, key: key, lines: Self.anchorableLines(document))
         // A re-diff re-materializes revealed slices; the declarative `expansion`
         // (gap-index keyed) survives the line shift (Phase 7).
         document.revealed.removeAll()
-        Self.relocateComments(&state, key: key, lines: batch.hunks.flatMap(\.lines))
         state.openDiffs[key] = document
         return feed
 
@@ -1209,6 +1215,17 @@ struct DiffReviewFeature {
   /// Re-anchors every comment for `key` (matched on both `filePath` and
   /// `source`) against the freshly re-diffed `lines` (5.1). A comment whose
   /// lines vanished is marked `orphaned`, never removed.
+  /// Every line a comment in this document could be anchored to, in document order:
+  /// the diff's own hunk lines plus the gap lines already revealed. A comment can sit
+  /// on either — the gutter offers the same affordance on a revealed context line —
+  /// so both have to be searched before concluding a comment's anchor is gone.
+  private static func anchorableLines(_ document: DiffDocument) -> [DiffLine] {
+    let hunkLines = document.hunks.flatMap(\.lines)
+    guard !document.revealed.isEmpty else { return hunkLines }
+    return (hunkLines + document.revealed.values.flatMap { $0 })
+      .sorted { ($0.newLineNumber ?? $0.oldLineNumber ?? 0) < ($1.newLineNumber ?? $1.oldLineNumber ?? 0) }
+  }
+
   private static func relocateComments(_ state: inout State, key: DiffDocumentKey, lines: [DiffLine]) {
     for comment in state.comments where comment.filePath == key.path && comment.source == key.source {
       state.comments[id: comment.id] = CommentAnchor.relocate(comment, in: lines, side: comment.side)
