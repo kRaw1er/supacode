@@ -138,16 +138,29 @@ struct DiffViewerRepresentable: NSViewRepresentable {
 
     if contentChanged {
       // Content changed (re-diff / comment insert-remove / composer open-close):
-      // re-project the tree scroll-preserving, then re-apply the live expansion state
-      // (the fresh tree is collapsed) and rebuild the keyboard nav over the new tree.
+      // re-project the tree, re-apply the live expansion state (the fresh tree is
+      // COLLAPSED — expansions live only in the tree that was spliced), rebuild the
+      // keyboard nav, and only THEN re-land the scroll anchor.
+      //
+      // The anchor is captured up front and restored last on purpose. Restoring inside
+      // `applyDocument` re-lands it against the collapsed document: it is shorter, so
+      // the clamp drags the viewport up, and a line that was inside a revealed gap
+      // isn't in the document at all yet, so the anchor falls through to "nearest
+      // surviving" and snaps to the top of the expanded hunk. Re-applying the
+      // expansions afterwards restored the content but not the position — which is the
+      // jump-to-top (and the short document behind the clipped tail) seen when
+      // commenting on a file with an expanded gap.
+      //
       // Blobs + tree ATOMICALLY (see `applyDocument`): applying the tree first and the blobs
       // second paints one frame of the new content in the PREVIOUS file's colors.
+      let anchor = controller.captureScrollAnchor()
       controller.applyDocument(
         tree: buildTree(), mode: mode, fileID: file.id,
-        blobs: .init(old: oldBlob, new: newBlob, disabled: highlightingDisabled), scrollPreserving: true)
+        blobs: .init(old: oldBlob, new: newBlob, disabled: highlightingDisabled), scrollPreserving: false)
       coordinator.lastHighlightBlobKey = highlightBlobKey
       coordinator.rebuildKeyboardNav()
       coordinator.syncExpansion(expansion: expansion, revealed: revealed, hunks: hunks, file: file, rebuilt: true)
+      controller.restoreScrollAnchor(anchor)
     } else {
       if modeChanged {
         // Only the unified↔split preference flipped: O(log #hunks) re-seek, no rebuild.

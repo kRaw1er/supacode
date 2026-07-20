@@ -739,7 +739,10 @@ final class DiffViewportController: NSObject {
   /// element), fall back to the nearest surviving line when the exact anchor
   /// collapsed, clamp, and scroll instantly (no `NSAnimationContext`).
   func restore(_ anchor: ScrollAnchor) {
-    guard let anchorY = materializedYOrigin(anchor.identity) ?? nearestSurvivingYOrigin(anchor.identity) else {
+    guard
+      let anchorY = materializedYOrigin(anchor.identity) ?? treeYOrigin(anchor.identity)
+        ?? nearestSurvivingYOrigin(anchor.identity)
+    else {
       return
     }
     let targetY = ScrollAnchor.clampedTargetY(
@@ -756,6 +759,18 @@ final class DiffViewportController: NSObject {
   /// window, or `nil` when it is not materialized (collapsed / off-window).
   private func materializedYOrigin(_ identity: ScrollAnchor.Identity) -> CGFloat? {
     windowMap[identity]
+  }
+
+  /// The anchored line's `yOrigin` read from the TREE rather than the materialized
+  /// window. The window only covers the rows the last layout pass painted, so an
+  /// anchor that moved far — a re-projection that reflows the document, after which
+  /// the visible band lands somewhere else entirely — isn't in it, and falling
+  /// straight through to "nearest surviving" would snap the viewport to whatever
+  /// happened to be painted. The line is still IN the document, so look it up.
+  /// O(n) scan, but only on the miss, and only on a document-level change.
+  private func treeYOrigin(_ identity: ScrollAnchor.Identity) -> CGFloat? {
+    guard case .line(let lineNumber, let side) = identity else { return nil }
+    return lineRect(line: lineNumber, side: side)?.minY
   }
 
   /// The nearest surviving line (`DiffTableController.nearestSurvivingIndex :496`

@@ -122,6 +122,30 @@ struct DiffWidgetHostTests {
     #expect(controller.tree.widgetNode(for: key)?.summary.height(.split) == 32)
   }
 
+  /// A re-projection hands over the COLLAPSED document — the fresh tree folds every
+  /// revealed gap back into an expander — and the expansions are spliced back in
+  /// afterwards. Re-landing the anchor must therefore happen LAST: against the
+  /// collapsed document the line isn't there yet, and settling for the nearest
+  /// painted row snaps the viewport to the top of the expanded hunk (the jump seen
+  /// when commenting on a file with an expanded gap).
+  @Test func anchorSurvivesReprojectionWithReappliedExpansion() {
+    let controller = ViewportTestSupport.controller()
+    controller.apply(tree: ViewportTestSupport.contextLeaves(Array(1...100)), mode: .unified, scrollPreserving: false)
+    controller.scroll(toY: 1000)  // line 51 pinned at the clip top
+    let anchor = controller.captureScrollAnchor()
+    #expect(anchor != nil)
+
+    // Re-project onto the collapsed document (shorter than the current scroll offset).
+    let rebuilt = ViewportTestSupport.contextLeaves(Array(1...20))
+    controller.apply(tree: rebuilt, mode: .unified, scrollPreserving: false)
+    // Then the live expansion state is re-applied, growing the document back.
+    var after = rebuilt.lastNodeID
+    for line in 21...100 { after = rebuilt.insert(WidgetTreeFixture.contextLeaf(line), after: after) }
+
+    controller.restoreScrollAnchor(anchor)
+    #expect(controller.visibleRect.minY == 1000)  // same line, same pixel
+  }
+
   // MARK: - C 6.5 — collapse toggles node height + reaggregate, anchored no-jump
   //                 (even for a widget ABOVE the fold)
 
