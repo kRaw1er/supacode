@@ -80,19 +80,48 @@ struct DiffExpansionViewportTests {
     // Fully reveal the gap (renderAll) via the viewport splice.
     let region = ExpansionState.ResolvedRegion(fromStart: 36, fromEnd: 0, collapsedLines: 0, renderAll: true)
     #expect(
-      controller.applyExpansion(gap: GapKey(hunkIndex: 1), region: region, revealedLines: Self.revealedContext(4..<40)))
+      controller.applyExpansion(
+        gap: GapKey(fileID: "a.swift", hunkIndex: 1), region: region, revealedLines: Self.revealedContext(4..<40)))
 
     // The full slice now materializes the whole gap contiguously — no skip. hunk 0
     // renders new 1…3, the revealed gap 4…39, hunk 1's addition new 40 → 1…40.
     #expect(Self.renderedNewNumbers(tree) == Array(1...40))
     #expect(tree.totalHeight(.unified) > heightBefore)  // the document grew
-    #expect(tree.widgetNode(for: .expander(GapKey(hunkIndex: 1))) == nil)  // expander removed
+    #expect(tree.widgetNode(for: .expander(GapKey(fileID: "a.swift", hunkIndex: 1))) == nil)  // expander removed
 
     // A narrow window straddling the middle of the expanded region materializes it.
     controller.scroll(toY: tree.totalHeight(.unified) / 2)
     let visible = tree.indexRange(in: controller.visibleRect, mode: .unified)
     #expect(!visible.rows.isEmpty)
     #expect(controller.totalUsedViewCount > 0)  // the viewport did NOT skip the region
+  }
+
+  /// A gap's nodes are found through the tree's own region index, so there is no
+  /// second copy of that state to keep in step — and nothing to go stale when the
+  /// tree is replaced. Pinned directly: the index tracks a splice, and a fresh tree
+  /// knows nothing about the previous one's gap.
+  @Test func gapNodesComeFromTheTreesOwnRegionIndex() {
+    let (file, hunks) = Self.twoHunkFixture()
+    let gap = GapKey(fileID: "a.swift", hunkIndex: 1)
+    let tree = ChunkTreeFixture.files([.init(file: file, hunks: hunks)])
+    let controller = ViewportTestSupport.controller()
+    controller.apply(tree: tree, mode: .unified, scrollPreserving: false)
+
+    // Collapsed: the gap is exactly its expander.
+    #expect(tree.nodes(in: .gap(gap)).count == 1)
+    #expect(tree.nodes(in: .gap(gap)).first?.chunk.widget?.key == .expander(gap))
+
+    // Revealed: the index now holds the spliced segments instead.
+    let region = ExpansionState.ResolvedRegion(fromStart: 36, fromEnd: 0, collapsedLines: 0, renderAll: true)
+    #expect(controller.applyExpansion(gap: gap, region: region, revealedLines: Self.revealedContext(4..<40)))
+    let revealed = tree.nodes(in: .gap(gap))
+    #expect(!revealed.isEmpty)
+    #expect(revealed.allSatisfy { $0.chunk.lineSegment != nil })
+
+    // A fresh tree shares none of it — the index belongs to the tree, not the gap.
+    let reprojected = ChunkTreeFixture.files([.init(file: file, hunks: hunks)])
+    #expect(reprojected.nodes(in: .gap(gap)).count == 1)  // collapsed again, its own expander
+    #expect(Set(reprojected.nodes(in: .gap(gap)).map(\.id)).isDisjoint(with: Set(revealed.map(\.id))))
   }
 
   /// Re-projecting (saving a comment re-projects) and then re-applying the live
@@ -107,7 +136,7 @@ struct DiffExpansionViewportTests {
     let (file, hunks) = Self.twoHunkFixture()
     let controller = ViewportTestSupport.controller()
     let region = ExpansionState.ResolvedRegion(fromStart: 36, fromEnd: 0, collapsedLines: 0, renderAll: true)
-    let gap = GapKey(hunkIndex: 1)
+    let gap = GapKey(fileID: "a.swift", hunkIndex: 1)
 
     controller.apply(
       tree: ChunkTreeFixture.files([.init(file: file, hunks: hunks)]), mode: .unified, scrollPreserving: false)
@@ -135,7 +164,7 @@ struct DiffExpansionViewportTests {
   @Test func commentingInsideABigRevealedGapKeepsTheScrollPosition() {
     let file = DiffFixture.file()
     let hunks = [Self.changeHunk(newStart: 1), Self.changeHunk(newStart: 145)]
-    let gap = GapKey(hunkIndex: 1)  // new lines 2…144 — a 143-line gap
+    let gap = GapKey(fileID: "a.swift", hunkIndex: 1)  // new lines 2…144 — a 143-line gap
     let revealed = Self.revealedContext(2..<145)
     let region = ExpansionState.ResolvedRegion(
       fromStart: revealed.count, fromEnd: 0, collapsedLines: 0, renderAll: true)
@@ -176,15 +205,18 @@ struct DiffExpansionViewportTests {
     // stays (shrunken) for the remaining 26 hidden lines.
     let region = ExpansionState.ResolvedRegion(fromStart: 10, fromEnd: 0, collapsedLines: 26, renderAll: false)
     #expect(
-      controller.applyExpansion(gap: GapKey(hunkIndex: 1), region: region, revealedLines: Self.revealedContext(4..<14)))
+      controller.applyExpansion(
+        gap: GapKey(fileID: "a.swift", hunkIndex: 1), region: region, revealedLines: Self.revealedContext(4..<14)))
     let rendered = Self.renderedNewNumbers(tree)
     #expect(rendered == [1, 2, 3] + Array(4...13) + [40])  // hunk0, head 4…13, hunk1
-    #expect(tree.widgetNode(for: .expander(GapKey(hunkIndex: 1))) != nil)  // still collapsed in part
+    #expect(tree.widgetNode(for: .expander(GapKey(fileID: "a.swift", hunkIndex: 1))) != nil)  // still collapsed in part
 
     // Collapse restores the full expander and re-hides the revealed lines.
-    #expect(controller.collapseExpansion(gap: GapKey(hunkIndex: 1)))
+    #expect(
+      controller.collapseExpansion(
+        gap: GapKey(fileID: "a.swift", hunkIndex: 1), hiddenLines: 36, anchor: 4, range: 4..<40))
     #expect(Self.renderedNewNumbers(tree) == [1, 2, 3, 40])
-    #expect(tree.widgetNode(for: .expander(GapKey(hunkIndex: 1))) != nil)
+    #expect(tree.widgetNode(for: .expander(GapKey(fileID: "a.swift", hunkIndex: 1))) != nil)
   }
 
   // MARK: - B §23 resolving one gap leaves other chunk identities + slices intact
@@ -198,7 +230,7 @@ struct DiffExpansionViewportTests {
     controller.apply(tree: tree, mode: .unified, scrollPreserving: false)
 
     // Snapshot the identities + slices of everything NOT belonging to gap 1.
-    let gap2Before = tree.widgetNode(for: .expander(GapKey(hunkIndex: 2)))?.id
+    let gap2Before = tree.widgetNode(for: .expander(GapKey(fileID: "a.swift", hunkIndex: 2)))?.id
     let hunk2HeaderBefore = tree.widgetNode(for: .hunkHeader(hunkID: HunkID(fileID: file.id, index: 2)))?.id
     #expect(gap2Before != nil)
     #expect(hunk2HeaderBefore != nil)
@@ -206,15 +238,16 @@ struct DiffExpansionViewportTests {
     // Resolve (fully expand) gap 1 (new lines 2…39, 38 lines).
     let region = ExpansionState.ResolvedRegion(fromStart: 38, fromEnd: 0, collapsedLines: 0, renderAll: true)
     #expect(
-      controller.applyExpansion(gap: GapKey(hunkIndex: 1), region: region, revealedLines: Self.revealedContext(2..<40)))
+      controller.applyExpansion(
+        gap: GapKey(fileID: "a.swift", hunkIndex: 1), region: region, revealedLines: Self.revealedContext(2..<40)))
 
     // Splice locality: gap 2's expander + hunk 2's header keep their EXACT node ids —
     // the O(log n) insert never re-mints or touches its siblings.
-    #expect(tree.widgetNode(for: .expander(GapKey(hunkIndex: 2)))?.id == gap2Before)
+    #expect(tree.widgetNode(for: .expander(GapKey(fileID: "a.swift", hunkIndex: 2)))?.id == gap2Before)
     #expect(tree.widgetNode(for: .hunkHeader(hunkID: HunkID(fileID: file.id, index: 2)))?.id == hunk2HeaderBefore)
     // Gap 1's expander is gone (fully revealed); gap 2 stays collapsed.
-    #expect(tree.widgetNode(for: .expander(GapKey(hunkIndex: 1))) == nil)
-    #expect(tree.widgetNode(for: .expander(GapKey(hunkIndex: 2))) != nil)
+    #expect(tree.widgetNode(for: .expander(GapKey(fileID: "a.swift", hunkIndex: 1))) == nil)
+    #expect(tree.widgetNode(for: .expander(GapKey(fileID: "a.swift", hunkIndex: 2))) != nil)
     // Gap 2's hidden interior is still hidden — its slice was not materialized.
     #expect(!Self.renderedNewNumbers(tree).contains(60))
   }

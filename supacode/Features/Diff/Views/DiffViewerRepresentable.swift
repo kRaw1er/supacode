@@ -435,7 +435,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
         let revealedLines = revealed[gap] ?? []
         let revealedCountChanged = (baseCounts[gap] ?? 0) != revealedLines.count
         guard before != after || revealedCountChanged else { continue }
-        let gapKey = GapKey(hunkIndex: gap)
+        let gapKey = GapKey(fileID: file.id, hunkIndex: gap)
         let wantsReveal = after.renderAll || after.fromStart > 0 || after.fromEnd > 0
         let wasRevealed = before.renderAll || before.fromStart > 0 || before.fromEnd > 0
         if wantsReveal {
@@ -446,7 +446,12 @@ struct DiffViewerRepresentable: NSViewRepresentable {
             controller.applyExpansion(gap: gapKey, region: after, revealedLines: revealedLines)
           }
         } else if wasRevealed {
-          controller.collapseExpansion(gap: gapKey)
+          // The full expander is rebuilt from the gap's geometry, so hand over what
+          // the builder itself would use: where it starts and how much it hides.
+          let start = geometry.gapNewLineStart(gap)
+          let hidden = size == .max ? 0 : size
+          controller.collapseExpansion(
+            gap: gapKey, hiddenLines: hidden, anchor: start, range: start..<(start + max(hidden, 1)))
         }
       }
     }

@@ -284,14 +284,14 @@ struct DiffViewerRepresentableWiringTests {
       expansion: .full, revealed: [1: revealedContext(4..<40)], hunks: hunks, file: file, rebuilt: false)
     #expect(renderedNewNumbers(coord.controller.tree).contains(20))  // context is on screen
     #expect(coord.controller.tree === treeInstance)  // SAME instance — an O(log n) splice, not a rebuild
-    #expect(coord.controller.tree.widgetNode(for: .expander(GapKey(hunkIndex: 1))) == nil)  // expander removed
+    #expect(coord.controller.tree.widgetNode(for: .expander(GapKey(fileID: "a.swift", hunkIndex: 1))) == nil)  // expander removed
 
     // Collapse restores the expander and re-hides the gap.
     coord.lastExpansion = .full
     coord.lastRevealedCounts = [1: 36]
     coord.syncExpansion(expansion: .collapsed, revealed: [:], hunks: hunks, file: file, rebuilt: false)
     #expect(!renderedNewNumbers(coord.controller.tree).contains(20))
-    #expect(coord.controller.tree.widgetNode(for: .expander(GapKey(hunkIndex: 1))) != nil)
+    #expect(coord.controller.tree.widgetNode(for: .expander(GapKey(fileID: "a.swift", hunkIndex: 1))) != nil)
     #expect(coord.controller.tree === treeInstance)  // still the same instance
   }
 

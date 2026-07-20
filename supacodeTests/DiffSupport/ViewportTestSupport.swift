@@ -55,7 +55,7 @@ enum ViewportTestSupport {
     var after: ChunkID?
     for index in 0..<count {
       let widget = Widget(
-        key: .expander(GapKey(hunkIndex: index)),
+        key: .expander(GapKey(fileID: "a.swift", hunkIndex: index)),
         estimatedHeight: height,
         payload: .expander(anchor: index, range: index..<(index + 1), hidden: 1)
       )

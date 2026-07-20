@@ -128,7 +128,9 @@ struct DiffNavExpandA11ySeamIntegrationTests {
 
   /// The materialized row index of the expander widget for `gap`, or `nil`.
   private func expanderRow(_ coord: DiffViewerRepresentable.Coordinator, gap: Int) -> Int? {
-    guard let node = coord.controller.tree.widgetNode(for: .expander(GapKey(hunkIndex: gap))) else { return nil }
+    guard let node = coord.controller.tree.widgetNode(for: .expander(GapKey(fileID: "a.swift", hunkIndex: gap))) else {
+      return nil
+    }
     return coord.controller.tree.rowIndex(for: (chunk: node.id, localRow: 0), mode: coord.controller.currentMode)
   }
 
@@ -218,7 +220,7 @@ struct DiffNavExpandA11ySeamIntegrationTests {
       expansion: expandedExpansion, revealed: revealed, hunks: hunks, file: file, rebuilt: false)
     #expect(renderedNewNumbers(coord.controller.tree).contains(20))  // gap interior spliced in
     #expect(coord.controller.tree === treeInstance)  // SAME instance — an O(log n) splice, not a rebuild
-    #expect(coord.controller.tree.widgetNode(for: .expander(GapKey(hunkIndex: 1))) == nil)  // expander consumed
+    #expect(coord.controller.tree.widgetNode(for: .expander(GapKey(fileID: "a.swift", hunkIndex: 1))) == nil)  // expander consumed
     // Mirror `updateNSView`'s change-detection baselines for the next incremental pass.
     coord.lastExpansion = expandedExpansion
     coord.lastRevealedCounts = revealed.mapValues(\.count)
@@ -236,7 +238,7 @@ struct DiffNavExpandA11ySeamIntegrationTests {
     coord.syncExpansion(
       expansion: .collapsed, revealed: [:], hunks: hunks, file: file, rebuilt: false)
     #expect(!renderedNewNumbers(coord.controller.tree).contains(20))
-    #expect(coord.controller.tree.widgetNode(for: .expander(GapKey(hunkIndex: 1))) != nil)
+    #expect(coord.controller.tree.widgetNode(for: .expander(GapKey(fileID: "a.swift", hunkIndex: 1))) != nil)
     #expect(coord.controller.tree === treeInstance)
   }
 

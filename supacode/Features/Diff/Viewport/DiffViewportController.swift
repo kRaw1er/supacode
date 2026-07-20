@@ -273,15 +273,6 @@ final class DiffViewportController: NSObject {
   /// re-seeds the fresh nodes from here.
   private var widgetMeasured: [WidgetKey: (width: CGFloat, height: CGFloat)] = [:]
 
-  /// Phase 7 — per-gap expansion bookkeeping (mutated by the `applyExpansion` /
-  /// `collapseExpansion` splice in `DiffViewportExpansion.swift`, so not
-  /// `private(set)`). `expansionNodes` holds the ids of the revealed-slice segments +
-  /// shrunken expander currently materialized for a gap (removed + rebuilt on each
-  /// expand, removed on collapse); `originalExpanders` keeps the full expander chunk
-  /// so `collapseExpansion` can restore it.
-  var expansionNodes: [GapKey: [ChunkID]] = [:]
-  var originalExpanders: [GapKey: Chunk] = [:]
-
   // C7 measure↔layout guard (Phase 3 uses it; inert while heights are fixed).
   private(set) var measurePass = 0
   private let maxMeasurePasses = 5
@@ -369,15 +360,6 @@ final class DiffViewportController: NSObject {
     let anchor = scrollPreserving ? captureAnchor() : nil
     tree = newTree
     mode = newMode
-    // The expansion bookkeeping is keyed by `ChunkID`, and a fresh tree allocates its
-    // ids FROM ZERO — so ids tracked against the previous tree silently address
-    // unrelated nodes in this one. Carrying them over made the re-apply pass remove
-    // whatever happened to hold those ids (code rows, a just-saved comment widget) and
-    // splice the revealed slice at the wrong place. The fresh tree has its gaps
-    // collapsed with their `WidgetKey.expander` intact, which is exactly the state a
-    // first expand starts from, so drop the stale ids and let it re-derive.
-    expansionNodes.removeAll()
-    originalExpanders.removeAll()
     // Carry measured widget heights across the rebuild BEFORE the first sizing pass,
     // so the document grows to its true height in one go instead of laying out at the
     // estimate and settling a frame later (the visible "widgets jump on reload").

@@ -203,7 +203,7 @@ struct DiffAXProviderTests {
 
   @Test func expanderPerformPressGrowsRowCount() {
     let controller = ViewportTestSupport.controller()
-    let tree = ViewportTestSupport.widgets(count: 1)  // one expander, GapKey(hunkIndex: 0)
+    let tree = ViewportTestSupport.widgets(count: 1)  // one expander, GapKey(fileID: "a.swift", hunkIndex: 0)
     var expandedGap: GapKey?
     let sut = DiffAXProvider(
       documentView: controller.documentView,
@@ -224,7 +224,7 @@ struct DiffAXProviderTests {
     #expect(before == 1)
     let pressed = sut.element(0)?.accessibilityPerformPress() ?? false
     #expect(pressed == true)
-    #expect(expandedGap == GapKey(hunkIndex: 0))
+    #expect(expandedGap == GapKey(fileID: "a.swift", hunkIndex: 0))
     let after = controller.tree.rowCount(.unified)
     #expect(after == 14)  // revealed lines materialized
     #expect(sut.eagerElementCount == 14)  // reload() rebuilt the element set post-grow

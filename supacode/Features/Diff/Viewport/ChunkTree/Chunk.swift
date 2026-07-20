@@ -76,6 +76,15 @@ nonisolated enum Chunk: Equatable, Sendable {
     if case .widget(let widget) = self { return widget }
     return nil
   }
+
+  /// The document region this leaf belongs to, when it belongs to one. A gap's
+  /// expander is part of its gap, so removing the region takes the expander with it.
+  var region: RegionKey? {
+    switch self {
+    case .lineSegment(let segment): segment.region
+    case .widget(let widget): if case .expander(let gap) = widget.key { .gap(gap) } else { nil }
+    }
+  }
 }
 
 /// The viewport's pool selector = `.line` (dense code rows) ∪ every
@@ -88,20 +97,53 @@ nonisolated enum DiffReuseKind: Hashable, Sendable {
 
 // MARK: - LineSegment (C3 descriptor #1 lives here as `classification`)
 
+/// Which region of the document a leaf belongs to: a hunk's own lines, or the
+/// revealed slice of a collapsed gap.
+///
+/// This is what lets the tree answer "which nodes make up gap G" on demand. The
+/// alternative — caching the gap's `ChunkID`s outside the tree — cannot survive a
+/// re-projection and goes stale silently, so the region is carried BY the leaf and
+/// indexed BY the tree, and the two can never disagree.
+nonisolated enum RegionKey: Hashable, Sendable {
+  case hunk(HunkID)
+  case gap(GapKey)
+
+  var fileID: FileID {
+    switch self {
+    case .hunk(let hunkID): hunkID.fileID
+    case .gap(let gap): gap.fileID
+    }
+  }
+}
+
 /// A dense run. `lines` is the shared COW backing; `window` narrows it so a
 /// split is O(1) (two windows) and never copies lines. Per-line numbering is
 /// intrinsic to each `DiffLine`, so a mid-run split needs no renumber.
 nonisolated struct LineSegment: Equatable, Sendable {
-  var hunkID: HunkID  // stable per-hunk identity (reconcile hook, re-diff)
+  var region: RegionKey  // which hunk / gap these lines belong to
   var lines: [DiffLine]  // KEPT DiffModels type — shared backing
   var window: Range<Int>  // sub-range of `lines` this leaf renders
   var classification: SegmentClass  // C3 descriptor #1
 
-  init(hunkID: HunkID, lines: [DiffLine], window: Range<Int>, classification: SegmentClass) {
-    self.hunkID = hunkID
+  init(region: RegionKey, lines: [DiffLine], window: Range<Int>, classification: SegmentClass) {
+    self.region = region
     self.lines = lines
     self.window = window
     self.classification = classification
+  }
+
+  init(hunkID: HunkID, lines: [DiffLine], window: Range<Int>, classification: SegmentClass) {
+    self.init(region: .hunk(hunkID), lines: lines, window: window, classification: classification)
+  }
+
+  /// Stable per-hunk identity (reconcile hook, re-diff). A revealed gap slice
+  /// reports the hunk it sits before, which is the coordinate its blobs and its
+  /// render keys are resolved in.
+  var hunkID: HunkID {
+    switch region {
+    case .hunk(let hunkID): hunkID
+    case .gap(let gap): HunkID(fileID: gap.fileID, index: gap.hunkIndex)
+    }
   }
 
   /// The lines this leaf actually renders (its window slice).
@@ -180,6 +222,11 @@ nonisolated enum WidgetKey: Hashable, Sendable {
 /// gap after the last hunk has `hunkIndex == hunks.count` (upward-only). Phase 7's
 /// `ExpansionState.regions` is keyed by `GapKey.hunkIndex`.
 nonisolated struct GapKey: Hashable, Sendable {
+  /// The file the gap belongs to. Without it two files' gaps at the same hunk
+  /// index share a `WidgetKey.expander`, which collides in the widget index of a
+  /// multi-file tree (the one-long-feed layout) — the expander of one file would
+  /// resolve, measure and expand against the other's node.
+  var fileID: FileID
   var hunkIndex: Int
 }
 

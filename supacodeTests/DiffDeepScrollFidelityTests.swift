@@ -98,7 +98,7 @@ struct DiffDeepScrollFidelityTests {
 
     // The gap before hunk 1 (GapKey index 1) collapsed to a single expander whose
     // range covers the hidden lines 4…39 (36 lines) as ONE row — not 36 rows.
-    guard let expander = tree.widgetNode(for: .expander(GapKey(hunkIndex: 1))),
+    guard let expander = tree.widgetNode(for: .expander(GapKey(fileID: "a.swift", hunkIndex: 1))),
       case .expander(let anchor, let range, let hidden)? = expander.chunk.widget?.payload
     else {
       Issue.record("expected a collapsed-gap expander for GapKey(1)")

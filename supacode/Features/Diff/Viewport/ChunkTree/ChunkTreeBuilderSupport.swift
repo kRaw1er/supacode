@@ -24,6 +24,7 @@ extension ChunkTreeBuilder {
   }
 
   static func expanderWidget(
+    fileID: FileID,
     hunkIndex: Int,
     anchor: Int,
     range: Range<Int>,
@@ -32,7 +33,7 @@ extension ChunkTreeBuilder {
   ) -> Chunk {
     .widget(
       Widget(
-        key: .expander(GapKey(hunkIndex: hunkIndex)),
+        key: .expander(GapKey(fileID: fileID, hunkIndex: hunkIndex)),
         estimatedHeight: options.metrics.expanderHeight,
         payload: .expander(anchor: anchor, range: range, hidden: hidden)
       )

@@ -14,7 +14,7 @@ struct ChunkTreeTests {
   private func widget(_ index: Int, height: CGFloat) -> Chunk {
     .widget(
       Widget(
-        key: .expander(GapKey(hunkIndex: index)),
+        key: .expander(GapKey(fileID: "a.swift", hunkIndex: index)),
         estimatedHeight: height,
         payload: .expander(anchor: index, range: index..<(index + 1), hidden: 1)
       )
@@ -190,7 +190,7 @@ struct ChunkTreeTests {
         let widgetID = subtree.insert(
           .widget(
             Widget(
-              key: .expander(GapKey(hunkIndex: 0)),
+              key: .expander(GapKey(fileID: "a.swift", hunkIndex: 0)),
               estimatedHeight: 20,
               payload: .expander(anchor: 0, range: 0..<1, hidden: 1)
             )

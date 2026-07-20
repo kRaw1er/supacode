@@ -651,7 +651,7 @@ struct DiffViewportControllerTests {
     for index in 0..<40 {
       after = tree.insert(contextLeaf(index + 1), after: after)
       let widget = Widget(
-        key: .expander(GapKey(hunkIndex: index)),
+        key: .expander(GapKey(fileID: "a.swift", hunkIndex: index)),
         estimatedHeight: 28,
         payload: .expander(anchor: index, range: index..<(index + 1), hidden: 1)
       )

@@ -205,7 +205,7 @@ struct DiffEstimateHeightsTests {
     let tree = ChunkTreeFixture.files([ChunkTreeFixture.FileSpec(file: DiffFixture.file(), hunks: [hunk])])
     controller.apply(tree: tree, mode: .unified, scrollPreserving: false)
 
-    let gap = GapKey(hunkIndex: 0)
+    let gap = GapKey(fileID: "a.swift", hunkIndex: 0)
     #expect(controller.tree.widgetNode(for: .expander(gap)) != nil)
     let rangeSize = 200
     let revealedRows = 5

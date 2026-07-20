@@ -170,6 +170,9 @@ struct ChangedFilesListView: View {
         .accessibilityHint("Opens the diff in a new tab")
     }
     .buttonStyle(.plain)
+    // Stable machine id for in-process UI automation (UIAutomationDriver). The
+    // base section is namespaced so a file present in both sections stays unique.
+    .accessibilityIdentifier(axPrefix == nil ? "changed-file:\(file.id)" : "changed-file:base:\(file.id)")
     .listRowBackground(rowHighlight(for: file, scrollSpy: scrollSpy))
   }
 

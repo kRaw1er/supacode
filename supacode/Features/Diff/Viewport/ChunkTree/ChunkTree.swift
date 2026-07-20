@@ -76,6 +76,24 @@ final class ChunkTree {
   /// (Phase 6 `LayoutCoalescer` / comment-thread harness) without a linear walk.
   var widgetNodes: [WidgetKey: ChunkID] = [:]
 
+  /// Region → the ids of the nodes currently making it up. Maintained by
+  /// `register` / `unregister`, so it lives and dies with the tree and cannot go
+  /// stale the way an externally-cached id list does. The gap splice reads it to
+  /// find what to replace.
+  var regionNodes: [RegionKey: Set<ChunkID>] = [:]
+
+  /// The nodes making up `region`, in document order. O(k log n) for k nodes —
+  /// a gap holds a handful (head / expander / tail), never a whole file.
+  func nodes(in region: RegionKey) -> [ChunkNode] {
+    guard let ids = regionNodes[region] else { return [] }
+    return
+      ids
+      .compactMap { nodesByID[$0] }
+      .map { (node: $0, index: rank(of: $0, mode: .unified).index) }
+      .sorted { $0.index < $1.index }
+      .map(\.node)
+  }
+
   /// The node backing a `WidgetKey`, or `nil` when no such widget is in the tree.
   func widgetNode(for key: WidgetKey) -> ChunkNode? {
     guard let cid = widgetNodes[key] else { return nil }

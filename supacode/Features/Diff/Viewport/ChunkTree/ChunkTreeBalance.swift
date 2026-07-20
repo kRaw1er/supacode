@@ -25,6 +25,7 @@ extension ChunkTree {
   /// height resolution).
   func register(_ node: ChunkNode) {
     nodesByID[node.id] = node
+    if let region = node.chunk.region { regionNodes[region, default: []].insert(node.id) }
     if case .widget(let widget) = node.chunk {
       widgetNodes[widget.key] = node.id
       if case .fileHeader(let fileID) = widget.key {

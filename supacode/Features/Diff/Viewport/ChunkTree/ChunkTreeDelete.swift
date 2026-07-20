@@ -93,6 +93,10 @@ extension ChunkTree {
 
   private func unregister(_ node: ChunkNode) {
     nodesByID[node.id] = nil
+    if let region = node.chunk.region {
+      regionNodes[region]?.remove(node.id)
+      if regionNodes[region]?.isEmpty == true { regionNodes[region] = nil }
+    }
     if case .widget(let widget) = node.chunk {
       if widgetNodes[widget.key] == node.id {
         widgetNodes[widget.key] = nil

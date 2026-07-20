@@ -273,8 +273,8 @@ enum ChunkTreeBuilder {
     let lastHidden = hiddenSlice.last?.newLineNumber ?? anchor
     chunks.append(
       expanderWidget(
-        hunkIndex: hunkID.index, anchor: anchor, range: firstHidden..<(lastHidden + 1), hidden: hidden,
-        context.options)
+        fileID: hunkID.fileID, hunkIndex: hunkID.index, anchor: anchor, range: firstHidden..<(lastHidden + 1),
+        hidden: hidden, context.options)
     )
     if !tail.isEmpty { appendSegments(&chunks, lines: tail, hunkID: hunkID, classification: .context) }
   }
@@ -305,6 +305,8 @@ enum ChunkTreeBuilder {
   ) {
     guard !range.isEmpty, !context.expanded.contains(anchor) else { return }
     chunks.append(
-      expanderWidget(hunkIndex: hunkIndex, anchor: anchor, range: range, hidden: range.count, context.options))
+      expanderWidget(
+        fileID: context.fileID, hunkIndex: hunkIndex, anchor: anchor, range: range, hidden: range.count,
+        context.options))
   }
 }
