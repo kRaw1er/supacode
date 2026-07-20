@@ -443,6 +443,15 @@ final class ChunkTree {
     return out
   }
 
+  /// The last node in document order — a right-spine descent, O(log n). The append
+  /// path needs only this, and reaching it through `inorderNodes().last` materialized
+  /// the whole tree per appended file (quadratic over a multi-file assembly).
+  var lastNodeID: ChunkID? {
+    var node = root
+    while let current = node, let right = current.right { node = right }
+    return node?.id
+  }
+
   /// The largest source line number (old or new) carried by any line segment in
   /// the tree — the digit count the line-number gutter must fit so a 6+ digit file
   /// (or a long file below a short one in a multi-file diff) never clips its

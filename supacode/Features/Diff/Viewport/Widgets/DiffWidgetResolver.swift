@@ -80,7 +80,10 @@ struct DiffWidgetResolver {
       }
 
     case .commentThread(let anchorID):
-      let thread = comments.filter { $0.id == anchorID }
+      // `first` (not `filter`): the thread's head IS the anchor, so this resolves on
+      // the match instead of scanning every comment and allocating — and `resolve` runs
+      // per placement of a visible widget, i.e. per frame.
+      let thread = comments.first { $0.id == anchorID }.map { [$0] } ?? []
       return CommentThreadWidget(
         key: widget.key,
         model: CommentThreadModel(

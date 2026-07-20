@@ -85,7 +85,7 @@ enum ChunkTreeBuilder {
     options: Options = Options(),
     comments: [ReviewComment] = []
   ) {
-    var after: ChunkID? = tree.inorderNodes().last?.id
+    var after: ChunkID? = tree.lastNodeID
     for chunk in classify(file: file, hunks: hunks, expanded: expanded, options: options, comments: comments) {
       after = tree.insert(chunk, after: after)
     }

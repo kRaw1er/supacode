@@ -180,38 +180,89 @@ extension LineSegment {
   /// The plan is MODE-AWARE because a change block renders differently per mode: in
   /// unified the rendered row IS the window offset (del-then-add order), while in
   /// split rendered row `r` pairs `deletions[r]` with `additions[r]`, so cutting at a
-  /// window offset there would tear the columns apart. Off the hot path — this runs on
-  /// a comment insert / re-projection, never per frame.
+  /// window offset there would tear the columns apart.
+  ///
+  /// O(log window) for a marker-free leaf (the `windowDeletionCount` binary search
+  /// only, resolving everything else by arithmetic) — the same "never materialize the
+  /// ≤maxLeafSpan projection" rule the `visibleLineRange` hot path follows. Only a
+  /// leaf carrying a no-newline marker (EOF, rare) falls back to the full projection,
+  /// and only an actual pair cut copies lines, which it must.
   func splitPlan(afterRenderedRow localRow: Int, mode: DiffViewMode) -> SplitPlan {
+    guard localRow >= 0 else { return .none }
+    let deletionCount = windowDeletionCount
+    guard !windowHasNoNewlineMarker(deletionCount: deletionCount) else {
+      return markerSplitPlan(afterRenderedRow: localRow, mode: mode)
+    }
+    // Marker-free ⇒ the rendered row index IS the row index of the mode's projection,
+    // so the prefix line count is `localRow + 1` with no scan.
+    let additionCount = window.count - deletionCount
+    let rowCount =
+      classification == .change && mode == .split ? max(deletionCount, additionCount) : window.count
+    guard localRow + 1 < rowCount else { return .none }
+    return plan(prefixLines: localRow + 1, leftRows: localRow + 1, deletionCount: deletionCount, mode: mode)
+  }
+
+  /// The cut that keeps `prefixLines` backing lines (and `leftRows` RENDERED rows —
+  /// the two differ only when a marker row is in play) on the left. Pure arithmetic +,
+  /// for a pair cut only, the line copy.
+  private func plan(prefixLines: Int, leftRows: Int, deletionCount: Int, mode: DiffViewMode) -> SplitPlan {
+    let prefixRows = prefixLines
+    switch classification {
+    case .context, .contextExpanded:
+      return .window(offset: prefixRows)
+    case .change:
+      // Unified renders the window in order, so the prefix row count IS the offset.
+      if mode == .unified { return .window(offset: prefixRows) }
+      // Every deletion already sits left of the cut ⇒ the pair boundary happens to be
+      // contiguous in the backing, so the cheap COW-sharing window split is exact.
+      if prefixRows >= deletionCount { return .window(offset: deletionCount + prefixRows) }
+      // Canonical del-then-add order makes both sides O(1) slices — no filtering.
+      let low = window.lowerBound
+      let deletions = lines[low..<(low + deletionCount)]
+      let additions = lines[(low + deletionCount)..<window.upperBound]
+      let left = Array(deletions.prefix(prefixRows)) + Array(additions.prefix(prefixRows))
+      let right = Array(deletions.dropFirst(prefixRows)) + Array(additions.dropFirst(prefixRows))
+      guard !left.isEmpty, !right.isEmpty else { return .none }
+      return .rebuild(left: left, right: right, leftRowCount: leftRows)
+    }
+  }
+
+  /// The no-newline-marker fallback: a marker row has no backing line, so the rendered
+  /// index no longer equals the row index and the projection has to be walked. Rare
+  /// (git emits the marker only for a side's final line), hence the O(leaf) path.
+  private func markerSplitPlan(afterRenderedRow localRow: Int, mode: DiffViewMode) -> SplitPlan {
     let rows = renderedRows(mode)
-    guard localRow >= 0, localRow < rows.count else { return .none }
-    // A no-newline marker duplicates its parent row's numbers, so keep it glued to the
-    // line it belongs to: the widget goes after the marker, never between the two.
+    guard localRow < rows.count else { return .none }
+    // Keep a marker glued to the line it belongs to: the widget goes after the marker.
     var boundary = localRow
     while boundary + 1 < rows.count, rows[boundary + 1].isMarker { boundary += 1 }
     guard boundary + 1 < rows.count else { return .none }
-    // Marker rows have no backing line, so the line count is the non-marker prefix.
-    let lineCount = rows[0...boundary].count(where: { !$0.isMarker })
-    guard lineCount > 0 else { return .none }
+    let prefixLines = rows[0...boundary].count(where: { !$0.isMarker })
+    guard prefixLines > 0 else { return .none }
+    return plan(
+      prefixLines: prefixLines, leftRows: boundary + 1, deletionCount: windowDeletionCount, mode: mode)
+  }
 
+  /// The inclusive source-number span this leaf carries on `side`, or `nil` when it
+  /// carries no line on that side (an all-addition block has no old span). O(1) — the
+  /// canonical del-then-add order puts each side's first / last line at a known offset,
+  /// and numbers are monotonic within a leaf. Lets a line-number lookup skip a leaf
+  /// without materializing its projection.
+  func numberSpan(on side: DiffSide, deletionCount: Int) -> (first: Int, last: Int)? {
+    let low = window.lowerBound
+    let high = window.upperBound
+    let range: Range<Int>
     switch classification {
     case .context, .contextExpanded:
-      return .window(offset: lineCount)
+      range = low..<high
     case .change:
-      // Unified renders the window in order, so the prefix line count IS the offset.
-      if mode == .unified { return .window(offset: lineCount) }
-      let deletions = windowDeletions
-      let additions = windowAdditions
-      // Every deletion already sits left of the cut ⇒ the pair boundary happens to be
-      // contiguous in the backing, so the cheap window split is exact.
-      if lineCount >= deletions.count {
-        return .window(offset: deletions.count + lineCount)
-      }
-      let left = Array(deletions.prefix(lineCount)) + Array(additions.prefix(lineCount))
-      let right = Array(deletions.dropFirst(lineCount)) + Array(additions.dropFirst(lineCount))
-      guard !left.isEmpty, !right.isEmpty else { return .none }
-      return .rebuild(left: left, right: right, leftRowCount: boundary + 1)
+      range = side == .old ? low..<(low + deletionCount) : (low + deletionCount)..<high
     }
+    guard !range.isEmpty,
+      let first = lines[range.lowerBound].lineNumber(on: side),
+      let last = lines[range.upperBound - 1].lineNumber(on: side)
+    else { return nil }
+    return (first, last)
   }
 
   /// Perf spy (mirrors `LineRowView.projectCount` / `CTLineCache.buildCount`): total

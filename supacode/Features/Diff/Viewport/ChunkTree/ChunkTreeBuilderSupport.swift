@@ -130,7 +130,7 @@ extension ChunkTreeBuilder {
   ) {
     let widget = commentWidget(comment, options)
     guard let anchor = findAnchor(in: tree, comment: comment, mode: mode) else {
-      tree.insert(widget, after: tree.inorderNodes().last?.id)
+      tree.insert(widget, after: tree.lastNodeID)
       return
     }
     let after = tree.splitAnchor(anchor.nodeID, afterRenderedRow: anchor.localRow, mode: mode)
@@ -144,10 +144,17 @@ extension ChunkTreeBuilder {
 
   /// The LAST rendered row matching `(side, endLine)` in document order (mirrors
   /// `DiffRowBuilder.lastRowIndex`).
+  ///
+  /// A leaf is skipped by its O(1) `numberSpan` before any projection is built, so the
+  /// walk costs O(#leaves) rather than O(#lines) — the projection is materialized only
+  /// for the (normally one) leaf whose span actually covers the line.
   private static func findAnchor(in tree: ChunkTree, comment: ReviewComment, mode: DiffViewMode) -> AnchorMatch? {
     var match: AnchorMatch?
     for node in tree.inorderNodes() {
-      guard let segment = node.chunk.lineSegment else { continue }
+      guard let segment = node.chunk.lineSegment,
+        let span = segment.numberSpan(on: comment.side, deletionCount: segment.windowDeletionCount),
+        span.first <= comment.endLine, comment.endLine <= span.last
+      else { continue }
       for (localRow, row) in segment.renderedRows(mode).enumerated() where !row.isMarker {
         if row.number(on: comment.side) == comment.endLine {
           match = AnchorMatch(nodeID: node.id, localRow: localRow)

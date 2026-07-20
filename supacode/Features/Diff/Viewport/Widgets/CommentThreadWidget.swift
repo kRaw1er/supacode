@@ -54,11 +54,29 @@ final class CommentThreadWidget: DiffWidget {
   /// re-mount the host on every keystroke and lose the cursor). Committing does
   /// change it — the comment lands in `comments` and `isEditing` flips — which is
   /// exactly when the host must be rebuilt into the read-only display view.
+  ///
+  /// Read on every placement of a mounted thread (i.e. per frame while one is on
+  /// screen), so it stays scalar: `updatedAt` is stamped on every commit, which
+  /// makes it a version counter for the body — no need to hash the text itself.
+  struct Token: Hashable {
+    var anchorID: UUID
+    var isEditing: Bool
+    var isCollapsed: Bool
+    var count: Int
+    var headUpdatedAt: TimeInterval
+    var headOrphaned: Bool
+  }
+
   var modelToken: AnyHashable {
     AnyHashable(
-      [
-        "\(model.anchorID)", isEditing ? "1" : "0", model.isCollapsed ? "1" : "0",
-      ] + model.comments.map { "\($0.id)|\($0.updatedAt.timeIntervalSince1970)|\($0.body)|\($0.orphaned)" }
+      Token(
+        anchorID: model.anchorID,
+        isEditing: isEditing,
+        isCollapsed: model.isCollapsed,
+        count: model.comments.count,
+        headUpdatedAt: model.head?.updatedAt.timeIntervalSinceReferenceDate ?? 0,
+        headOrphaned: model.head?.orphaned ?? false
+      )
     )
   }
 
