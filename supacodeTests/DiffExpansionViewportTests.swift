@@ -95,6 +95,39 @@ struct DiffExpansionViewportTests {
     #expect(controller.totalUsedViewCount > 0)  // the viewport did NOT skip the region
   }
 
+  /// Re-projecting (saving a comment re-projects) and then re-applying the live
+  /// expansion state must not disturb the fresh tree's own nodes.
+  ///
+  /// The expansion bookkeeping is keyed by `ChunkID` and a fresh tree allocates ids
+  /// FROM ZERO, so ids tracked against the previous tree address unrelated nodes in
+  /// the new one. Carrying them over made the re-apply pass delete whatever held
+  /// those ids — which is how a just-saved comment vanished with no trace, and how
+  /// the document ended up torn (jumping scroll, clipped tail).
+  @Test func reprojectionDropsStaleExpansionIDsSoReapplyKeepsTheNewTreeIntact() {
+    let (file, hunks) = Self.twoHunkFixture()
+    let controller = ViewportTestSupport.controller()
+    let region = ExpansionState.ResolvedRegion(fromStart: 36, fromEnd: 0, collapsedLines: 0, renderAll: true)
+    let gap = GapKey(hunkIndex: 1)
+
+    controller.apply(
+      tree: ChunkTreeFixture.files([.init(file: file, hunks: hunks)]), mode: .unified, scrollPreserving: false)
+    #expect(controller.applyExpansion(gap: gap, region: region, revealedLines: Self.revealedContext(4..<40)))
+
+    // Save a comment: the tree is re-projected (now carrying the thread widget) and
+    // the live expansion state is re-applied on top.
+    let comment = ReviewComment(
+      filePath: "a.swift", side: .new, startLine: 40, endLine: 40,
+      anchorSnippet: "z-new", contextBefore: "", body: "please fix")
+    let reprojected = ChunkTreeBuilder.build(
+      file: file, hunks: hunks, mode: .unified, comments: [comment])
+    controller.apply(tree: reprojected, mode: .unified, scrollPreserving: false)
+    #expect(controller.applyExpansion(gap: gap, region: region, revealedLines: Self.revealedContext(4..<40)))
+
+    // The comment survived, and the document is whole: every line 1…40 renders once.
+    #expect(reprojected.widgetNode(for: .commentThread(anchorID: comment.id)) != nil)
+    #expect(Self.renderedNewNumbers(reprojected) == Array(1...40))
+  }
+
   // MARK: - partial reveal → head + shrunken expander + tail, then collapse restores
 
   @Test func partialExpandKeepsExpanderThenCollapseRestores() {
