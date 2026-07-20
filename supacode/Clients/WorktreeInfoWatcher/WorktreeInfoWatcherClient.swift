@@ -1,5 +1,6 @@
 import ComposableArchitecture
 import Foundation
+import SupacodeSettingsShared
 
 struct WorktreeInfoWatcherClient {
   var send: @MainActor @Sendable (Command) -> Void
@@ -20,10 +21,21 @@ struct WorktreeInfoWatcherClient {
 }
 
 extension WorktreeInfoWatcherClient: DependencyKey {
+  /// The UNCONFIGURED placeholder — the real client closes over the live watcher
+  /// manager and is injected at store construction. Reaching it means a dependency
+  /// was resolved outside that scope (typically an escaped TCA effect re-resolving
+  /// after its context fell back to `.live`), so it DEGRADES rather than trapping:
+  /// a `fatalError` here kills the app-hosted test bundle mid-run. Same rationale as
+  /// `TerminalClient.liveValue`.
   static let liveValue = WorktreeInfoWatcherClient(
-    send: { _ in fatalError("WorktreeInfoWatcherClient.send not configured") },
-    events: { fatalError("WorktreeInfoWatcherClient.events not configured") }
+    send: { _ in logger.error("send called on the unconfigured live client — ignoring") },
+    events: {
+      logger.error("events called on the unconfigured live client — returning an empty stream")
+      return AsyncStream { $0.finish() }
+    }
   )
+
+  private static let logger = SupaLogger("WorktreeInfoWatcherClient")
 
   static let testValue = WorktreeInfoWatcherClient(
     send: { _ in },

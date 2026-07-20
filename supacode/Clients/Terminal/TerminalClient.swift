@@ -145,26 +145,53 @@ struct TerminalClient {
 }
 
 extension TerminalClient: DependencyKey {
+  /// The UNCONFIGURED placeholder. The real client is injected at store construction
+  /// (`SupacodeApp.makeStore`) because every endpoint closes over the live
+  /// `WorktreeTerminalManager`, so this value is only ever reached when a caller
+  /// resolves `TerminalClient` OUTSIDE that scope — in practice a TCA effect that
+  /// escapes its store (or a test's) and re-resolves its dependencies later, when
+  /// the dependency context has already fallen back to `.live`.
+  ///
+  /// Every endpoint therefore DEGRADES (logs once, returns an inert value) instead
+  /// of trapping. A `fatalError` here turned that stray resolve into a hard process
+  /// kill — which, because the unit-test bundle is hosted INSIDE `supacode.app`,
+  /// took down the whole test run with a crash log and no failing test to point at.
   static let liveValue = TerminalClient(
-    send: { _ in fatalError("TerminalClient.send not configured") },
-    events: { fatalError("TerminalClient.events not configured") },
-    tabExists: { _, _ in fatalError("TerminalClient.tabExists not configured") },
-    isDiffTab: { _, _ in fatalError("TerminalClient.isDiffTab not configured") },
-    tabCanRename: { _, _ in fatalError("TerminalClient.tabCanRename not configured") },
-    surfaceExists: { _, _, _ in fatalError("TerminalClient.surfaceExists not configured") },
-    surfaceExistsInWorktree: { _, _ in fatalError("TerminalClient.surfaceExistsInWorktree not configured") },
-    tabID: { _, _ in fatalError("TerminalClient.tabID not configured") },
-    selectedTabID: { _ in fatalError("TerminalClient.selectedTabID not configured") },
-    selectedSurfaceID: { _ in fatalError("TerminalClient.selectedSurfaceID not configured") },
-    hasAgentTerminalSurface: { _ in fatalError("TerminalClient.hasAgentTerminalSurface not configured") },
-    latestUnreadNotification: { fatalError("TerminalClient.latestUnreadNotification not configured") },
-    markNotificationRead: { _, _ in fatalError("TerminalClient.markNotificationRead not configured") },
-    markAllNotificationsRead: { fatalError("TerminalClient.markAllNotificationsRead not configured") },
-    hasInflightBlockingScripts: { fatalError("TerminalClient.hasInflightBlockingScripts not configured") },
-    terminateAllSessions: { fatalError("TerminalClient.terminateAllSessions not configured") },
-    reapOrphanSessions: { _ in fatalError("TerminalClient.reapOrphanSessions not configured") },
-    saveLayoutsWithAgents: { _ in fatalError("TerminalClient.saveLayoutsWithAgents not configured") }
+    send: { _ in unconfigured("send") },
+    events: {
+      unconfigured("events")
+      return AsyncStream { $0.finish() }
+    },
+    tabExists: { _, _ in unconfigured("tabExists", returning: false) },
+    isDiffTab: { _, _ in unconfigured("isDiffTab", returning: false) },
+    tabCanRename: { _, _ in unconfigured("tabCanRename", returning: false) },
+    surfaceExists: { _, _, _ in unconfigured("surfaceExists", returning: false) },
+    surfaceExistsInWorktree: { _, _ in unconfigured("surfaceExistsInWorktree", returning: false) },
+    tabID: { _, _ in unconfigured("tabID", returning: TerminalTabID?.none) },
+    selectedTabID: { _ in unconfigured("selectedTabID", returning: TerminalTabID?.none) },
+    selectedSurfaceID: { _ in unconfigured("selectedSurfaceID", returning: UUID?.none) },
+    hasAgentTerminalSurface: { _ in unconfigured("hasAgentTerminalSurface", returning: false) },
+    latestUnreadNotification: { unconfigured("latestUnreadNotification", returning: NotificationLocation?.none) },
+    markNotificationRead: { _, _ in unconfigured("markNotificationRead") },
+    markAllNotificationsRead: { unconfigured("markAllNotificationsRead") },
+    hasInflightBlockingScripts: { unconfigured("hasInflightBlockingScripts", returning: false) },
+    terminateAllSessions: { unconfigured("terminateAllSessions") },
+    reapOrphanSessions: { _ in unconfigured("reapOrphanSessions") },
+    saveLayoutsWithAgents: { _ in unconfigured("saveLayoutsWithAgents") }
   )
+
+  /// Report a call that reached the unconfigured placeholder and hand back an inert
+  /// value. Loud in the log, harmless at runtime.
+  private static let logger = SupaLogger("TerminalClient")
+
+  private static func unconfigured<Value>(_ endpoint: String, returning value: Value) -> Value {
+    logger.error("\(endpoint) called on the unconfigured live client — ignoring")
+    return value
+  }
+
+  private static func unconfigured(_ endpoint: String) {
+    unconfigured(endpoint, returning: ())
+  }
 
   static let testValue = TerminalClient(
     send: { _ in },
