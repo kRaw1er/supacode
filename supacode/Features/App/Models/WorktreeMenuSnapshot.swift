@@ -104,7 +104,7 @@ extension AppFeature.Action {
       case .notificationReceived, .tabCreated, .tabClosed, .focusChanged,
         .taskStatusChanged, .blockingScriptCompleted, .commandPaletteToggleRequested,
         .setupScriptConsumed, .worktreeProjectionChanged, .tabProjectionChanged,
-        .tabRemoved, .worktreeStateTornDown, .tabProgressDisplayChanged,
+        .tabRemoved, .tabRenamed, .worktreeStateTornDown, .tabProgressDisplayChanged,
         .surfacesClosed, .agentHookEventReceived, .terminalHasAnySurfaceChanged,
         .surfaceCreationFailed, .textInjectionFailed:
         return false
@@ -118,11 +118,15 @@ extension AppFeature.Action {
       return false
     // Lifecycle / UI / effect-dispatch actions never write snapshot inputs
     // directly; any downstream mutation flows back through a classified arm.
-    case .appLaunched, .scenePhaseChanged, .openActionSelectionChanged,
+    case .applicationDidBecomeActive, .applicationDidResignActive,
+      .appLaunched, .scenePhaseChanged, .openActionSelectionChanged,
+      .refreshInstalledOpenActions, .installedOpenActionsResolved,
       .worktreeSettingsLoaded, .openSelectedWorktree, .revealInFinder,
       .openWorktree, .openWorktreeFailed, .requestQuit,
       .requestTerminateAllTerminalSessions, .newTerminal,
-      .selectTerminalTabAtIndex, .splitTerminal, .jumpToLatestUnread, .runScript, .runNamedScript,
+      .selectTerminalTabAtIndex, .splitTerminal, .jumpToLatestUnread,
+      .menuBarWorktreeSelected, .markAllNotificationsRead, .runScript, .runNamedScript,
+      .manageRepositoryScripts,
       .stopScript, .stopRunScripts, .closeTab, .closeSurface,
       .startSearch, .searchSelection, .navigateSearchNext,
       .navigateSearchPrevious, .endSearch,

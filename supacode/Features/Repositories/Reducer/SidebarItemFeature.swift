@@ -43,6 +43,12 @@ struct SidebarItemFeature {
     var branchName: String
     var subtitle: String?
     var workingDirectory: URL
+    /// Mirror of `Worktree.location.workingDirectoryPath`: the remote path
+    /// verbatim for a remote row, so an editor's Remote-SSH argv never has to
+    /// round-trip through a `file://` URL.
+    var workingDirectoryPath: String = ""
+    /// Mirror of `Worktree.isAttached`; gates branch-targeted actions.
+    var isAttached: Bool = true
     var repositoryAccent: RepositoryColor?
     var isMainWorktree: Bool
     /// Mirror of `@Shared(.sidebar)`; written through actions only.
@@ -101,8 +107,12 @@ struct SidebarItemFeature {
       var tint: RepositoryColor
     }
 
-    var agents: [AgentPresenceFeature.AgentInstance] = []
-    var hasAgentActivity: Bool = false
+    var agentSnapshot: AgentPresenceFeature.RowSnapshot = .init()
+    var agents: [AgentPresenceFeature.AgentInstance] { agentSnapshot.agents }
+    var hasAgentActivity: Bool { agentSnapshot.isWorking }
+    /// An agent on this row stopped on an error. Sticky until it restarts or the
+    /// user focuses the surface, and the top-priority Active-rail bucket.
+    var hasAgentError: Bool { agentSnapshot.hasError }
 
     var surfaceIDs: [UUID] = []
     /// Sticky once `terminalProjectionChanged` arrives, so a subsequent
@@ -113,6 +123,10 @@ struct SidebarItemFeature {
     var isProgressBusy: Bool = false
     var hasUnseenNotifications: Bool = false
     var notifications: IdentifiedArrayOf<WorktreeTerminalNotification> = []
+    /// Per-surface outstanding unread counts. Survives cap trimming of
+    /// `notifications`; the inspector synthesizes a row for a surface here whose
+    /// notifications were all pruned.
+    var unseenSurfaces: [WorktreeUnseenSurface] = []
     /// True when either Ghostty progress is busy or an agent is busy on a surface.
     var isTaskRunning: Bool { isProgressBusy || hasAgentActivity }
 
@@ -126,9 +140,7 @@ struct SidebarItemFeature {
     case diffStatsChanged(added: Int?, removed: Int?)
     case pullRequestQueryStarted(branch: String)
     case pullRequestChanged(GithubPullRequest?, branchAtQueryTime: String)
-    case runningScriptStarted(id: UUID, tint: RepositoryColor)
-    case runningScriptStopped(id: UUID)
-    case agentSnapshotChanged([AgentPresenceFeature.AgentInstance], hasActivity: Bool)
+    case agentSnapshotChanged(AgentPresenceFeature.RowSnapshot)
     case terminalProjectionChanged(WorktreeRowProjection)
     case dragSessionChanged(isDragging: Bool)
     case focusTerminalRequested
@@ -167,23 +179,9 @@ struct SidebarItemFeature {
         state.pullRequestBranchAtQueryTime = nil
         return .none
 
-      case .runningScriptStarted(let id, let tint):
-        if state.runningScripts[id: id] == nil {
-          state.runningScripts.append(.init(id: id, tint: tint))
-        } else if state.runningScripts[id: id]?.tint != tint {
-          state.runningScripts[id: id]?.tint = tint
-        }
-        return .none
-
-      case .runningScriptStopped(let id):
-        guard state.runningScripts.contains(where: { $0.id == id }) else { return .none }
-        state.runningScripts.remove(id: id)
-        return .none
-
-      case .agentSnapshotChanged(let agents, let hasActivity):
-        guard state.agents != agents || state.hasAgentActivity != hasActivity else { return .none }
-        state.agents = agents
-        state.hasAgentActivity = hasActivity
+      case .agentSnapshotChanged(let snapshot):
+        guard state.agentSnapshot != snapshot else { return .none }
+        state.agentSnapshot = snapshot
         return .none
 
       case .terminalProjectionChanged(let projection):
@@ -196,6 +194,12 @@ struct SidebarItemFeature {
           state.hasUnseenNotifications = projection.hasUnseenNotifications
         }
         if state.notifications != projection.notifications { state.notifications = projection.notifications }
+        if state.unseenSurfaces != projection.unseenSurfaces {
+          state.unseenSurfaces = projection.unseenSurfaces
+        }
+        if state.runningScripts != projection.runningScripts {
+          state.runningScripts = projection.runningScripts
+        }
         return .none
 
       case .dragSessionChanged(let isDragging):
@@ -277,14 +281,28 @@ extension SidebarItemFeature.State.Lifecycle {
   var isDeleting: Bool { self == .deleting || self == .deletingScript }
 }
 
-/// Per-row terminal snapshot emitted by `WorktreeTerminalManager`'s 400 ms debounce.
-/// `isProgressBusy` reflects Ghostty progress state only; the parent overlays
-/// agent activity downstream of this event.
+/// Per-row terminal snapshot; the manager emits it Equatable-diffed, so
+/// identical snapshots never reach TCA. `isProgressBusy` reflects Ghostty
+/// progress state only; the parent overlays agent activity downstream.
 struct WorktreeRowProjection: Equatable, Sendable {
   let surfaceIDs: [UUID]
   let isProgressBusy: Bool
   let hasUnseenNotifications: Bool
   let notifications: IdentifiedArrayOf<WorktreeTerminalNotification>
+  /// Per-surface outstanding unread counts, decoupled from `notifications` so
+  /// the cap can prune the log without clearing an indicator. Powers the
+  /// toolbar bell count and the inspector's pruned-unread rows.
+  var unseenSurfaces: [WorktreeUnseenSurface] = []
+  /// Terminal-tracked user scripts; the sole populator of the row's
+  /// `runningScripts`, so the dropdown can't drift from process state (#573).
+  var runningScripts: IdentifiedArrayOf<SidebarItemFeature.State.RunningScript> = []
+}
+
+/// A surface with outstanding unread notifications. `count` counts unread
+/// arrivals not yet read/dismissed, including any the cap trimmed from the log.
+struct WorktreeUnseenSurface: Equatable, Sendable, Identifiable {
+  let id: UUID
+  let count: Int
 }
 
 /// Value-typed projection of the focused row's display fields, cached on
@@ -335,4 +353,64 @@ struct SelectedWorktreeSlice: Equatable, Sendable {
   var accent: WorktreeAccent { WorktreeAccent.derive(isMainWorktree: isMainWorktree, isPinned: isPinned) }
 
   var isFolder: Bool { kind == .folder }
+}
+
+/// Value-typed projection of one selected row, carrying only the fields the
+/// sidebar's selection-driven surfaces branch on (context menu, archive /
+/// delete targets). Keeps agent / notification / diff churn out of the
+/// selection cache's Equatable surface. It is also the row context menu's sole
+/// input, so the menu never resolves a `Worktree` from the parent state.
+struct SidebarContextRow: Equatable, Sendable, Identifiable {
+  let id: SidebarItemID
+  let repositoryID: Repository.ID
+  let kind: SidebarItemFeature.State.Kind
+  let lifecycle: SidebarItemFeature.State.Lifecycle
+  let isPinned: Bool
+  let isMainWorktree: Bool
+  let name: String
+  let isMissing: Bool
+  let isAttached: Bool
+  let host: RemoteHost?
+  let workingDirectoryPath: String
+
+  init(_ row: SidebarItemFeature.State) {
+    self.id = row.id
+    self.repositoryID = row.repositoryID
+    self.kind = row.kind
+    self.lifecycle = row.lifecycle
+    self.isPinned = row.isPinned
+    self.isMainWorktree = row.isMainWorktree
+    self.name = row.name
+    self.isMissing = row.isMissing
+    self.isAttached = row.isAttached
+    self.host = row.host
+    self.workingDirectoryPath = row.workingDirectoryPath
+  }
+
+  var isFolder: Bool { kind == .folder }
+}
+
+/// Cached projection of the sidebar's effective selection (the multi-selection
+/// when there is one, else the focused row), on
+/// `RepositoriesFeature.State.sidebarSelectionSlice`. The sidebar and its row
+/// context menu read this instead of walking `sidebarItems` from a view body,
+/// which would observation-track every row and fan a per-leaf tick out to the
+/// whole List.
+struct SidebarSelectionSlice: Equatable, Sendable {
+  var rows: [SidebarContextRow] = []
+  /// Rows a bulk archive can act on: idle, non-main.
+  var archiveTargets: [RepositoriesFeature.ArchiveWorktreeTarget] = []
+  var deleteTargets: [RepositoriesFeature.DeleteWorktreeTarget] = []
+  /// Mixed-kind bulk selections surface no context menu; per-kind actions don't compose.
+  var hasMixedKindSelection: Bool = false
+  var isAllFoldersBulk: Bool = false
+
+  static let empty = SidebarSelectionSlice()
+
+  /// Rows the row context menu acts on: the whole selection when the
+  /// right-clicked row is part of a multi-selection, else that row alone.
+  func contextRows(rightClicked row: SidebarContextRow) -> [SidebarContextRow] {
+    guard rows.count > 1, rows.contains(where: { $0.id == row.id }) else { return [row] }
+    return rows
+  }
 }

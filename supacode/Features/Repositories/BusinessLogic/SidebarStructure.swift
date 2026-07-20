@@ -21,11 +21,14 @@ extension DependencyValues {
   }
 }
 
-/// Classification buckets for the global Active section. Lower raw value =
-/// higher priority. Rows that don't classify into one of the ten buckets are
-/// excluded from Active and (when the Pinned section is in play) fall to the
-/// bottom of Pinned alphabetically.
+/// Classification buckets for the global Active section. Membership only:
+/// a non-nil classification means the row belongs in Active (ordering is
+/// alphabetical, see `SidebarHighlightOrdering`). Rows that don't classify
+/// are excluded from Active but still appear in Pinned. Cases are ordered by
+/// severity; `classify` returns the most severe that matches (errored first).
 enum SidebarActiveClassification: Int, CaseIterable, Comparable, Sendable {
+  /// An agent stopped on an error.
+  case errored = 0
   case unreadAwaitingRunning = 1
   case unreadAwaiting = 2
   case unreadAgentRunning = 3
@@ -65,7 +68,9 @@ enum SidebarActiveClassification: Int, CaseIterable, Comparable, Sendable {
   /// Active even when the agent isn't actively working; `state.agents` is
   /// already empty when badges are disabled by the user.
   static func classify(_ state: SidebarItemFeature.State) -> Self? {
-    classify(
+    // Error wins the classification when a row also has other Active signals.
+    if state.hasAgentError { return .errored }
+    return classify(
       hasUnread: state.hasUnseenNotifications,
       hasAwaiting: state.hasAgentAwaitingInput,
       hasAgent: !state.agents.isEmpty,
@@ -74,44 +79,50 @@ enum SidebarActiveClassification: Int, CaseIterable, Comparable, Sendable {
   }
 }
 
-/// Pure ordering layer behind the highlight aggregator: priority sort over
-/// `SidebarActiveClassification`, alphabetical tie-break. Pinned keeps
-/// unclassified rows at the bottom; Active drops them.
+/// Pure ordering layer behind the highlight aggregator. Alphabetical
+/// (case-insensitive) by branch name, with unread rows floated to the top
+/// when `prioritizeNotified` is set. Classification only gates membership:
+/// Active drops unclassified rows, Pinned keeps them. `id` is the final
+/// tie-break so rows sharing a branch name across repos keep a deterministic
+/// order (the sort is otherwise unstable).
 enum SidebarHighlightOrdering {
   struct Candidate: Equatable, Sendable {
     let id: SidebarItemID
     let branchName: String
+    let isNotified: Bool
     let classification: SidebarActiveClassification?
   }
 
   static func orderedRowIDs(
     forPinned: Bool,
+    prioritizeNotified: Bool,
     candidates: [Candidate]
   ) -> [SidebarItemID] {
-    struct Entry {
-      let id: SidebarItemID
-      let priority: Int
-      let sortKey: String
-    }
-    let unclassifiedPriority = SidebarActiveClassification.allCases.count + 1
-    var entries: [Entry] = []
-    entries.reserveCapacity(candidates.count)
-    for candidate in candidates {
-      if forPinned {
-        let priority = candidate.classification?.rawValue ?? unclassifiedPriority
-        entries.append(Entry(id: candidate.id, priority: priority, sortKey: candidate.branchName))
-      } else {
-        guard let classification = candidate.classification else { continue }
-        entries.append(
-          Entry(id: candidate.id, priority: classification.rawValue, sortKey: candidate.branchName)
-        )
+    let included = forPinned ? candidates : candidates.filter { $0.classification != nil }
+    return
+      included
+      .sorted { lhs, rhs in
+        if prioritizeNotified, lhs.isNotified != rhs.isNotified {
+          return lhs.isNotified
+        }
+        return branchNameOrdersBefore(lhs.branchName, id: lhs.id, rhs.branchName, id: rhs.id)
       }
+      .map(\.id)
+  }
+
+  /// Case-insensitive branch-name order with `id` as the deterministic final
+  /// tie-break (the sort is otherwise unstable, so equal names could flip).
+  static func branchNameOrdersBefore(
+    _ lhsName: String,
+    id lhsID: SidebarItemID,
+    _ rhsName: String,
+    id rhsID: SidebarItemID
+  ) -> Bool {
+    switch lhsName.localizedCaseInsensitiveCompare(rhsName) {
+    case .orderedAscending: return true
+    case .orderedDescending: return false
+    case .orderedSame: return lhsID.rawValue < rhsID.rawValue
     }
-    entries.sort { lhs, rhs in
-      if lhs.priority != rhs.priority { return lhs.priority < rhs.priority }
-      return lhs.sortKey.localizedCaseInsensitiveCompare(rhs.sortKey) == .orderedAscending
-    }
-    return entries.map(\.id)
   }
 }
 
@@ -223,6 +234,15 @@ struct SidebarStructure: Equatable, Sendable {
       color: RepositoryColor?,
       isRemote: Bool
     )
+    /// A persisted local git root whose worktrees can't be listed right now
+    /// because git itself is environment-blocked. Not broken, so it's a warning
+    /// row (not a removable failure row); the bottom banner carries the remedy.
+    case environmentBlockedRepository(
+      repositoryID: Repository.ID,
+      rootURL: URL,
+      customTitle: String?,
+      color: RepositoryColor?
+    )
     case placeholder
 
     var id: SectionID {
@@ -231,6 +251,7 @@ struct SidebarStructure: Equatable, Sendable {
       case .repository(let repositoryID, _): .repository(repositoryID)
       case .folder(let repositoryID, _): .folder(repositoryID)
       case .failedRepository(let repositoryID, _, _, _, _): .failedRepository(repositoryID)
+      case .environmentBlockedRepository(let repositoryID, _, _, _): .environmentBlockedRepository(repositoryID)
       case .placeholder: .placeholder
       }
     }
@@ -240,6 +261,7 @@ struct SidebarStructure: Equatable, Sendable {
       case repository(Repository.ID)
       case folder(Repository.ID)
       case failedRepository(Repository.ID)
+      case environmentBlockedRepository(Repository.ID)
       case placeholder
     }
   }
@@ -316,6 +338,25 @@ extension RepositoriesFeature.State {
     }
   }
 
+  /// Refreshes the cached `sidebarSelectionSlice` from the effective selection,
+  /// Equatable-diffed so a no-op rebuild doesn't invalidate the sidebar's
+  /// observation surface. Kept off `sidebarStructure` so an arrow-key selection
+  /// move recomputes a `|selection|`-sized value, not the whole render plan.
+  mutating func recomputeSidebarSelectionSliceIfChanged() {
+    let new = computeSidebarSelectionSlice()
+    if new != sidebarSelectionSlice {
+      sidebarSelectionSlice = new
+    }
+  }
+
+  /// Drops open-action entries for repositories that left the roster. Pure: the
+  /// resolution itself reads disk and lives in `.resolveOpenActions`, but pruning
+  /// needs nothing but the roster.
+  mutating func pruneOpenActionsForRemovedRepositoriesIfChanged() {
+    guard openActionByRepositoryID.contains(where: { repositories[id: $0.key] == nil }) else { return }
+    openActionByRepositoryID = openActionByRepositoryID.filter { repositories[id: $0.key] != nil }
+  }
+
   /// Equatable-diffs the toolbar notification snapshot against the cache so a
   /// per-row notification append only invalidates SwiftUI when the toolbar
   /// projection actually changes.
@@ -323,6 +364,17 @@ extension RepositoriesFeature.State {
     let new = computeToolbarNotificationGroups()
     if new != toolbarNotificationGroupsCache {
       toolbarNotificationGroupsCache = new
+    }
+  }
+
+  /// Equatable-diffs the menu bar sections against the cache so the status menu
+  /// only rebuilds when the rows it renders actually change. Computes its own
+  /// Pinned/Active hoists (as if sidebar grouping were on), so the menu stays
+  /// independent of the user's grouping toggles.
+  mutating func recomputeMenuBarSectionsIfChanged() {
+    let new = computeMenuBarSections()
+    if new != menuBarSectionsCache {
+      menuBarSectionsCache = new
     }
   }
 }
@@ -336,22 +388,41 @@ struct CacheInvalidations: OptionSet {
   static let sidebarStructure = CacheInvalidations(rawValue: 1 << 0)
   static let selectedWorktreeSlice = CacheInvalidations(rawValue: 1 << 1)
   static let toolbarNotificationGroups = CacheInvalidations(rawValue: 1 << 2)
-  static let all: CacheInvalidations = [
-    .sidebarStructure, .selectedWorktreeSlice, .toolbarNotificationGroups,
+  static let sidebarSelectionSlice = CacheInvalidations(rawValue: 1 << 3)
+  /// Barely a cache recompute: the post-reduce hook prunes entries for dropped
+  /// repositories (pure) and launches the off-main resolution effect (the read).
+  /// Set it on any arm whose inputs (the repository roster, the installed
+  /// editors, the open-action settings) can change the map.
+  static let openActionResolution = CacheInvalidations(rawValue: 1 << 4)
+  /// The four row-derived sidebar caches. Excludes `.openActionResolution`,
+  /// which is keyed by repository: no worktree-level mutation (rename, archive,
+  /// delete, customize) can change the open-action map.
+  static let allSidebar: CacheInvalidations = [
+    .sidebarStructure, .selectedWorktreeSlice, .toolbarNotificationGroups, .sidebarSelectionSlice,
   ]
+  /// Every bit: the row-derived caches plus the roster-scoped open-action resolution.
+  static let all: CacheInvalidations = [.allSidebar, .openActionResolution]
 }
 
 extension SidebarItemFeature.Action {
   var cacheInvalidations: CacheInvalidations {
     switch self {
-    case .lifecycleChanged, .runningScriptStarted, .runningScriptStopped:
-      return [.sidebarStructure, .selectedWorktreeSlice]
+    // `.sidebarSelectionSlice` because the context menu gates archive / delete
+    // / rename on the selected rows' lifecycle.
+    case .lifecycleChanged:
+      return [.sidebarStructure, .selectedWorktreeSlice, .sidebarSelectionSlice]
     case .agentSnapshotChanged:
       return .sidebarStructure
+    // `.selectedWorktreeSlice` because the projection carries the focused row's
+    // `runningScripts` (toolbar Run/Stop state). Never `.sidebarSelectionSlice`:
+    // this is the per-leaf terminal tick and the selection slice projects none
+    // of what it carries, so it must not walk the selection on every notification.
     case .terminalProjectionChanged:
-      return [.sidebarStructure, .toolbarNotificationGroups]
+      return [.sidebarStructure, .selectedWorktreeSlice, .toolbarNotificationGroups]
+    // `.toolbarNotificationGroups` because the notification header bakes the
+    // row's resolved pull-request glyph into that cache.
     case .pullRequestChanged:
-      return .selectedWorktreeSlice
+      return [.selectedWorktreeSlice, .toolbarNotificationGroups]
     case .diffStatsChanged, .pullRequestQueryStarted,
       .dragSessionChanged,
       .focusTerminalRequested, .focusTerminalConsumed:
@@ -372,23 +443,45 @@ extension RepositoriesFeature.Action {
     case .sidebarItems:
       return []
 
-    // Sidebar layout toggles only.
+    // Sidebar layout toggles only. `setMoveNotifiedWorktreeToTop` re-sorts the
+    // highlight sections (unread float), so a runtime toggle must recompute.
     case .sidebarGroupingTogglesChanged, .sidebarNestByBranchChanged,
       .repositoryExpansionChanged, .branchNestExpansionChanged,
-      .repositoriesMoved, .pinnedWorktreesMoved, .unpinnedWorktreesMoved,
-      .worktreeNotificationReceived, .worktreeLineChangesLoaded,
+      .setAllSidebarGroupsExpanded,
+      .setMoveNotifiedWorktreeToTop,
+      .worktreeLineChangesLoaded,
       .consumeTerminalFocus:
       return .sidebarStructure
 
-    // Bulk repository / worktree set changes that touch all caches.
+    // Reorders rewrite the bucket order the selection slice's rows are walked
+    // in, so the cached selection order would otherwise go stale.
+    case .repositoriesMoved, .pinnedWorktreesMoved, .unpinnedWorktreesMoved:
+      return [.sidebarStructure, .sidebarSelectionSlice]
+
+    // Repository-roster changes (repos added, removed, or reloaded): the only
+    // bulk arms that rewrite the open-action map's repo keys.
     case .repositoriesLoaded, .openRepositoriesFinished,
       .repositoryRemovalCompleted, .repositoriesRemoved,
-      .removeFailedRepository, .remoteRepositoryResolved,
-      .archiveWorktreeApply, .unarchiveWorktree,
+      .removeFailedRepository, .remoteRepositoryResolved:
+      return .all
+
+    // The other inputs of the open-action map: the installed editors and the
+    // per-repo / global open-action settings. Neither touches a sidebar row.
+    case .setInstalledOpenActions, .openActionSettingsChanged:
+      return .openActionResolution
+
+    // Resolution itself: `.resolveOpenActions` runs the effect the bits above
+    // arm, and `.openActionsResolved` only stores its result. Neither may re-arm
+    // resolution, or the two would feed each other.
+    case .resolveOpenActions, .openActionsResolved:
+      return []
+
+    // Worktree-set changes inside an unchanged repo roster.
+    case .archiveWorktreeApply, .unarchiveWorktree,
       .deleteWorktreeApply, .worktreeDeleted,
       .createWorktreeInRepository, .createRandomWorktreeInRepository,
       .autoDeleteExpiredArchivedWorktrees:
-      return .all
+      return .allSidebar
 
     // `worktreeInfoEvent` is a pure effect-launcher (HEAD watcher tick): the
     // arm only spawns `.run { ... await send(.branchNameLoaded(...)) }` etc.
@@ -402,8 +495,8 @@ extension RepositoriesFeature.Action {
     case .resolveRemoteRepositories:
       return []
 
-    // Pure signal observed by AppFeature to drain a parked CLI ack; no state.
-    case .cliWorktreeAckCancelled:
+    // Pure signals observed by AppFeature to drain a parked CLI ack; no state.
+    case .cliWorktreeAckCancelled, .archiveWorktreeApplied, .archiveWorktreeApplyFailed:
       return []
 
     // `worktreeBranchNameLoaded` mutates `worktree.name` via `updateWorktreeName`,
@@ -411,41 +504,67 @@ extension RepositoriesFeature.Action {
     // Without `.toolbarNotificationGroups` the popover would show the old name
     // until an unrelated bulk action recomputed the cache.
     case .worktreeBranchNameLoaded:
-      return .all
+      return .allSidebar
 
-    // Layout + slice but not the notification snapshot (no notification touch).
+    // Layout + slices but not the notification snapshot (no notification touch).
+    // The pin flips and the create / script paths rewrite `isPinned`, the row
+    // roster, or the selection, all of which the selection slice projects.
     case .createRandomWorktreeSucceeded, .createRandomWorktreeFailed,
       .pendingWorktreeProgressUpdated,
       .archiveScriptCompleted, .deleteScriptCompleted, .scriptCompleted,
       .consumeSetupScript,
-      .pinWorktree, .unpinWorktree,
-      .repositoryPullRequestsLoaded:
+      .pinWorktree, .unpinWorktree:
+      return [.sidebarStructure, .selectedWorktreeSlice, .sidebarSelectionSlice]
+
+    // Pull-request data isn't projected into the selection slice.
+    case .repositoryPullRequestsLoaded:
       return [.sidebarStructure, .selectedWorktreeSlice]
 
-    // Selection changes only refresh the slice.
+    // Selection changes refresh both selection-derived caches.
     case .selectionChanged, .selectWorktree, .selectArchivedWorktrees,
       .selectNextWorktree, .selectPreviousWorktree, .selectWorktreeAtHotkeySlot,
-      .worktreeHistoryBack, .worktreeHistoryForward:
-      return .selectedWorktreeSlice
+      .worktreeHistoryBack, .worktreeHistoryForward,
+      .setSidebarSelectedWorktreeIDs:
+      return [.selectedWorktreeSlice, .sidebarSelectionSlice]
 
     // Repo customization save mutates the section title / color, which flow
     // into the sidebar layout's highlight tag and the notification group name.
     case .repositoryCustomization(.presented(.delegate(.save))):
-      return .all
+      return .allSidebar
     case .repositoryCustomization:
       return []
 
     // Worktree customization save mutates the bucketed Item's title / color, picked up via
     // per-row `customTitle` / `customTint` mirror (highlight tags + notification group name).
     case .worktreeCustomization(.presented(.delegate(.save))):
-      return .all
+      return .allSidebar
+    // Deeplink / CLI appearance update mutates the same fields as the sheet save.
+    case .setWorktreeAppearance:
+      return .allSidebar
     case .worktreeCustomization:
       return []
 
     // Branch rename updates the worktree.name shown in the sidebar row and notification group.
     case .renameBranchPrompt(.presented(.delegate(.renamed))):
-      return .all
+      return .allSidebar
     case .renameBranchPrompt:
+      return []
+
+    // The two confirm handlers that seed `removingRepositoryIDs` and resync the
+    // sidebar. `syncSidebar` is the only path that births or kills a row, and it
+    // flips a pending row's lifecycle to `.deleting`, which every row-derived
+    // cache projects (the context menu gates archive / delete / rename on it).
+    case .alert(.presented(.confirmDeleteSidebarItems)),
+      .alert(.presented(.confirmDeleteRepository)):
+      return .allSidebar
+    // The remaining alert arms only clear `state.alert` and forward an action;
+    // the forwarded action declares its own invalidations. Listed one by one so a
+    // new alert that mutates a row cannot default into this bucket.
+    case .alert(.presented(.confirmArchiveWorktree)),
+      .alert(.presented(.confirmArchiveWorktrees)),
+      .alert(.presented(.confirmRemoveFailedRepository)),
+      .alert(.presented(.viewTerminalTab)),
+      .alert(.dismiss):
       return []
 
     // Everything else is UI / effects / transient state, no cache touched.
@@ -455,7 +574,9 @@ extension RepositoriesFeature.Action {
       .loadPersistedRepositories,
       .removeRemoteRepository,
       .refreshWorktrees, .reloadRepositories,
-      .setSidebarSelectedWorktreeIDs,
+      // Blocked-git warning rows recompute via the paired bulk load action that
+      // always follows `.gitEnvironmentChanged`, so this needs no invalidation.
+      .gitEnvironmentChanged,
       .openRepositories,
       .revealSelectedWorktreeInSidebar, .revealHoistedWorktreeInSidebar,
       .consumePendingSidebarReveal,
@@ -475,16 +596,15 @@ extension RepositoriesFeature.Action {
       .setGithubIntegrationEnabled,
       .setMergedWorktreeAction,
       .setAutoDeleteArchivedWorktreesAfterDays,
-      .setMoveNotifiedWorktreeToTop,
       .pullRequestAction,
       .showToast, .dismissToast,
+      .toggleInspectorPane, .setInspectorPresented,
       .delayedPullRequestRefresh,
       .openRepositorySettings, .requestCustomizeRepository,
       .requestCustomizeWorktree,
       .requestRenameBranch,
       .contextMenuOpenWorktree,
       .worktreeCreationPrompt,
-      .alert,
       .delegate:
       return []
     }
@@ -494,8 +614,12 @@ extension RepositoriesFeature.Action {
 extension RepositoriesFeature.State {
   /// Single source of truth for the post-reduce cache recompute. The
   /// production hook in `RepositoriesFeature.body` and the test mirror in
-  /// `RepositoriesSidebarTestHelpers` both call this so a fourth cache lands
+  /// `RepositoriesSidebarTestHelpers` both call this so a new cache lands
   /// in one place instead of needing two coordinated updates.
+  ///
+  /// Pure by contract: every recompute here is a function of state alone.
+  /// `.openActionResolution` only prunes here; resolving an entry reads that
+  /// repository's `supacode.json`, and a reducer must not touch disk.
   @MainActor
   mutating func applyCacheRecomputes(_ invalidations: CacheInvalidations) {
     if invalidations.contains(.sidebarStructure) {
@@ -504,8 +628,19 @@ extension RepositoriesFeature.State {
     if invalidations.contains(.selectedWorktreeSlice) {
       recomputeSelectedWorktreeSliceIfChanged()
     }
+    if invalidations.contains(.sidebarSelectionSlice) {
+      recomputeSidebarSelectionSliceIfChanged()
+    }
     if invalidations.contains(.toolbarNotificationGroups) {
       recomputeToolbarNotificationGroupsIfChanged()
+    }
+    // The menu bar rows key off notifications *and* agent activity, and agent
+    // snapshots only invalidate `.sidebarStructure`, so they need both flags.
+    if !invalidations.isDisjoint(with: [.sidebarStructure, .toolbarNotificationGroups]) {
+      recomputeMenuBarSectionsIfChanged()
+    }
+    if invalidations.contains(.openActionResolution) {
+      pruneOpenActionsForRemovedRepositoriesIfChanged()
     }
   }
 
@@ -537,6 +672,19 @@ extension RepositoriesFeature.State {
   /// reducer (see `recomputeSidebarStructure(...)`); never call from a view
   /// body or the per-leaf reads here will observation-track every row at
   /// the parent and reintroduce the regression commit `0a1ed578` documents.
+  /// Local git roots we can't read because git is environment-blocked: present
+  /// in `repositoryRoots` but with no loaded repository and no failure entry
+  /// while the gate is active. Rendered as warning rows, and shielded from
+  /// terminal prune so a transient gate doesn't tear down their live sessions.
+  var environmentBlockedRepositoryIDs: Set<Repository.ID> {
+    guard gitEnvironmentError != nil else { return [] }
+    return Set(
+      repositoryRoots
+        .map { RepositoryID($0.standardizedFileURL.path(percentEncoded: false)) }
+        .filter { repositories[id: $0] == nil && loadFailuresByID[$0] == nil }
+    )
+  }
+
   func computeSidebarStructure(
     groupPinned: Bool,
     groupActive: Bool
@@ -588,8 +736,16 @@ extension RepositoriesFeature.State {
     )
   }
 
-  /// Hoisted-row payload for a single structure pass.
-  private struct HighlightHoists {
+  /// Pinned and Active hoists computed as if both sidebar grouping toggles were
+  /// enabled, so the menu bar always lists them regardless of the user's sidebar
+  /// grouping preference. Carries their union for the menu's Unread dedupe.
+  func menuBarForcedHoists() -> HighlightHoists {
+    computeHighlightHoists(groupPinned: true, groupActive: true)
+  }
+
+  /// Hoisted-row payload for one highlight-hoist pass (the sidebar structure
+  /// pass, or the menu bar's forced-on pass).
+  struct HighlightHoists {
     var pinned: [Worktree.ID]
     var active: [Worktree.ID]
     var hoistedSet: Set<Worktree.ID>
@@ -637,6 +793,7 @@ extension RepositoriesFeature.State {
   private func buildRepositorySections(hoisted: Set<Worktree.ID>) -> RepositorySectionsBuild {
     var sections: [SidebarStructure.Section] = []
     var reorderableRepositoryIDs: [Repository.ID] = []
+    let blockedRepositoryIDs = environmentBlockedRepositoryIDs
     let pendingIDsByRepo: [Repository.ID: Set<Worktree.ID>] = Dictionary(
       grouping: pendingWorktrees,
       by: \.repositoryID
@@ -676,6 +833,23 @@ extension RepositoriesFeature.State {
             customTitle: sectionEntry?.title ?? folderItem?.title,
             color: sectionEntry?.color ?? folderItem?.color,
             isRemote: isRemote
+          )
+        )
+        continue
+      }
+
+      // A git root we couldn't list because git itself is environment-blocked.
+      // Surface a warning row so the repo doesn't look removed. Folder roots keep
+      // a repository entry, so they never fall here.
+      if blockedRepositoryIDs.contains(repositoryID), let rootURL = localRootsByID[repositoryID] {
+        let sectionEntry = sidebar.sections[repositoryID]
+        let folderItem = sectionEntry?.folderWorktreeItem(for: repositoryID)
+        sections.append(
+          .environmentBlockedRepository(
+            repositoryID: repositoryID,
+            rootURL: rootURL,
+            customTitle: sectionEntry?.title ?? folderItem?.title,
+            color: sectionEntry?.color ?? folderItem?.color
           )
         )
         continue
@@ -810,7 +984,7 @@ extension RepositoriesFeature.State {
     var ids: [Worktree.ID] = []
     for section in sections {
       switch section {
-      case .highlight, .placeholder, .failedRepository:
+      case .highlight, .placeholder, .failedRepository, .environmentBlockedRepository:
         continue
       case .folder(_, let rowID):
         ids.append(rowID)
@@ -826,9 +1000,9 @@ extension RepositoriesFeature.State {
     return ids
   }
 
-  /// Materialize candidates by reading branchName + classification flags
-  /// from each leaf, then delegate to the pure `SidebarHighlightOrdering`
-  /// sorter.
+  /// Materialize candidates by reading branchName + notification / classification
+  /// flags from each leaf, then delegate to the pure `SidebarHighlightOrdering`
+  /// sorter. `moveNotifiedWorktreeToTop` floats unread rows to the top.
   private func orderedHighlightCandidates(
     forPinned: Bool,
     candidateIDs: [SidebarItemID],
@@ -843,11 +1017,16 @@ extension RepositoriesFeature.State {
         SidebarHighlightOrdering.Candidate(
           id: id,
           branchName: state.branchName,
+          isNotified: state.hasUnseenNotifications,
           classification: SidebarActiveClassification.classify(state)
         )
       )
     }
-    return SidebarHighlightOrdering.orderedRowIDs(forPinned: forPinned, candidates: candidates)
+    return SidebarHighlightOrdering.orderedRowIDs(
+      forPinned: forPinned,
+      prioritizeNotified: moveNotifiedWorktreeToTop,
+      candidates: candidates
+    )
   }
 }
 
@@ -958,7 +1137,8 @@ extension SidebarItemGroup {
 
   /// Case-insensitive sort by `branchName`, matching `SidebarBranchNesting.buildRows`.
   /// Fallback to the row id keeps a transient missing leaf from breaking sort
-  /// stability rather than crashing.
+  /// stability rather than crashing. `id` is the final tie-break so equal
+  /// branch names keep a deterministic order.
   private static func sortedByBranchName(
     _ ids: [SidebarItemID],
     in state: RepositoriesFeature.State
@@ -966,7 +1146,7 @@ extension SidebarItemGroup {
     ids.sorted { lhs, rhs in
       let lhsName = state.sidebarItems[id: lhs]?.branchName ?? lhs.rawValue
       let rhsName = state.sidebarItems[id: rhs]?.branchName ?? rhs.rawValue
-      return lhsName.localizedCaseInsensitiveCompare(rhsName) == .orderedAscending
+      return SidebarHighlightOrdering.branchNameOrdersBefore(lhsName, id: lhs, rhsName, id: rhs)
     }
   }
 

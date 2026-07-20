@@ -26,6 +26,37 @@ public nonisolated enum AutoDeletePeriod: Int, Codable, CaseIterable, Comparable
   }
 }
 
+/// Per-worktree ceiling on retained notifications. Bounds memory and the
+/// inspector's render cost so a long-lived worktree can't accumulate an
+/// unbounded backlog. Finite tiers store the count as their raw value;
+/// `.unlimited` is a sentinel (see below).
+public nonisolated enum NotificationRetentionLimit: Int, Codable, CaseIterable, Sendable {
+  case oneHundred = 100
+  case twoHundred = 200
+  case fiveHundred = 500
+  case oneThousand = 1000
+  /// No cap. The raw value is only the on-disk token (an enum case can't be
+  /// `= .max`, which isn't a literal); `limit` maps it to `Int.max`.
+  case unlimited = 0
+
+  /// Maximum notifications kept per worktree; `.unlimited` maps to `Int.max`,
+  /// so trimming's `count > limit` guard is a no-op with no special-casing.
+  public var limit: Int { self == .unlimited ? .max : rawValue }
+
+  /// The value new installs get; the picker tags it with "Default".
+  public static let defaultValue: NotificationRetentionLimit = .twoHundred
+
+  public var label: String {
+    switch self {
+    case .oneHundred: "100"
+    case .twoHundred: "200"
+    case .fiveHundred: "500"
+    case .oneThousand: "1,000"
+    case .unlimited: "Unlimited"
+    }
+  }
+}
+
 public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
   public var appearanceMode: AppearanceMode
   public var defaultEditorID: String
@@ -37,6 +68,7 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
   public var systemNotificationsEnabled: Bool
   public var muteNotificationsForActiveSurface: Bool
   public var moveNotifiedWorktreeToTop: Bool
+  public var notificationRetentionLimit: NotificationRetentionLimit
   public var analyticsEnabled: Bool
   public var crashReportsEnabled: Bool
   public var githubIntegrationEnabled: Bool
@@ -67,9 +99,14 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
   public var autoUpdateAgentIntegrationsEnabled: Bool
   public var confirmQuitMode: ConfirmQuitMode
   /// When true, quitting Supacode also closes every terminal tab and tears
-  /// down the bundled zmx daemon's sessions, so nothing keeps running in
-  /// the background. Default off because persistence is the headline feature.
+  /// down zmx sessions, local and host-side, so nothing keeps running in the
+  /// background. Default off because persistence is the headline feature.
   public var terminateSessionsOnQuit: Bool
+  /// When true, remote surfaces wrap their session in zmx on the host when
+  /// the host has it installed, so the session survives disconnects.
+  public var remoteSessionPersistenceEnabled: Bool
+  /// Where Supacode appears: Dock, menu bar, or both.
+  public var appVisibility: AppVisibility
 
   /// Valid range for `maxPinnedToolbarButtons`, enforced on decode and by the
   /// General-settings stepper.
@@ -90,7 +127,8 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     notificationSound: .hero,
     systemNotificationsEnabled: false,
     muteNotificationsForActiveSurface: true,
-    moveNotifiedWorktreeToTop: true,
+    moveNotifiedWorktreeToTop: false,
+    notificationRetentionLimit: .defaultValue,
     analyticsEnabled: true,
     crashReportsEnabled: true,
     githubIntegrationEnabled: true,
@@ -113,7 +151,9 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     agentPresenceBadgesEnabled: true,
     autoUpdateAgentIntegrationsEnabled: true,
     confirmQuitMode: .auto,
-    terminateSessionsOnQuit: false
+    terminateSessionsOnQuit: false,
+    remoteSessionPersistenceEnabled: true,
+    appVisibility: .dock
   )
 
   public init(
@@ -127,6 +167,7 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     systemNotificationsEnabled: Bool = false,
     muteNotificationsForActiveSurface: Bool = true,
     moveNotifiedWorktreeToTop: Bool,
+    notificationRetentionLimit: NotificationRetentionLimit = .defaultValue,
     analyticsEnabled: Bool,
     crashReportsEnabled: Bool,
     githubIntegrationEnabled: Bool,
@@ -149,7 +190,9 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     agentPresenceBadgesEnabled: Bool = true,
     autoUpdateAgentIntegrationsEnabled: Bool = true,
     confirmQuitMode: ConfirmQuitMode = .auto,
-    terminateSessionsOnQuit: Bool = false
+    terminateSessionsOnQuit: Bool = false,
+    remoteSessionPersistenceEnabled: Bool = true,
+    appVisibility: AppVisibility = .dock
   ) {
     self.appearanceMode = appearanceMode
     self.defaultEditorID = defaultEditorID
@@ -161,6 +204,7 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     self.systemNotificationsEnabled = systemNotificationsEnabled
     self.muteNotificationsForActiveSurface = muteNotificationsForActiveSurface
     self.moveNotifiedWorktreeToTop = moveNotifiedWorktreeToTop
+    self.notificationRetentionLimit = notificationRetentionLimit
     self.analyticsEnabled = analyticsEnabled
     self.crashReportsEnabled = crashReportsEnabled
     self.githubIntegrationEnabled = githubIntegrationEnabled
@@ -184,6 +228,8 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     self.autoUpdateAgentIntegrationsEnabled = autoUpdateAgentIntegrationsEnabled
     self.confirmQuitMode = confirmQuitMode
     self.terminateSessionsOnQuit = terminateSessionsOnQuit
+    self.remoteSessionPersistenceEnabled = remoteSessionPersistenceEnabled
+    self.appVisibility = appVisibility
   }
 
   /// Keys for reading renamed settings fields that no longer
@@ -232,6 +278,11 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     moveNotifiedWorktreeToTop =
       try container.decodeIfPresent(Bool.self, forKey: .moveNotifiedWorktreeToTop)
       ?? Self.default.moveNotifiedWorktreeToTop
+    // Reject unrecognized values from corrupted or hand-edited settings files.
+    notificationRetentionLimit =
+      (try container.decodeIfPresent(Int.self, forKey: .notificationRetentionLimit))
+      .flatMap(NotificationRetentionLimit.init(rawValue:))
+      ?? Self.default.notificationRetentionLimit
     analyticsEnabled =
       try container.decodeIfPresent(Bool.self, forKey: .analyticsEnabled)
       ?? Self.default.analyticsEnabled
@@ -348,5 +399,14 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     terminateSessionsOnQuit =
       try container.decodeIfPresent(Bool.self, forKey: .terminateSessionsOnQuit)
       ?? Self.default.terminateSessionsOnQuit
+    remoteSessionPersistenceEnabled =
+      try container.decodeIfPresent(Bool.self, forKey: .remoteSessionPersistenceEnabled)
+      ?? Self.default.remoteSessionPersistenceEnabled
+    // Reject unrecognized values (and a mistyped key) from corrupted or
+    // hand-edited settings files: a throw here resets the whole file to defaults.
+    appVisibility =
+      ((try? container.decodeIfPresent(String.self, forKey: .appVisibility)) ?? nil)
+      .flatMap(AppVisibility.init(rawValue:))
+      ?? Self.default.appVisibility
   }
 }

@@ -13,6 +13,52 @@ import Testing
 
 @MainActor
 struct RepositoriesFeatureTests {
+  @Test func toggleInspectorPaneOpensSwapsAndCloses() async {
+    let store = TestStore(initialState: RepositoriesFeature.State()) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.sidebarStructureAutoRecompute = false
+    }
+
+    // Opens on the target pane (which defaults to `.git`).
+    await store.send(.toggleInspectorPane(.git)) {
+      $0.inspectorPresented = true
+    }
+    // A different pane swaps the inspector content while staying open.
+    await store.send(.toggleInspectorPane(.notifications)) {
+      $0.inspectorPane = .notifications
+    }
+    // Re-toggling the active pane closes the inspector but keeps the pane.
+    await store.send(.toggleInspectorPane(.notifications)) {
+      $0.inspectorPresented = false
+    }
+    // Toggling the retained pane while closed reopens it (the guard leans on
+    // `inspectorPresented`, not the pane, to decide open vs close).
+    await store.send(.toggleInspectorPane(.notifications)) {
+      $0.inspectorPresented = true
+    }
+  }
+
+  @Test func setInspectorPresentedKeepsSelectedPane() async {
+    var initialState = RepositoriesFeature.State()
+    initialState.inspectorPane = .notifications
+    initialState.inspectorPresented = true
+    let store = TestStore(initialState: initialState) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.sidebarStructureAutoRecompute = false
+    }
+
+    // A drag-to-collapse only flips presentation; the pane must survive so a
+    // drag back open doesn't render an empty inspector.
+    await store.send(.setInspectorPresented(false)) {
+      $0.inspectorPresented = false
+    }
+    await store.send(.setInspectorPresented(true)) {
+      $0.inspectorPresented = true
+    }
+  }
+
   @Test func refreshWorktreesSetsRefreshingStateUntilLoadCompletes() async {
     let worktree = makeWorktree(id: "/tmp/repo/main", name: "main")
     let repository = makeRepository(id: "/tmp/repo", worktrees: [worktree])
@@ -26,10 +72,15 @@ struct RepositoriesFeatureTests {
       $0.isRefreshingWorktrees = true
     }
     await store.receive(\.reloadRepositories)
+    await store.receive(\.gitEnvironmentChanged)
     await store.receive(\.repositoriesLoaded) {
       $0.isRefreshingWorktrees = false
       $0.isInitialLoadComplete = true
       $0.reconcileSidebarForTesting()
+    }
+    // The roster landed, so the open-action map resolves off the reducer.
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [repository.id: .finder]
     }
   }
 
@@ -66,6 +117,9 @@ struct RepositoriesFeatureTests {
       $0.isRefreshingWorktrees = false
       $0.isInitialLoadComplete = true
       $0.reconcileSidebarForTesting()
+    }
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [repository.id: .finder]
     }
   }
 
@@ -127,6 +181,9 @@ struct RepositoriesFeatureTests {
       $0.isInitialLoadComplete = true
       $0.reconcileSidebarForTesting()
     }
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [mainOnlyRepository.id: .finder]
+    }
     #expect(
       store.state.sidebar.sections[RepositoryID(repoRoot)]?.buckets[.pinned]?.items[featureWorktree.id] != nil
     )
@@ -149,6 +206,8 @@ struct RepositoriesFeatureTests {
       }
       $0.reconcileSidebarForTesting()
     }
+    // Every roster load re-reads the open actions. Nothing changed, so it writes nothing.
+    await store.receive(\.openActionsResolved)
     #expect(
       store.state.sidebar.sections[RepositoryID(repoRoot)]?.buckets[.pinned]?.items[featureWorktree.id] == nil
     )
@@ -164,7 +223,8 @@ struct RepositoriesFeatureTests {
     await store.send(.selectWorktree(worktree.id)) {
       $0.selection = .worktree(worktree.id)
       $0.sidebarSelectedWorktreeIDs = [worktree.id]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [worktree.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
   }
@@ -185,7 +245,8 @@ struct RepositoriesFeatureTests {
       $0.selection = .worktree(wt2.id)
       $0.sidebarSelectedWorktreeIDs = [wt2.id]
       $0.worktreeHistoryBackStack = [wt1.id]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [wt2.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
   }
@@ -247,6 +308,7 @@ struct RepositoriesFeatureTests {
       $0.selection = .worktree(wt2.id)
       $0.sidebarSelectedWorktreeIDs = [wt2.id, wt3.id]
       $0.worktreeHistoryBackStack = [wt1.id]
+      $0.worktreeMRU = [wt2.id]
       $0.sidebarItems[id: wt2.id]?.shouldFocusTerminal = true
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
@@ -265,7 +327,7 @@ struct RepositoriesFeatureTests {
     await store.send(.selectionChanged([])) {
       $0.selection = nil
       $0.sidebarSelectedWorktreeIDs = []
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
   }
@@ -284,7 +346,7 @@ struct RepositoriesFeatureTests {
     await store.send(.selectionChanged([.archivedWorktrees])) {
       $0.selection = .archivedWorktrees
       $0.sidebarSelectedWorktreeIDs = []
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
   }
@@ -327,6 +389,183 @@ struct RepositoriesFeatureTests {
     await store.send(.repositoryExpansionChanged(repository.id, isExpanded: false))
   }
 
+  @Test func setAllSidebarGroupsExpandedCollapsesEveryRepositorySection() async {
+    let worktreeA = makeWorktree(id: "/tmp/repoA/wt1", name: "wt1", repoRoot: "/tmp/repoA")
+    let worktreeB = makeWorktree(id: "/tmp/repoB/wt1", name: "wt1", repoRoot: "/tmp/repoB")
+    let repoA = makeRepository(id: "/tmp/repoA", name: "repoA", worktrees: [worktreeA])
+    let repoB = makeRepository(id: "/tmp/repoB", name: "repoB", worktrees: [worktreeB])
+    var initialState = makeState(repositories: [repoA, repoB])
+    initialState.reconcileSidebarForTesting()
+    let store = TestStore(initialState: initialState) {
+      RepositoriesFeature()
+    }
+
+    // No repo has a persisted section yet, so collapse-all must materialize one
+    // for every repo in the roster.
+    await store.send(.setAllSidebarGroupsExpanded(false)) {
+      $0.$sidebar.withLock { sidebar in
+        for repositoryID in [repoA.id, repoB.id] {
+          sidebar.sections[repositoryID, default: .init()].collapsed = true
+        }
+      }
+      $0.applyPostReduceCacheRecomputes(.sidebarStructure)
+    }
+
+    #expect(store.state.sidebar.sections[repoA.id]?.collapsed == true)
+    #expect(store.state.sidebar.sections[repoB.id]?.collapsed == true)
+  }
+
+  @Test func setAllSidebarGroupsExpandedCollapsePreservesBranchPrefixes() async {
+    let worktreeA = makeWorktree(id: "/tmp/repoA/wt1", name: "feature/x", repoRoot: "/tmp/repoA")
+    let repoA = makeRepository(id: "/tmp/repoA", name: "repoA", worktrees: [worktreeA])
+    var initialState = makeState(repositories: [repoA])
+    initialState.reconcileSidebarForTesting()
+    // Seed an expanded section with a collapsed branch group so collapse-all has
+    // a prefix that must survive.
+    initialState.$sidebar.withLock { sidebar in
+      sidebar.sections[repoA.id, default: .init()].collapsed = false
+      sidebar.sections[repoA.id, default: .init()].buckets[.unpinned] = .init(collapsedBranchPrefixes: [
+        "feature"
+      ])
+    }
+    let store = TestStore(initialState: initialState) {
+      RepositoriesFeature()
+    }
+
+    await store.send(.setAllSidebarGroupsExpanded(false)) {
+      $0.$sidebar.withLock { sidebar in
+        sidebar.sections[repoA.id, default: .init()].collapsed = true
+      }
+      $0.applyPostReduceCacheRecomputes(.sidebarStructure)
+    }
+
+    #expect(store.state.sidebar.sections[repoA.id]?.collapsed == true)
+    #expect(
+      store.state.sidebar.sections[repoA.id]?.buckets[.unpinned]?.collapsedBranchPrefixes == ["feature"]
+    )
+  }
+
+  @Test func setAllSidebarGroupsExpandedExpandsSectionsAndClearsEveryBucketsBranchPrefixes() async {
+    let worktreeA = makeWorktree(id: "/tmp/repoA/wt1", name: "feature/x", repoRoot: "/tmp/repoA")
+    let worktreeB = makeWorktree(id: "/tmp/repoB/wt1", name: "hotfix/y", repoRoot: "/tmp/repoB")
+    let repoA = makeRepository(id: "/tmp/repoA", name: "repoA", worktrees: [worktreeA])
+    let repoB = makeRepository(id: "/tmp/repoB", name: "repoB", worktrees: [worktreeB])
+    var initialState = makeState(repositories: [repoA, repoB])
+    initialState.reconcileSidebarForTesting()
+    // Collapse every section and seed collapsed branch groups across multiple
+    // buckets and repos, so expand-all has to clear more than one bucket.
+    initialState.$sidebar.withLock { sidebar in
+      sidebar.sections[repoA.id, default: .init()].collapsed = true
+      sidebar.sections[repoB.id, default: .init()].collapsed = true
+      sidebar.sections[repoA.id, default: .init()].buckets[.pinned] = .init(collapsedBranchPrefixes: [
+        "release"
+      ])
+      sidebar.sections[repoA.id, default: .init()].buckets[.unpinned] = .init(collapsedBranchPrefixes: [
+        "feature"
+      ])
+      sidebar.sections[repoB.id, default: .init()].buckets[.unpinned] = .init(collapsedBranchPrefixes: [
+        "hotfix"
+      ])
+    }
+    let store = TestStore(initialState: initialState) {
+      RepositoriesFeature()
+    }
+
+    await store.send(.setAllSidebarGroupsExpanded(true)) {
+      $0.$sidebar.withLock { sidebar in
+        for repositoryID in [repoA.id, repoB.id] {
+          guard var section = sidebar.sections[repositoryID] else { continue }
+          section.collapsed = false
+          for bucketID in Array(section.buckets.keys) {
+            section.buckets[bucketID]?.collapsedBranchPrefixes.removeAll()
+          }
+          sidebar.sections[repositoryID] = section
+        }
+      }
+      $0.applyPostReduceCacheRecomputes(.sidebarStructure)
+    }
+
+    #expect(store.state.sidebar.sections[repoA.id]?.collapsed == false)
+    #expect(store.state.sidebar.sections[repoB.id]?.collapsed == false)
+    #expect(
+      store.state.sidebar.sections[repoA.id]?.buckets[.pinned]?.collapsedBranchPrefixes.isEmpty == true
+    )
+    #expect(
+      store.state.sidebar.sections[repoA.id]?.buckets[.unpinned]?.collapsedBranchPrefixes.isEmpty == true
+    )
+    #expect(
+      store.state.sidebar.sections[repoB.id]?.buckets[.unpinned]?.collapsedBranchPrefixes.isEmpty == true
+    )
+  }
+
+  @Test func setAllSidebarGroupsExpandedIsNoOpWhenAlreadyExpanded() async {
+    let worktreeA = makeWorktree(id: "/tmp/repoA/wt1", name: "wt1", repoRoot: "/tmp/repoA")
+    let repoA = makeRepository(id: "/tmp/repoA", name: "repoA", worktrees: [worktreeA])
+    var initialState = makeState(repositories: [repoA])
+    initialState.reconcileSidebarForTesting()
+    let store = TestStore(initialState: initialState) {
+      RepositoriesFeature()
+    }
+
+    // Already expanded with no persisted section, so expand-all writes nothing.
+    await store.send(.setAllSidebarGroupsExpanded(true))
+
+    #expect(store.state.isRepositoryExpanded(repoA.id))
+    #expect(store.state.sidebar.sections[repoA.id] == nil)
+  }
+
+  @Test func setAllSidebarGroupsExpandedExpandsFolderRepositorySection() async {
+    let folderURL = URL(fileURLWithPath: "/tmp/folderRepo")
+    let folderWorktree = Worktree(
+      id: Repository.folderWorktreeID(for: folderURL),
+      kind: .folder,
+      name: Repository.name(for: folderURL),
+      detail: "",
+      workingDirectory: folderURL,
+      repositoryRootURL: folderURL
+    )
+    let folderRepo = Repository(
+      id: RepositoryID("/tmp/folderRepo"),
+      rootURL: folderURL,
+      name: Repository.name(for: folderURL),
+      worktrees: IdentifiedArray(uniqueElements: [folderWorktree]),
+      isGitRepository: false
+    )
+    var initialState = makeState(repositories: [folderRepo])
+    initialState.reconcileSidebarForTesting()
+    initialState.$sidebar.withLock { sidebar in
+      sidebar.sections[folderRepo.id, default: .init()].collapsed = true
+    }
+    let store = TestStore(initialState: initialState) {
+      RepositoriesFeature()
+    }
+
+    await store.send(.setAllSidebarGroupsExpanded(true)) {
+      $0.$sidebar.withLock { sidebar in
+        guard var section = sidebar.sections[folderRepo.id] else { return }
+        section.collapsed = false
+        for bucketID in Array(section.buckets.keys) {
+          section.buckets[bucketID]?.collapsedBranchPrefixes.removeAll()
+        }
+        sidebar.sections[folderRepo.id] = section
+      }
+      $0.applyPostReduceCacheRecomputes(.sidebarStructure)
+    }
+
+    #expect(store.state.sidebar.sections[folderRepo.id]?.collapsed == false)
+  }
+
+  @Test func setAllSidebarGroupsExpandedOnEmptySidebarIsNoOp() async {
+    var initialState = makeState(repositories: [])
+    initialState.reconcileSidebarForTesting()
+    let store = TestStore(initialState: initialState) {
+      RepositoriesFeature()
+    }
+
+    await store.send(.setAllSidebarGroupsExpanded(true))
+    await store.send(.setAllSidebarGroupsExpanded(false))
+  }
+
   @Test func sidebarSelectionChangedWithoutFocusTerminalDoesNotInsertPendingFocus() async {
     let wt1 = makeWorktree(id: "/tmp/repo/wt1", name: "wt1", repoRoot: "/tmp/repo")
     let wt2 = makeWorktree(id: "/tmp/repo/wt2", name: "wt2", repoRoot: "/tmp/repo")
@@ -341,7 +580,8 @@ struct RepositoriesFeatureTests {
       $0.selection = .worktree(wt2.id)
       $0.sidebarSelectedWorktreeIDs = [wt2.id]
       $0.worktreeHistoryBackStack = [wt1.id]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [wt2.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
     #expect(store.state.sidebarItems.allSatisfy { !$0.shouldFocusTerminal })
@@ -363,6 +603,7 @@ struct RepositoriesFeatureTests {
     ) {
       $0.selection = .worktree(wt1.id)
       $0.sidebarSelectedWorktreeIDs = [wt1.id, wt2.id]
+      $0.worktreeMRU = [wt1.id]
     }
     #expect(store.state.sidebarItems.allSatisfy { !$0.shouldFocusTerminal })
   }
@@ -407,6 +648,9 @@ struct RepositoriesFeatureTests {
       $0.reconcileSidebarForTesting()
     }
     await store.receive(\.delegate.repositoriesChanged)
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [repoA.id: .finder]
+    }
   }
 
   @Test func sidebarSelectionChangedWithAllUnknownWorktreeIDsClearsSelection() async {
@@ -422,7 +666,7 @@ struct RepositoriesFeatureTests {
     await store.send(.selectionChanged([.worktree("/tmp/unknown")])) {
       $0.selection = nil
       $0.sidebarSelectedWorktreeIDs = []
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
   }
@@ -440,7 +684,7 @@ struct RepositoriesFeatureTests {
     await store.send(.selectionChanged([.archivedWorktrees, .worktree(worktree.id)])) {
       $0.selection = .archivedWorktrees
       $0.sidebarSelectedWorktreeIDs = []
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
   }
@@ -485,7 +729,10 @@ struct RepositoriesFeatureTests {
     }
 
     // Re-selecting the same worktree should not fire delegate or insert pending focus.
-    await store.send(.selectionChanged([.worktree(wt1.id)], focusTerminal: true))
+    // The selection itself is unchanged, but it still records as most-recently-used.
+    await store.send(.selectionChanged([.worktree(wt1.id)], focusTerminal: true)) {
+      $0.worktreeMRU = [wt1.id]
+    }
     #expect(store.state.sidebarItems.allSatisfy { !$0.shouldFocusTerminal })
   }
 
@@ -522,6 +769,9 @@ struct RepositoriesFeatureTests {
     }
     await store.receive(\.delegate.repositoriesChanged)
     await store.receive(\.delegate.selectedWorktreeChanged)
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [repository.id: .finder]
+    }
   }
 
   @Test func sidebarSelectionChangedWithMixedValidAndInvalidIDsKeepsValidOnly() async {
@@ -535,7 +785,9 @@ struct RepositoriesFeatureTests {
     }
 
     // Valid ID kept, unknown ID silently dropped.
-    await store.send(.selectionChanged([.worktree(wt1.id), .worktree("/tmp/unknown")]))
+    await store.send(.selectionChanged([.worktree(wt1.id), .worktree("/tmp/unknown")])) {
+      $0.worktreeMRU = [wt1.id]
+    }
     #expect(store.state.sidebarSelectedWorktreeIDs == [wt1.id])
   }
 
@@ -561,7 +813,7 @@ struct RepositoriesFeatureTests {
     #expect(state.sidebarSelections == [.archivedWorktrees])
   }
 
-  @Test func effectiveSidebarSelectedRowsFallsBackToSelectedWorktreeID() {
+  @Test func sidebarSelectionSliceFallsBackToSelectedWorktreeID() {
     let wt1 = makeWorktree(id: "/tmp/repo/wt1", name: "wt1", repoRoot: "/tmp/repo")
     let wt2 = makeWorktree(id: "/tmp/repo/wt2", name: "wt2", repoRoot: "/tmp/repo")
     let repository = makeRepository(id: "/tmp/repo", worktrees: [wt1, wt2])
@@ -571,13 +823,13 @@ struct RepositoriesFeatureTests {
     state.sidebarSelectedWorktreeIDs = []
 
     // Falls back to selectedWorktreeID.
-    let fallbackRows = state.effectiveSidebarSelectedRows
+    let fallbackRows = state.computeSidebarSelectionSlice().rows
     #expect(fallbackRows.count == 1)
     #expect(fallbackRows.first?.id == wt1.id)
 
     // Primary path: sidebarSelectedWorktreeIDs non-empty.
     state.sidebarSelectedWorktreeIDs = [wt1.id, wt2.id]
-    let primaryRows = state.effectiveSidebarSelectedRows
+    let primaryRows = state.computeSidebarSelectionSlice().rows
     #expect(primaryRows.count == 2)
   }
 
@@ -1969,7 +2221,7 @@ struct RepositoriesFeatureTests {
     await store.send(.selectionChanged([.worktree(pendingID)])) {
       $0.selection = .worktree(pendingID)
       $0.sidebarSelectedWorktreeIDs = [pendingID]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     // `worktree(for:)` doesn't surface pending entries; the delegate fires nil
     // for a pending selection. The detail body still renders the loading view
@@ -1999,6 +2251,7 @@ struct RepositoriesFeatureTests {
 
     await store.send(.setSidebarSelectedWorktreeIDs([mainWorktree.id, pendingID])) {
       $0.sidebarSelectedWorktreeIDs = [mainWorktree.id, pendingID]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
   }
 
@@ -2571,6 +2824,10 @@ struct RepositoriesFeatureTests {
     }
 
     await store.send(.archiveWorktreeConfirmed(featureWorktree.id, repository.id))
+    // `.archiving` must publish before the script-launch delegate: a synchronous
+    // launch-failure completion racing ahead of the lifecycle would be discarded
+    // as a stale non-archiving row and strand the ack, so `archiveWorktreeConfirmed`
+    // concatenates the row change ahead of the delegate.
     await store.receive(\.sidebarItems) {
       $0.sidebarItems[id: featureWorktree.id]?.lifecycle = .archiving
     }
@@ -2584,18 +2841,16 @@ struct RepositoriesFeatureTests {
     let definition = ScriptDefinition(kind: .run, name: "Run", command: "npm start")
     var state = makeState(repositories: [repository])
     state.reconcileSidebarForTesting()
-    state.sidebarItems[id: worktree.id]?.runningScripts[id: definition.id] =
-      .init(id: definition.id, tint: definition.resolvedTintColor)
-    state.applyPostReduceCacheRecomputes()
 
     let store = TestStore(initialState: state) {
       RepositoriesFeature()
     }
 
+    // No seeded `runningScripts`: the alert must fire even when the row
+    // mirror already reconciled the removal (#573).
     await store.send(
       .scriptCompleted(
         worktreeID: worktree.id,
-        scriptID: definition.id,
         kind: .script(definition),
         exitCode: 1,
         tabId: nil
@@ -2608,10 +2863,6 @@ struct RepositoriesFeatureTests {
         repoName: "repo",
         worktreeName: "feature"
       )
-    }
-    await store.receive(\.sidebarItems) {
-      $0.sidebarItems[id: worktree.id]?.runningScripts.remove(id: definition.id)
-      $0.reconcileSidebarForTesting()
     }
   }
 
@@ -2633,16 +2884,13 @@ struct RepositoriesFeatureTests {
     await store.send(
       .scriptCompleted(
         worktreeID: worktree.id,
-        scriptID: definition.id,
         kind: .script(definition),
         exitCode: 0,
         tabId: nil
       )
     )
-    await store.receive(\.sidebarItems) {
-      $0.sidebarItems[id: worktree.id]?.runningScripts.remove(id: definition.id)
-      $0.reconcileSidebarForTesting()
-    }
+    // The row keeps its entry: removal arrives via the terminal projection.
+    #expect(store.state.sidebarItems[id: worktree.id]?.runningScripts[id: definition.id] != nil)
     #expect(store.state.alert == nil)
   }
 
@@ -2664,16 +2912,11 @@ struct RepositoriesFeatureTests {
     await store.send(
       .scriptCompleted(
         worktreeID: worktree.id,
-        scriptID: definition.id,
         kind: .script(definition),
         exitCode: nil,
         tabId: nil
       )
     )
-    await store.receive(\.sidebarItems) {
-      $0.sidebarItems[id: worktree.id]?.runningScripts.remove(id: definition.id)
-      $0.reconcileSidebarForTesting()
-    }
     #expect(store.state.alert == nil)
   }
 
@@ -2712,7 +2955,9 @@ struct RepositoriesFeatureTests {
     #expect(state.runningScriptColors(for: worktree.id) == [.purple, .orange])
   }
 
-  @Test(.dependencies) func scriptCompletedPartialCompletionPreservesSurvivors() async {
+  @Test(.dependencies) func scriptCompletedLeavesRunningScriptsUntouched() async {
+    // `runningScripts` reconciles from the terminal projection (single
+    // writer); completion must not mutate the row mirror.
     let repoRoot = "/tmp/repo"
     let worktree = makeWorktree(id: "\(repoRoot)/feature", name: "feature", repoRoot: repoRoot)
     let repository = makeRepository(id: repoRoot, worktrees: [worktree])
@@ -2733,16 +2978,12 @@ struct RepositoriesFeatureTests {
     await store.send(
       .scriptCompleted(
         worktreeID: worktree.id,
-        scriptID: completing.id,
         kind: .script(completing),
         exitCode: 0,
         tabId: nil
       )
     )
-    await store.receive(\.sidebarItems) {
-      $0.sidebarItems[id: worktree.id]?.runningScripts.remove(id: completing.id)
-      $0.reconcileSidebarForTesting()
-    }
+    #expect(store.state.sidebarItems[id: worktree.id]?.runningScripts.count == 2)
     #expect(store.state.alert == nil)
   }
 
@@ -2767,7 +3008,6 @@ struct RepositoriesFeatureTests {
     await store.send(
       .scriptCompleted(
         worktreeID: worktree.id,
-        scriptID: definition.id,
         kind: .script(definition),
         exitCode: 1,
         tabId: tabId
@@ -2917,6 +3157,44 @@ struct RepositoriesFeatureTests {
     #expect(store.state.archivedWorktreeIDs.isEmpty)
   }
 
+  @Test(.dependencies) func archiveWorktreeApplyEmitsAppliedOnSuccess() async {
+    let repoRoot = "/tmp/repo"
+    let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
+    let featureWorktree = makeWorktree(
+      id: "\(repoRoot)/feature",
+      name: "feature",
+      repoRoot: repoRoot
+    )
+    let repository = makeRepository(id: repoRoot, worktrees: [mainWorktree, featureWorktree])
+    var state = makeState(repositories: [repository])
+    state.reconcileSidebarForTesting()
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    }
+    store.dependencies.date = .constant(Date(timeIntervalSince1970: 1_000_000))
+    store.exhaustivity = .off
+
+    await store.send(.archiveWorktreeApply(featureWorktree.id, repository.id))
+    await store.receive(\.archiveWorktreeApplied)
+    #expect(store.state.archivedWorktreeIDs.contains(featureWorktree.id))
+  }
+
+  @Test(.dependencies) func archiveWorktreeApplyEmitsFailedWhenWorktreeMissing() async {
+    let repoRoot = "/tmp/repo"
+    let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
+    let repository = makeRepository(id: repoRoot, worktrees: [mainWorktree])
+    var state = makeState(repositories: [repository])
+    state.reconcileSidebarForTesting()
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    }
+    store.exhaustivity = .off
+
+    await store.send(.archiveWorktreeApply(WorktreeID("\(repoRoot)/gone"), repository.id))
+    await store.receive(\.archiveWorktreeApplyFailed)
+    #expect(store.state.alert != nil)
+  }
+
   @Test func archiveScriptCompletedCancellationClearsState() async {
     let repoRoot = "/tmp/repo"
     let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
@@ -2956,6 +3234,8 @@ struct RepositoriesFeatureTests {
       RepositoriesFeature()
     }
 
+    // A present-but-non-archiving row is a stale/duplicate completion: ignored,
+    // and left for any newer archive operation to resolve its own ack.
     await store.send(.archiveScriptCompleted(worktreeID: featureWorktree.id, exitCode: 0, tabId: nil))
     #expect(store.state.archivedWorktreeIDs.isEmpty)
   }
@@ -3043,7 +3323,7 @@ struct RepositoriesFeatureTests {
     (137, "Script killed by signal 9 (exit code 137)."),
   ]
 
-  @Test(arguments: archiveExitCodeCases)
+  @Test(.dependencies, arguments: archiveExitCodeCases)
   func archiveScriptCompletedShowsExpectedMessage(exitCode: Int, expectedMessage: String) async {
     let repoRoot = "/tmp/repo"
     let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
@@ -3261,9 +3541,13 @@ struct RepositoriesFeatureTests {
     }
     await store.receive(\.delegate.repositoriesChanged)
     await store.receive(\.reloadRepositories)
+    await store.receive(\.gitEnvironmentChanged)
     await store.receive(\.repositoriesLoaded) {
       $0.isInitialLoadComplete = true
       $0.reconcileSidebarForTesting()
+    }
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [repository.id: .finder]
     }
   }
 
@@ -3374,9 +3658,13 @@ struct RepositoriesFeatureTests {
     }
     await store.receive(\.delegate.repositoriesChanged)
     await store.receive(\.reloadRepositories)
+    await store.receive(\.gitEnvironmentChanged)
     await store.receive(\.repositoriesLoaded) {
       $0.isInitialLoadComplete = true
       $0.reconcileSidebarForTesting()
+    }
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [repository.id: .finder]
     }
   }
 
@@ -3519,86 +3807,6 @@ struct RepositoriesFeatureTests {
     await store.finish()
     #expect((store.state.sidebarItems[id: featureWorktree.id]?.lifecycle ?? .idle) == .idle)
     #expect(store.state.alert != nil)
-  }
-
-  @Test func worktreeNotificationReceivedDoesNotShowStatusToast() async {
-    let repoRoot = "/tmp/repo"
-    let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
-    let featureWorktree = makeWorktree(id: "/tmp/repo/feature", name: "feature", repoRoot: repoRoot)
-    let repository = makeRepository(id: repoRoot, worktrees: [mainWorktree, featureWorktree])
-    var state = makeState(repositories: [repository])
-    state.$sidebar.withLock { sidebar in
-      sidebar.sections[repository.id] = .init(
-        buckets: [.unpinned: .init(items: [featureWorktree.id: .init()])]
-      )
-    }
-    state.reconcileSidebarForTesting()
-    let store = TestStore(initialState: state) {
-      RepositoriesFeature()
-    }
-
-    await store.send(.worktreeNotificationReceived(featureWorktree.id))
-    #expect(store.state.statusToast == nil)
-  }
-
-  @Test func worktreeNotificationReceivedReordersUnpinnedWorktrees() async {
-    let repoRoot = "/tmp/repo"
-    let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
-    let featureA = makeWorktree(id: "/tmp/repo/a", name: "a", repoRoot: repoRoot)
-    let featureB = makeWorktree(id: "/tmp/repo/b", name: "b", repoRoot: repoRoot)
-    let repository = makeRepository(id: repoRoot, worktrees: [mainWorktree, featureA, featureB])
-    var state = makeState(repositories: [repository])
-    state.$sidebar.withLock { sidebar in
-      sidebar.sections[repository.id] = .init(
-        buckets: [
-          .unpinned: .init(
-            items: [featureA.id: .init(), featureB.id: .init()]
-          )
-        ]
-      )
-    }
-    state.reconcileSidebarForTesting()
-    let store = TestStore(initialState: state) {
-      RepositoriesFeature()
-    }
-
-    await store.send(.worktreeNotificationReceived(featureB.id)) {
-      $0.$sidebar.withLock { sidebar in
-        sidebar.reorder(bucket: .unpinned, in: repository.id, to: [featureB.id, featureA.id])
-      }
-    }
-    #expect(store.state.statusToast == nil)
-  }
-
-  @Test func worktreeNotificationReceivedDoesNotReorderWhenMoveToTopDisabled() async {
-    let repoRoot = "/tmp/repo"
-    let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
-    let featureA = makeWorktree(id: "/tmp/repo/a", name: "a", repoRoot: repoRoot)
-    let featureB = makeWorktree(id: "/tmp/repo/b", name: "b", repoRoot: repoRoot)
-    let repository = makeRepository(id: repoRoot, worktrees: [mainWorktree, featureA, featureB])
-    var state = makeState(repositories: [repository])
-    state.$sidebar.withLock { sidebar in
-      sidebar.sections[repository.id] = .init(
-        buckets: [
-          .unpinned: .init(
-            items: [featureA.id: .init(), featureB.id: .init()]
-          )
-        ]
-      )
-    }
-    state.moveNotifiedWorktreeToTop = false
-    state.reconcileSidebarForTesting()
-    let store = TestStore(initialState: state) {
-      RepositoriesFeature()
-    }
-
-    await store.send(.worktreeNotificationReceived(featureB.id))
-    #expect(
-      Array(
-        store.state.sidebar.sections[repository.id]?.buckets[.unpinned]?.items.keys ?? []
-      ) == [featureA.id, featureB.id]
-    )
-    #expect(store.state.statusToast == nil)
   }
 
   @Test func setMoveNotifiedWorktreeToTopUpdatesState() async {
@@ -4118,6 +4326,9 @@ struct RepositoriesFeatureTests {
       $0.reconcileSidebarForTesting()
     }
     await store.receive(\.delegate.repositoriesChanged)
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [repository.id: .finder]
+    }
     await store.finish()
   }
 
@@ -4148,6 +4359,9 @@ struct RepositoriesFeatureTests {
     }
     await store.receive(\.delegate.repositoriesChanged)
     await store.receive(\.delegate.selectedWorktreeChanged)
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [repository.id: .finder]
+    }
   }
 
   @Test func worktreeDeletedPrunesStateAndSendsDelegates() async {
@@ -4200,9 +4414,13 @@ struct RepositoriesFeatureTests {
     }
     await store.receive(\.delegate.repositoriesChanged)
     await store.receive(\.reloadRepositories)
+    await store.receive(\.gitEnvironmentChanged)
     await store.receive(\.repositoriesLoaded) {
       $0.isInitialLoadComplete = true
       $0.reconcileSidebarForTesting()
+    }
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [repository.id: .finder]
     }
   }
 
@@ -4239,9 +4457,13 @@ struct RepositoriesFeatureTests {
     await store.receive(\.delegate.repositoriesChanged)
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.receive(\.reloadRepositories)
+    await store.receive(\.gitEnvironmentChanged)
     await store.receive(\.repositoriesLoaded) {
       $0.isInitialLoadComplete = true
       $0.reconcileSidebarForTesting()
+    }
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [repository.id: .finder]
     }
   }
 
@@ -4278,10 +4500,11 @@ struct RepositoriesFeatureTests {
       $0.pendingWorktrees = []
       $0.selection = .worktree(newWorktree.id)
       $0.sidebarSelectedWorktreeIDs = [newWorktree.id]
+      $0.worktreeMRU = [newWorktree.id]
       $0.repositories = [updatedRepository]
       RepositoriesFeature.syncSidebar(&$0)
       $0.sidebarItems[id: newWorktree.id]?.lifecycle = .pending
-      $0.applyPostReduceCacheRecomputes([.sidebarStructure, .selectedWorktreeSlice])
+      $0.applyPostReduceCacheRecomputes([.sidebarStructure, .selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.sidebarItems) {
       $0.sidebarItems[id: newWorktree.id]?.shouldFocusTerminal = true
@@ -4291,9 +4514,13 @@ struct RepositoriesFeatureTests {
     await store.receive(\.delegate.repositoriesChanged)
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.receive(\.delegate.worktreeCreated)
+    await store.receive(\.gitEnvironmentChanged)
     await store.receive(\.repositoriesLoaded) {
       $0.isInitialLoadComplete = true
       $0.reconcileSidebarForTesting()
+    }
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [repository.id: .finder]
     }
   }
 
@@ -4588,6 +4815,7 @@ struct RepositoriesFeatureTests {
     let store = TestStore(initialState: state) {
       RepositoriesFeature()
     } withDependencies: {
+      $0.continuousClock = TestClock()
       $0.githubIntegration.isAvailable = { true }
       $0.githubCLI.mergePullRequest = { _, _, number, _ in
         mergedNumbers.withValue { $0.append(number) }
@@ -4628,6 +4856,7 @@ struct RepositoriesFeatureTests {
     let store = TestStore(initialState: state) {
       RepositoriesFeature()
     } withDependencies: {
+      $0.continuousClock = TestClock()
       $0.githubIntegration.isAvailable = { true }
       $0.githubCLI.closePullRequest = { _, _, number in
         closedNumbers.withValue { $0.append(number) }
@@ -4749,6 +4978,7 @@ struct RepositoriesFeatureTests {
     let store = TestStore(initialState: state) {
       RepositoriesFeature()
     } withDependencies: {
+      $0.continuousClock = TestClock()
       $0.githubIntegration.isAvailable = { true }
       $0.githubCLI.resolveRemoteInfo = { _ in
         GithubRemoteInfo(host: "github.com", owner: "upstream", repo: "project")
@@ -4787,6 +5017,7 @@ struct RepositoriesFeatureTests {
     let store = TestStore(initialState: state) {
       RepositoriesFeature()
     } withDependencies: {
+      $0.continuousClock = TestClock()
       $0.githubIntegration.isAvailable = { true }
       $0.githubCLI.resolveRemoteInfo = { _ in nil }
       $0.gitClient.remoteInfo = { _ in
@@ -4853,6 +5084,108 @@ struct RepositoriesFeatureTests {
     await store.finish()
   }
 
+  @Test func successToastAutoDismissesAfterTheDelay() async {
+    var state = makeState(repositories: [])
+    state.reconcileSidebarForTesting()
+    let clock = TestClock()
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.continuousClock = clock
+    }
+
+    await store.send(.showToast(.success("Pull request merged"))) {
+      $0.statusToast = .success("Pull request merged")
+    }
+    await clock.advance(by: .milliseconds(2400))
+    #expect(store.state.statusToast == .success("Pull request merged"))
+
+    await clock.advance(by: .milliseconds(100))
+    await store.receive(\.dismissToast) {
+      $0.statusToast = nil
+    }
+    await store.finish()
+  }
+
+  @Test func replacingASuccessToastDoesNotInheritTheCancelledAutoDismiss() async {
+    var state = makeState(repositories: [])
+    state.reconcileSidebarForTesting()
+    let clock = TestClock()
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.continuousClock = clock
+    }
+
+    await store.send(.showToast(.success("Pull request merged"))) {
+      $0.statusToast = .success("Pull request merged")
+    }
+    await store.send(.showToast(.success("Pull request closed"))) {
+      $0.statusToast = .success("Pull request closed")
+    }
+    // `cancelInFlight` re-arms a single fresh 2.5s timer for the replacement toast rather than stacking a
+    // second dismissal: the toast survives the first timer's original deadline and dismisses once, later.
+    await clock.advance(by: .milliseconds(2400))
+    #expect(store.state.statusToast == .success("Pull request closed"))
+
+    await clock.advance(by: .milliseconds(100))
+    await store.receive(\.dismissToast) {
+      $0.statusToast = nil
+    }
+    await store.finish()
+  }
+
+  @Test func inProgressToastCancelsAPendingSuccessAutoDismiss() async {
+    var state = makeState(repositories: [])
+    state.reconcileSidebarForTesting()
+    let clock = TestClock()
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.continuousClock = clock
+    }
+
+    await store.send(.showToast(.success("Pull request merged"))) {
+      $0.statusToast = .success("Pull request merged")
+    }
+    await store.send(.showToast(.inProgress("Closing pull request…"))) {
+      $0.statusToast = .inProgress("Closing pull request…")
+    }
+    // An in-progress toast schedules no auto-dismiss and cancels the success timer, so it never self-dismisses.
+    await clock.advance(by: .seconds(5))
+    #expect(store.state.statusToast == .inProgress("Closing pull request…"))
+    await store.finish()
+  }
+
+  @Test func delayedPullRequestRefreshFiresAfterTheDelay() async {
+    let repoRoot = "/tmp/repo"
+    let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
+    let featureWorktree = makeWorktree(
+      id: "\(repoRoot)/feature",
+      name: "feature",
+      repoRoot: repoRoot
+    )
+    let repository = makeRepository(id: repoRoot, worktrees: [mainWorktree, featureWorktree])
+    var state = makeState(repositories: [repository])
+    state.githubIntegrationAvailability = .disabled
+    state.reconcileSidebarForTesting()
+    let clock = TestClock()
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.continuousClock = clock
+    }
+
+    // Two rapid requests must collapse to a single fire (cancelInFlight), not stack two refreshes.
+    await store.send(.delayedPullRequestRefresh(featureWorktree.id))
+    await store.send(.delayedPullRequestRefresh(featureWorktree.id))
+    await clock.advance(by: .seconds(2))
+    // GitHub integration is disabled, so the refresh lands as a no-op. A second event would trip `finish()`, so
+    // matching exactly one here proves the two requests coalesced into a single refresh.
+    await store.receive(\.worktreeInfoEvent)
+    await store.finish()
+  }
+
   @Test func worktreeInfoEventRepositoryPullRequestRefreshQueuesWhileAvailabilityUnknown() async {
     let repoRoot = "/tmp/repo"
     let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
@@ -4864,9 +5197,11 @@ struct RepositoriesFeatureTests {
     let repository = makeRepository(id: repoRoot, worktrees: [mainWorktree, featureWorktree])
     var initialState = makeState(repositories: [repository])
     initialState.reconcileSidebarForTesting()
+    let clock = TestClock()
     let store = TestStore(initialState: initialState) {
       RepositoriesFeature()
     } withDependencies: {
+      $0.continuousClock = clock
       $0.githubIntegration.isAvailable = { false }
       $0.gitClient.remoteInfo = { _ in
         Issue.record("remoteInfo should not be requested when GitHub integration is unavailable")
@@ -4899,12 +5234,66 @@ struct RepositoriesFeatureTests {
       $0.queuedPullRequestRefreshByRepositoryID = [:]
       $0.inFlightPullRequestRefreshRepositoryIDs = []
     }
+
+    // The recovery loop re-checks availability on every interval, and the pending refresh survives each failed check.
+    await clock.advance(by: .seconds(15))
+    await store.receive(\.refreshGithubIntegrationAvailability) {
+      $0.githubIntegrationAvailability = .checking
+    }
+    await store.receive(\.githubIntegrationAvailabilityUpdated) {
+      $0.githubIntegrationAvailability = .unavailable
+    }
+
     await store.send(.setGithubIntegrationEnabled(false)) {
       $0.githubIntegrationAvailability = .disabled
       $0.pendingPullRequestRefreshByRepositoryID = [:]
       $0.queuedPullRequestRefreshByRepositoryID = [:]
       $0.inFlightPullRequestRefreshRepositoryIDs = []
     }
+    await store.finish()
+  }
+
+  @Test func githubIntegrationRecoveryStopsRecheckingOnceAvailable() async {
+    let repoRoot = "/tmp/repo"
+    let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
+    let repository = makeRepository(id: repoRoot, worktrees: [mainWorktree])
+    var initialState = makeState(repositories: [repository])
+    initialState.githubIntegrationAvailability = .checking
+    initialState.reconcileSidebarForTesting()
+    let clock = TestClock()
+    let isAvailable = LockIsolated(false)
+    let store = TestStore(initialState: initialState) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.sidebarStructureAutoRecompute = false
+      $0.continuousClock = clock
+      $0.githubIntegration.isAvailable = { isAvailable.value }
+    }
+
+    await store.send(.githubIntegrationAvailabilityUpdated(false)) {
+      $0.githubIntegrationAvailability = .unavailable
+    }
+
+    // Still unavailable after the first interval: the loop re-arms and checks again on the next one.
+    await clock.advance(by: .seconds(15))
+    await store.receive(\.refreshGithubIntegrationAvailability) {
+      $0.githubIntegrationAvailability = .checking
+    }
+    await store.receive(\.githubIntegrationAvailabilityUpdated) {
+      $0.githubIntegrationAvailability = .unavailable
+    }
+
+    isAvailable.setValue(true)
+    await clock.advance(by: .seconds(15))
+    await store.receive(\.refreshGithubIntegrationAvailability) {
+      $0.githubIntegrationAvailability = .checking
+    }
+    await store.receive(\.githubIntegrationAvailabilityUpdated) {
+      $0.githubIntegrationAvailability = .available
+    }
+
+    // Recovering cancels the loop: further intervals must not re-check.
+    await clock.advance(by: .seconds(60))
     await store.finish()
   }
 
@@ -5002,6 +5391,8 @@ struct RepositoriesFeatureTests {
     )
     let store = TestStore(initialState: initialState) {
       RepositoriesFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
     }
 
     await store.send(.githubIntegrationAvailabilityUpdated(false)) {
@@ -5616,7 +6007,8 @@ struct RepositoriesFeatureTests {
       $0.selection = .worktree(wt1.id)
       $0.sidebarSelectedWorktreeIDs = [wt1.id]
       $0.worktreeHistoryBackStack = [wt2.id]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [wt1.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.receive(\.sidebarItems[id: wt1.id].focusTerminalRequested) {
@@ -5640,7 +6032,8 @@ struct RepositoriesFeatureTests {
       $0.selection = .worktree(wt2.id)
       $0.sidebarSelectedWorktreeIDs = [wt2.id]
       $0.worktreeHistoryBackStack = [wt1.id]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [wt2.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.receive(\.sidebarItems[id: wt2.id].focusTerminalRequested) {
@@ -5662,7 +6055,8 @@ struct RepositoriesFeatureTests {
     await store.receive(\.selectWorktree) {
       $0.selection = .worktree(wt1.id)
       $0.sidebarSelectedWorktreeIDs = [wt1.id]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [wt1.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.receive(\.sidebarItems[id: wt1.id].focusTerminalRequested) {
@@ -5688,7 +6082,8 @@ struct RepositoriesFeatureTests {
       $0.selection = .worktree(wt2.id)
       $0.sidebarSelectedWorktreeIDs = [wt2.id]
       $0.worktreeHistoryBackStack = [wt1.id]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [wt2.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.receive(\.sidebarItems[id: wt2.id].focusTerminalRequested) {
@@ -5710,7 +6105,8 @@ struct RepositoriesFeatureTests {
     await store.receive(\.selectWorktree) {
       $0.selection = .worktree(wt2.id)
       $0.sidebarSelectedWorktreeIDs = [wt2.id]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [wt2.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.receive(\.sidebarItems[id: wt2.id].focusTerminalRequested) {
@@ -5742,7 +6138,8 @@ struct RepositoriesFeatureTests {
       $0.selection = .worktree(feature.id)
       $0.sidebarSelectedWorktreeIDs = [feature.id]
       $0.worktreeHistoryBackStack = [main.id]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [feature.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.receive(\.sidebarItems[id: feature.id].focusTerminalRequested) {
@@ -5772,7 +6169,8 @@ struct RepositoriesFeatureTests {
     await store.receive(\.selectWorktree) {
       $0.selection = .worktree(worktree.id)
       $0.sidebarSelectedWorktreeIDs = [worktree.id]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [worktree.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.receive(\.sidebarItems[id: worktree.id].focusTerminalRequested) {
@@ -5802,7 +6200,8 @@ struct RepositoriesFeatureTests {
       $0.selection = .worktree(wt3.id)
       $0.sidebarSelectedWorktreeIDs = [wt3.id]
       $0.worktreeHistoryBackStack = [wt1.id]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [wt3.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.receive(\.sidebarItems[id: wt3.id].focusTerminalRequested) {
@@ -5832,7 +6231,8 @@ struct RepositoriesFeatureTests {
       $0.selection = .worktree(wt1.id)
       $0.sidebarSelectedWorktreeIDs = [wt1.id]
       $0.worktreeHistoryBackStack = [wt3.id]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [wt1.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.receive(\.sidebarItems[id: wt1.id].focusTerminalRequested) {
@@ -5894,7 +6294,8 @@ struct RepositoriesFeatureTests {
       $0.selection = .worktree(wt1.id)
       $0.sidebarSelectedWorktreeIDs = [wt1.id]
       $0.worktreeHistoryBackStack = [wt3.id]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [wt1.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.receive(\.sidebarItems[id: wt1.id].focusTerminalRequested) {
@@ -5921,7 +6322,8 @@ struct RepositoriesFeatureTests {
       $0.sidebarSelectedWorktreeIDs = [wt2.id]
       $0.worktreeHistoryBackStack = [wt1.id]
       $0.worktreeHistoryForwardStack = []
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [wt2.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
   }
@@ -5937,7 +6339,9 @@ struct RepositoriesFeatureTests {
       RepositoriesFeature()
     }
 
-    await store.send(.selectWorktree(wt1.id))
+    await store.send(.selectWorktree(wt1.id)) {
+      $0.worktreeMRU = [wt1.id]
+    }
     await store.receive(\.delegate.selectedWorktreeChanged)
   }
 
@@ -5958,7 +6362,8 @@ struct RepositoriesFeatureTests {
       $0.sidebarSelectedWorktreeIDs = [wt1.id]
       $0.worktreeHistoryBackStack = []
       $0.worktreeHistoryForwardStack = [wt2.id]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [wt1.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.receive(\.sidebarItems[id: wt1.id].focusTerminalRequested) {
@@ -5983,7 +6388,8 @@ struct RepositoriesFeatureTests {
       $0.sidebarSelectedWorktreeIDs = [wt2.id]
       $0.worktreeHistoryBackStack = [wt1.id]
       $0.worktreeHistoryForwardStack = []
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [wt2.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.receive(\.sidebarItems[id: wt2.id].focusTerminalRequested) {
@@ -6037,7 +6443,8 @@ struct RepositoriesFeatureTests {
       $0.sidebarSelectedWorktreeIDs = [wt1.id]
       $0.worktreeHistoryBackStack = []
       $0.worktreeHistoryForwardStack = [wt3.id]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [wt1.id]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.receive(\.sidebarItems[id: wt1.id].focusTerminalRequested) {
@@ -6058,7 +6465,7 @@ struct RepositoriesFeatureTests {
 
     await store.send(.worktreeHistoryBack) {
       $0.worktreeHistoryBackStack = []
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
   }
 
@@ -6105,10 +6512,11 @@ struct RepositoriesFeatureTests {
       $0.pendingWorktrees = []
       $0.selection = .worktree(newWorktree.id)
       $0.sidebarSelectedWorktreeIDs = [newWorktree.id]
+      $0.worktreeMRU = [newWorktree.id]
       $0.repositories = [updatedRepository]
       RepositoriesFeature.syncSidebar(&$0)
       $0.sidebarItems[id: newWorktree.id]?.lifecycle = .pending
-      $0.applyPostReduceCacheRecomputes([.sidebarStructure, .selectedWorktreeSlice])
+      $0.applyPostReduceCacheRecomputes([.sidebarStructure, .selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.sidebarItems) {
       $0.sidebarItems[id: newWorktree.id]?.shouldFocusTerminal = true
@@ -6117,9 +6525,13 @@ struct RepositoriesFeatureTests {
     await store.receive(\.delegate.repositoriesChanged)
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.receive(\.delegate.worktreeCreated)
+    await store.receive(\.gitEnvironmentChanged)
     await store.receive(\.repositoriesLoaded) {
       $0.isInitialLoadComplete = true
       $0.reconcileSidebarForTesting()
+    }
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [repository.id: .finder]
     }
     #expect(store.state.worktreeHistoryBackStack == [mainWorktree.id])
     #expect(store.state.worktreeHistoryForwardStack.isEmpty)
@@ -6253,7 +6665,7 @@ struct RepositoriesFeatureTests {
     await store.send(.selectionChanged([])) {
       $0.selection = nil
       $0.sidebarSelectedWorktreeIDs = []
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
     #expect(store.state.worktreeHistoryBackStack.isEmpty)
@@ -6305,7 +6717,8 @@ struct RepositoriesFeatureTests {
       $0.sidebarSelectedWorktreeIDs = [target]
       // Oldest entry is dropped when we exceed the 50-item cap.
       $0.worktreeHistoryBackStack = (2..<51).map { worktrees[$0].id } + [worktrees[0].id]
-      $0.applyPostReduceCacheRecomputes(.selectedWorktreeSlice)
+      $0.worktreeMRU = [target]
+      $0.applyPostReduceCacheRecomputes([.selectedWorktreeSlice, .sidebarSelectionSlice])
     }
     await store.receive(\.delegate.selectedWorktreeChanged)
   }
@@ -6457,6 +6870,10 @@ struct RepositoriesFeatureTests {
     var state = RepositoriesFeature.State()
     state.repositories = IdentifiedArray(uniqueElements: repositories)
     state.repositoryRoots = repositories.map(\.rootURL)
+    // Production seeds every cache on the roster load; without this the state
+    // under test starts stale (an empty open-action map, a placeholder structure)
+    // for a non-empty roster.
+    state.applyCacheRecomputes(.all)
     return state
   }
 
@@ -6708,6 +7125,7 @@ struct RepositoriesFeatureTests {
 
     await gate.resume()
 
+    await store.receive(\.gitEnvironmentChanged)
     await store.receive(\.repositoriesLoaded) {
       $0.repositories = [repoA, repoB]
       $0.repositoryRoots = [repoRootA, repoRootB].map { URL(fileURLWithPath: $0) }
@@ -6715,6 +7133,9 @@ struct RepositoriesFeatureTests {
       $0.reconcileSidebarForTesting()
     }
     await store.receive(\.delegate.repositoriesChanged)
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [repoA.id: .finder, repoB.id: .finder]
+    }
     await store.finish()
   }
 
@@ -6758,6 +7179,7 @@ struct RepositoriesFeatureTests {
     }
 
     await store.send(.loadPersistedRepositories)
+    await store.receive(\.gitEnvironmentChanged)
     await store.receive(\.repositoriesLoaded) {
       $0.repositories = [repoA, repoB]
       $0.repositoryRoots = [repoRootA, repoRootB].map { URL(fileURLWithPath: $0) }
@@ -6768,6 +7190,9 @@ struct RepositoriesFeatureTests {
     }
     await store.receive(\.delegate.repositoriesChanged)
     await store.receive(\.delegate.selectedWorktreeChanged)
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [repoA.id: .finder, repoB.id: .finder]
+    }
     await store.finish()
   }
 
@@ -6936,6 +7361,7 @@ struct RepositoriesFeatureTests {
       worktrees: IdentifiedArray(uniqueElements: [folderWorktree]),
       isGitRepository: false
     )
+    await store.receive(\.gitEnvironmentChanged)
     await store.receive(\.repositoriesLoaded) {
       $0.repositories = [folderRepo]
       $0.repositoryRoots = [rootURL]
@@ -6943,6 +7369,9 @@ struct RepositoriesFeatureTests {
       $0.reconcileSidebarForTesting()
     }
     await store.receive(\.delegate.repositoriesChanged)
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [folderRepo.id: .finder]
+    }
     await store.finish()
   }
 
@@ -6971,6 +7400,7 @@ struct RepositoriesFeatureTests {
     }
 
     await store.send(.loadPersistedRepositories)
+    await store.receive(\.gitEnvironmentChanged)
     await store.receive(\.repositoriesLoaded) {
       $0.repositories = []
       $0.repositoryRoots = [URL(fileURLWithPath: repoRoot)]
@@ -6996,40 +7426,579 @@ struct RepositoriesFeatureTests {
     #expect(RepositoriesFeature.firstDuplicateWorktreeID(in: [feature, collision]) == WorktreeID("/r/feature"))
   }
 
-  @Test func loadPersistedRepositoriesRefusesRepoWithDuplicateWorktreePaths() async {
-    // A corrupt repo (e.g. a stale `core.worktree` redirect) can make the
-    // worktree listing report the same path twice. Rather than crash building an
-    // `IdentifiedArray` of duplicate ids (or silently guess which entry is real),
-    // the loader refuses the repo and routes it through the failure row.
-    let repoRoot = "/tmp/\(UUID().uuidString)-corrupt-git"
-    let duplicatePath = "\(repoRoot)/feature"
-    let first = makeWorktree(id: duplicatePath, name: "main", repoRoot: repoRoot)
-    let second = makeWorktree(id: duplicatePath, name: "feature", repoRoot: repoRoot)
+  @Test func deduplicatedWorktreesKeepsFirstSeenPerPath() {
+    let main = makeWorktree(id: "/r/main", name: "main", repoRoot: "/r")
+    let feature = makeWorktree(id: "/r/feature", name: "feature", repoRoot: "/r")
+    let collision = makeWorktree(id: "/r/main", name: "orphan", repoRoot: "/r")
 
-    // Pin the user-facing copy and that it threads the colliding path.
-    let message = RepositoriesFeature.duplicateWorktreePathMessage(path: duplicatePath)
-    #expect(message.contains("more than one worktree at the same path"))
-    #expect(message.contains(duplicatePath))
+    #expect(RepositoriesFeature.deduplicatedWorktrees([]).isEmpty)
+    #expect(RepositoriesFeature.deduplicatedWorktrees([main, feature]) == [main, feature])
+    // The repeat is dropped and the first-seen (main) entry is kept, not the orphan.
+    #expect(RepositoriesFeature.deduplicatedWorktrees([main, feature, collision]) == [main, feature])
+    #expect(RepositoriesFeature.deduplicatedWorktrees([main, collision]) == [main])
+  }
+
+  @Test func loadPersistedRepositoriesDeduplicatesWorktreePaths() async {
+    // A broken inner worktree can make the listing report the same path twice
+    // (#616). Rather than refuse the whole repo, the loader drops the duplicate
+    // and loads the remaining worktrees, keeping the first-seen (main) entry.
+    let repoRoot = "/tmp/\(UUID().uuidString)-corrupt-git"
+    let duplicatePath = "\(repoRoot)/main"
+    let main = makeWorktree(id: duplicatePath, name: "main", repoRoot: repoRoot)
+    let collision = makeWorktree(id: duplicatePath, name: "orphan", repoRoot: repoRoot)
+    let repository = makeRepository(
+      id: repoRoot,
+      name: URL(fileURLWithPath: repoRoot).lastPathComponent,
+      worktrees: [main]
+    )
 
     let store = TestStore(initialState: RepositoriesFeature.State()) {
       RepositoriesFeature()
     } withDependencies: {
       $0.repositoryPersistence.loadRoots = { [repoRoot] }
       $0.gitClient.isGitRepository = { _ in true }
-      $0.gitClient.worktrees = { _ in [first, second] }
+      $0.gitClient.worktrees = { _ in [main, collision] }
     }
 
     await store.send(.loadPersistedRepositories)
+    await store.receive(\.gitEnvironmentChanged)
+    await store.receive(\.repositoriesLoaded) {
+      $0.repositories = [repository]
+      $0.repositoryRoots = [URL(fileURLWithPath: repoRoot)]
+      $0.isInitialLoadComplete = true
+      $0.reconcileSidebarForTesting()
+    }
+    await store.receive(\.delegate.repositoriesChanged)
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [repository.id: .finder]
+    }
+    await store.finish()
+  }
+
+  @Test func loadUnderXcodeLicenseGateShowsBannerNotBrokenRows() async {
+    // The listing shells out to git; an unaccepted Xcode license makes every
+    // git call fail. The loader must surface the banner and emit no failure
+    // rows, so intact repos never look corrupt.
+    let repoRoot = "/tmp/\(UUID().uuidString)-git"
+    let licenseError = ShellClientError(
+      command: "wt ls --json",
+      stdout: "",
+      stderr: "You have not agreed to the Xcode license agreements. "
+        + "Please run 'sudo xcodebuild -license'.",
+      exitCode: 69
+    )
+    let store = TestStore(initialState: RepositoriesFeature.State()) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.repositoryPersistence.loadRoots = { [repoRoot] }
+      $0.gitClient.isGitRepository = { _ in true }
+      $0.gitClient.worktrees = { _ in throw licenseError }
+      // A real block fails `git --version` too, so the authoritative probe confirms it.
+      $0.gitClient.checkGitEnvironment = { .xcodeLicenseNotAccepted }
+    }
+
+    await store.send(.loadPersistedRepositories)
+    await store.receive(\.gitEnvironmentChanged) {
+      $0.gitEnvironmentError = .xcodeLicenseNotAccepted
+    }
     await store.receive(\.repositoriesLoaded) {
       $0.repositories = []
       $0.repositoryRoots = [URL(fileURLWithPath: repoRoot)]
       $0.isInitialLoadComplete = true
-      $0.loadFailuresByID = [
-        RepositoryID(repoRoot): RepositoriesFeature.duplicateWorktreePathMessage(path: duplicatePath)
-      ]
       $0.reconcileSidebarForTesting()
     }
     await store.finish()
+    #expect(store.state.loadFailuresByID.isEmpty)
+  }
+
+  @Test func loadUnderGateKeepsFolderReposAndSuppressesGitFailures() async {
+    // Regression guard: the environment gate only blocks git. Folder repos are
+    // pure filesystem, so they must keep loading while the git roots are
+    // suppressed under the banner.
+    let gitRoot = "/tmp/\(UUID().uuidString)-git"
+    let folderRoot = "/tmp/\(UUID().uuidString)-folder"
+    let licenseError = ShellClientError(
+      command: "wt ls --json",
+      stdout: "",
+      stderr: "Please run 'sudo xcodebuild -license' from within a Terminal.",
+      exitCode: 69
+    )
+    let store = TestStore(initialState: RepositoriesFeature.State()) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.repositoryPersistence.loadRoots = { [gitRoot, folderRoot] }
+      $0.gitClient.isGitRepository = { $0.path(percentEncoded: false) == gitRoot }
+      $0.gitClient.worktrees = { _ in throw licenseError }
+      // A real block fails `git --version` too, so the authoritative probe confirms it.
+      $0.gitClient.checkGitEnvironment = { .xcodeLicenseNotAccepted }
+    }
+
+    let folderURL = URL(fileURLWithPath: folderRoot)
+    let synthetic = Worktree(
+      id: Repository.folderWorktreeID(for: folderURL),
+      kind: .folder,
+      name: Repository.name(for: folderURL),
+      detail: "",
+      workingDirectory: folderURL,
+      repositoryRootURL: folderURL,
+      isAttached: false
+    )
+    let folderRepo = Repository(
+      id: RepositoryID(folderRoot),
+      rootURL: folderURL,
+      name: Repository.name(for: folderURL),
+      worktrees: [synthetic],
+      isGitRepository: false
+    )
+
+    // Non-exhaustive: the derived sidebar-structure cache mirror isn't
+    // reproducible for the "folder kept, git suppressed" mix, so assert the
+    // meaningful outcome directly.
+    store.exhaustivity = .off
+    await store.send(.loadPersistedRepositories)
+    await store.skipReceivedActions()
+    #expect(store.state.gitEnvironmentError == .xcodeLicenseNotAccepted)
+    #expect(Array(store.state.repositories) == [folderRepo])
+    #expect(store.state.repositoryRoots == [gitRoot, folderRoot].map { URL(fileURLWithPath: $0) })
+    #expect(store.state.isInitialLoadComplete)
+    #expect(store.state.loadFailuresByID.isEmpty)
+  }
+
+  @Test func loadWithNoGitRootsProbesGitEnvironmentForBanner() async {
+    // With zero git roots nothing exercises git, so a standalone `git --version`
+    // probe is the only way a fresh install surfaces the banner.
+    let store = TestStore(initialState: RepositoriesFeature.State()) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.repositoryPersistence.loadRoots = { [] }
+      $0.gitClient.checkGitEnvironment = { .developerToolsUnavailable }
+    }
+
+    await store.send(.loadPersistedRepositories)
+    await store.receive(\.gitEnvironmentChanged) {
+      $0.gitEnvironmentError = .developerToolsUnavailable
+    }
+    await store.receive(\.repositoriesLoaded) {
+      $0.repositoryRoots = []
+      $0.isInitialLoadComplete = true
+      $0.reconcileSidebarForTesting()
+    }
+    await store.finish()
+  }
+
+  @Test func refreshAfterLicenseAcceptedClearsBannerAndReloads() async {
+    // Once the user accepts the license, the periodic refresh re-probes, clears
+    // the banner, and the repos reappear without a relaunch.
+    let worktree = makeWorktree(id: "/tmp/repo/main", name: "main")
+    let repository = makeRepository(id: "/tmp/repo", worktrees: [worktree])
+    var initialState = makeState(repositories: [repository])
+    initialState.gitEnvironmentError = .xcodeLicenseNotAccepted
+    let store = TestStore(initialState: initialState) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.gitClient.worktrees = { _ in [worktree] }
+    }
+
+    await store.send(.refreshWorktrees) {
+      $0.isRefreshingWorktrees = true
+    }
+    await store.receive(\.reloadRepositories)
+    await store.receive(\.gitEnvironmentChanged) {
+      $0.gitEnvironmentError = nil
+    }
+    await store.receive(\.repositoriesLoaded) {
+      $0.isRefreshingWorktrees = false
+      $0.isInitialLoadComplete = true
+      $0.reconcileSidebarForTesting()
+    }
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [repository.id: .finder]
+    }
+    await store.finish()
+  }
+
+  @Test func refreshStaysActiveWhileBlockedEvenWithNoRoots() async {
+    // The zero-root refresh normally early-returns; while blocked it must still
+    // run so an accepted license can clear the banner.
+    var initialState = RepositoriesFeature.State()
+    initialState.gitEnvironmentError = .xcodeLicenseNotAccepted
+    let store = TestStore(initialState: initialState) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.gitClient.checkGitEnvironment = { nil }
+    }
+
+    await store.send(.refreshWorktrees) {
+      $0.isRefreshingWorktrees = true
+    }
+    await store.receive(\.reloadRepositories)
+    await store.receive(\.gitEnvironmentChanged) {
+      $0.gitEnvironmentError = nil
+    }
+    await store.receive(\.repositoriesLoaded) {
+      $0.isRefreshingWorktrees = false
+      $0.isInitialLoadComplete = true
+      $0.reconcileSidebarForTesting()
+    }
+    await store.finish()
+  }
+
+  @Test func openRepositoriesUnderGateShowsBannerNotInvalidAlertForGitRepo() async throws {
+    // Adding a real git repo while blocked must surface the banner and keep the
+    // repo (as a blocked warning row), not the misleading "couldn't read this
+    // folder" alert.
+    let licenseError = ShellClientError(
+      command: "wt root", stdout: "", stderr: "sudo xcodebuild -license", exitCode: 69)
+    let tempDir = FileManager.default.temporaryDirectory
+      .appending(path: "supa-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+    let standardizedURL = tempDir.standardizedFileURL
+
+    let store = TestStore(initialState: RepositoriesFeature.State()) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.repositoryPersistence.loadRoots = { [] }
+      $0.repositoryPersistence.saveRoots = { _ in }
+      $0.gitClient.repoRoot = { _ in throw licenseError }
+      $0.gitClient.isGitRepository = { _ in true }
+      $0.gitClient.worktrees = { _ in throw licenseError }
+      $0.gitClient.checkGitEnvironment = { .xcodeLicenseNotAccepted }
+      $0.analyticsClient.capture = { _, _ in }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.openRepositories([tempDir]))
+    await store.skipReceivedActions()
+    #expect(store.state.gitEnvironmentError == .xcodeLicenseNotAccepted)
+    #expect(store.state.repositoryRoots == [standardizedURL])
+    #expect(store.state.alert == nil)
+  }
+
+  @Test func openRepositoriesAddsPlainFolderEvenWhileGitBlocked() async throws {
+    // A plain folder needs no git, so the gate must not stop it from being
+    // added, even though the banner also shows.
+    let licenseError = ShellClientError(
+      command: "wt root", stdout: "", stderr: "sudo xcodebuild -license", exitCode: 69)
+    let tempDir = FileManager.default.temporaryDirectory
+      .appending(path: "supa-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+    let standardizedURL = tempDir.standardizedFileURL
+
+    let store = TestStore(initialState: RepositoriesFeature.State()) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.repositoryPersistence.loadRoots = { [] }
+      $0.repositoryPersistence.saveRoots = { _ in }
+      $0.gitClient.repoRoot = { _ in throw licenseError }
+      $0.gitClient.isGitRepository = { _ in false }
+      $0.gitClient.checkGitEnvironment = { .xcodeLicenseNotAccepted }
+      $0.analyticsClient.capture = { _, _ in }
+    }
+
+    let folderWorktree = Worktree(
+      id: Repository.folderWorktreeID(for: standardizedURL),
+      kind: .folder,
+      name: Repository.name(for: standardizedURL),
+      detail: "",
+      workingDirectory: standardizedURL,
+      repositoryRootURL: standardizedURL,
+      isAttached: false
+    )
+    let folderRepo = Repository(
+      id: RepositoryID(standardizedURL.path(percentEncoded: false)),
+      rootURL: standardizedURL,
+      name: Repository.name(for: standardizedURL),
+      worktrees: IdentifiedArray(uniqueElements: [folderWorktree]),
+      isGitRepository: false
+    )
+
+    // Non-exhaustive: the derived sidebar-structure cache mirror isn't
+    // reproducible for the "folder kept, git suppressed" mix, so assert the
+    // meaningful outcome directly.
+    store.exhaustivity = .off
+    await store.send(.openRepositories([tempDir]))
+    await store.skipReceivedActions()
+    #expect(store.state.gitEnvironmentError == .xcodeLicenseNotAccepted)
+    #expect(Array(store.state.repositories) == [folderRepo])
+    #expect(store.state.repositoryRoots == [standardizedURL])
+    #expect(store.state.isInitialLoadComplete)
+    #expect(store.state.alert == nil)
+  }
+
+  @Test func archivedWorktreeSurvivesBlockedGitLoad() async {
+    // Regression: suppressing env-caused failures must not let the archived
+    // prune drop curation for the temporarily-hidden repos.
+    let worktree = makeWorktree(id: "/tmp/blocked/wt", name: "duck", repoRoot: "/tmp/blocked")
+    let repository = makeRepository(id: "/tmp/blocked", worktrees: [worktree])
+    var initial = makeState(repositories: [repository])
+    initial.repositoryRoots = [repository.rootURL]
+    initial.isInitialLoadComplete = true
+    initial.$sidebar.withLock { sidebar in
+      sidebar.sections[repository.id] = .init(
+        buckets: [.archived: .init(items: [worktree.id: .init(archivedAt: .now)])]
+      )
+    }
+    let licenseError = ShellClientError(
+      command: "wt ls", stdout: "", stderr: "sudo xcodebuild -license", exitCode: 69)
+    let store = TestStore(initialState: initial) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.gitClient.isGitRepository = { _ in true }
+      $0.gitClient.worktrees = { _ in throw licenseError }
+      // A real block fails `git --version` too, so the authoritative probe confirms it.
+      $0.gitClient.checkGitEnvironment = { .xcodeLicenseNotAccepted }
+      $0.analyticsClient.capture = { _, _ in }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.reloadRepositories(animated: false))
+    await store.skipReceivedActions()
+    #expect(store.state.gitEnvironmentError == .xcodeLicenseNotAccepted)
+    #expect(
+      store.state.sidebar.sections[repository.id]?.buckets[.archived]?.items[worktree.id] != nil
+    )
+  }
+
+  @Test func gitErrorEchoingGatePhraseWhileGitWorksSurfacesFailureNotBanner() async {
+    // A repo-specific error that merely echoes a gate phrase must not raise the
+    // app-wide banner when another git repo demonstrably works.
+    let goodRoot = "/tmp/\(UUID().uuidString)-good"
+    let weirdRoot = "/tmp/\(UUID().uuidString)-weird"
+    let goodWorktree = makeWorktree(id: "\(goodRoot)/main", name: "main", repoRoot: goodRoot)
+    let phraseError = ShellClientError(
+      command: "wt ls", stdout: "", stderr: "hook failed: this tool requires Xcode 15", exitCode: 1)
+    let store = TestStore(initialState: RepositoriesFeature.State()) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.repositoryPersistence.loadRoots = { [goodRoot, weirdRoot] }
+      $0.gitClient.isGitRepository = { _ in true }
+      $0.gitClient.worktrees = { url in
+        if url.path(percentEncoded: false) == goodRoot { return [goodWorktree] }
+        throw phraseError
+      }
+      $0.analyticsClient.capture = { _, _ in }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.loadPersistedRepositories)
+    await store.skipReceivedActions()
+    #expect(store.state.gitEnvironmentError == nil)
+    #expect(store.state.repositories[id: RepositoryID(goodRoot)] != nil)
+    #expect(store.state.loadFailuresByID[RepositoryID(weirdRoot)] != nil)
+  }
+
+  @Test func blockedRepoBecomesRealRepoWhenLicenseAccepted() async {
+    // The core transition: a blocked warning row becomes a real repo row once
+    // git recovers, with the banner cleared.
+    let gitRoot = "/tmp/\(UUID().uuidString)-git"
+    let gitID = RepositoryID(gitRoot)
+    let worktree = makeWorktree(id: "\(gitRoot)/main", name: "main", repoRoot: gitRoot)
+    var initial = RepositoriesFeature.State()
+    initial.repositoryRoots = [URL(fileURLWithPath: gitRoot)]
+    initial.gitEnvironmentError = .xcodeLicenseNotAccepted
+    initial.isInitialLoadComplete = true
+    // The starting state really does render a blocked warning row.
+    #expect(
+      initial.computeSidebarStructure(groupPinned: false, groupActive: false).sections.contains {
+        if case .environmentBlockedRepository(let id, _, _, _) = $0 { return id == gitID }
+        return false
+      })
+
+    let store = TestStore(initialState: initial) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.gitClient.isGitRepository = { _ in true }
+      $0.gitClient.worktrees = { _ in [worktree] }
+      $0.gitClient.checkGitEnvironment = { nil }
+      $0.analyticsClient.capture = { _, _ in }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.reloadRepositories(animated: false))
+    await store.skipReceivedActions()
+    #expect(store.state.gitEnvironmentError == nil)
+    #expect(store.state.repositories[id: gitID] != nil)
+    let structure = store.state.sidebarStructure
+    #expect(
+      structure.sections.contains {
+        if case .repository(let id, _) = $0 { return id == gitID }
+        return false
+      })
+    #expect(
+      !structure.sections.contains {
+        if case .environmentBlockedRepository = $0 { return true }
+        return false
+      })
+  }
+
+  @Test func mixedRosterRoutesFolderBlockedGitAndMissingDirIndependently() async {
+    // One load must route a folder to a kept repo, a blocked git root to a
+    // suppressed warning row, and a missing directory to an actionable failure.
+    let folderRoot = "/tmp/\(UUID().uuidString)-folder"
+    let gitRoot = "/tmp/\(UUID().uuidString)-git"
+    let missingRoot = "/tmp/\(UUID().uuidString)-missing"
+    let licenseError = ShellClientError(
+      command: "wt ls", stdout: "", stderr: "sudo xcodebuild -license", exitCode: 69)
+    let store = TestStore(initialState: RepositoriesFeature.State()) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.repositoryPersistence.loadRoots = { [folderRoot, gitRoot, missingRoot] }
+      $0.gitClient.rootDirectoryExists = { $0.path(percentEncoded: false) != missingRoot }
+      $0.gitClient.isGitRepository = { $0.path(percentEncoded: false) == gitRoot }
+      $0.gitClient.worktrees = { _ in throw licenseError }
+      $0.gitClient.checkGitEnvironment = { .xcodeLicenseNotAccepted }
+      $0.analyticsClient.capture = { _, _ in }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.loadPersistedRepositories)
+    await store.skipReceivedActions()
+    #expect(store.state.gitEnvironmentError == .xcodeLicenseNotAccepted)
+    #expect(Array(store.state.repositories.ids) == [RepositoryID(folderRoot)])
+    #expect(Set(store.state.loadFailuresByID.keys) == [RepositoryID(missingRoot)])
+  }
+
+  @Test func addingGitRepoWhileBlockedPersistsItAsBlockedRow() async throws {
+    // Git is blocked, not the repo: a real git repo the user adds must be
+    // persisted (survive to recovery) and shown as a blocked row, not dropped.
+    let licenseError = ShellClientError(
+      command: "wt root", stdout: "", stderr: "sudo xcodebuild -license", exitCode: 69)
+    let tempDir = FileManager.default.temporaryDirectory
+      .appending(path: "supa-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+    let standardizedURL = tempDir.standardizedFileURL
+    let gitID = RepositoryID(standardizedURL.path(percentEncoded: false))
+    let savedRoots = LockIsolated<[String]>([])
+
+    let store = TestStore(initialState: RepositoriesFeature.State()) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.repositoryPersistence.loadRoots = { [] }
+      $0.repositoryPersistence.saveRoots = { savedRoots.setValue($0) }
+      $0.gitClient.repoRoot = { _ in throw licenseError }
+      $0.gitClient.rootDirectoryExists = { _ in true }
+      $0.gitClient.isGitRepository = { _ in true }
+      $0.gitClient.worktrees = { _ in throw licenseError }
+      $0.gitClient.checkGitEnvironment = { .xcodeLicenseNotAccepted }
+      $0.analyticsClient.capture = { _, _ in }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.openRepositories([tempDir]))
+    await store.skipReceivedActions()
+    #expect(store.state.gitEnvironmentError == .xcodeLicenseNotAccepted)
+    #expect(
+      store.state.repositoryRoots.map { $0.path(percentEncoded: false) }
+        .contains(standardizedURL.path(percentEncoded: false)))
+    #expect(savedRoots.value.contains(standardizedURL.path(percentEncoded: false)))
+    #expect(
+      store.state.sidebarStructure.sections.contains {
+        if case .environmentBlockedRepository(let id, _, _, _) = $0 { return id == gitID }
+        return false
+      })
+  }
+
+  @Test func blockedRepoIsRemovable() async {
+    // A repo added while blocked shows a warning row, but must still be
+    // removable (path-based) so a mistaken add isn't a dead-end until recovery.
+    let gitRoot = "/tmp/\(UUID().uuidString)-git"
+    let gitID = RepositoryID(gitRoot)
+    var initial = RepositoriesFeature.State()
+    initial.repositoryRoots = [URL(fileURLWithPath: gitRoot)]
+    initial.gitEnvironmentError = .xcodeLicenseNotAccepted
+    initial.isInitialLoadComplete = true
+    let savedRoots = LockIsolated<[String]>(["unset"])
+    let store = TestStore(initialState: initial) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.repositoryPersistence.loadRoots = { [gitRoot] }
+      $0.repositoryPersistence.saveRoots = { savedRoots.setValue($0) }
+      $0.repositoryPersistence.pruneRepositoryConfigs = { _ in }
+      $0.gitClient.checkGitEnvironment = { .xcodeLicenseNotAccepted }
+      $0.analyticsClient.capture = { _, _ in }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.removeFailedRepository(gitID))
+    await store.skipReceivedActions()
+    #expect(
+      !store.state.repositoryRoots.contains {
+        RepositoryID($0.standardizedFileURL.path(percentEncoded: false)) == gitID
+      })
+    #expect(!savedRoots.value.contains(gitRoot))
+  }
+
+  @Test func soleGitRepoEchoingGatePhraseProbesBeforeBannering() async {
+    // The only git root echoes a gate phrase but git is actually healthy. With
+    // nothing to disconfirm against, the `git --version` probe is the ground
+    // truth: it clears the false positive, so the real error surfaces as a
+    // failure row rather than a bogus app-wide banner.
+    let gitRoot = "/tmp/\(UUID().uuidString)-git"
+    let phraseError = ShellClientError(
+      command: "wt ls", stdout: "", stderr: "post-checkout hook: this step requires Xcode", exitCode: 1)
+    let store = TestStore(initialState: RepositoriesFeature.State()) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.repositoryPersistence.loadRoots = { [gitRoot] }
+      $0.gitClient.isGitRepository = { _ in true }
+      $0.gitClient.worktrees = { _ in throw phraseError }
+      // `git --version` succeeds: git is not actually blocked.
+      $0.gitClient.checkGitEnvironment = { nil }
+      $0.analyticsClient.capture = { _, _ in }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.loadPersistedRepositories)
+    await store.skipReceivedActions()
+    #expect(store.state.gitEnvironmentError == nil)
+    #expect(store.state.loadFailuresByID[RepositoryID(gitRoot)] != nil)
+  }
+
+  @Test func blockWithUnmatchedRepoErrorStillBannersViaProbe() async {
+    // Locale robustness: even when the per-repo error text matches no gate
+    // phrase (e.g. a localized message), the `git --version` probe is the
+    // authority, so the banner shows and the repo is suppressed as a warning
+    // row rather than marked broken.
+    let gitRoot = "/tmp/\(UUID().uuidString)-git"
+    let opaqueError = ShellClientError(
+      command: "wt ls", stdout: "", stderr: "erreur: impossible de lire", exitCode: 1)
+    let store = TestStore(initialState: RepositoriesFeature.State()) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.repositoryPersistence.loadRoots = { [gitRoot] }
+      $0.gitClient.isGitRepository = { _ in true }
+      $0.gitClient.worktrees = { _ in throw opaqueError }
+      // The locale-independent probe is what confirms the block.
+      $0.gitClient.checkGitEnvironment = { .xcodeLicenseNotAccepted }
+      $0.analyticsClient.capture = { _, _ in }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.loadPersistedRepositories)
+    await store.skipReceivedActions()
+    #expect(store.state.gitEnvironmentError == .xcodeLicenseNotAccepted)
+    #expect(store.state.loadFailuresByID[RepositoryID(gitRoot)] == nil)
+    #expect(store.state.repositories[id: RepositoryID(gitRoot)] == nil)
+  }
+
+  @Test func gitEnvironmentChangedIgnoresUnchangedValue() async {
+    var initialState = RepositoriesFeature.State()
+    initialState.gitEnvironmentError = .xcodeLicenseNotAccepted
+    let store = TestStore(initialState: initialState) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.sidebarStructureAutoRecompute = false
+    }
+
+    // Re-publishing the same value on the periodic refresh must not mutate state.
+    await store.send(.gitEnvironmentChanged(.xcodeLicenseNotAccepted))
+    // A real transition still applies.
+    await store.send(.gitEnvironmentChanged(nil)) {
+      $0.gitEnvironmentError = nil
+    }
   }
 
   @Test func loadPersistedRepositoriesClassifiesMixedGitAndFolderRoots() async {
@@ -7049,6 +8018,7 @@ struct RepositoriesFeatureTests {
     }
 
     await store.send(.loadPersistedRepositories)
+    await store.receive(\.gitEnvironmentChanged)
     await store.receive(\.repositoriesLoaded) {
       $0.repositories = [
         Repository(
@@ -7083,6 +8053,12 @@ struct RepositoriesFeatureTests {
       $0.reconcileSidebarForTesting()
     }
     await store.receive(\.delegate.repositoriesChanged)
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [
+        RepositoryID(gitRoot): .finder,
+        RepositoryID(folderRoot): .finder,
+      ]
+    }
     await store.finish()
   }
 
@@ -7132,6 +8108,7 @@ struct RepositoriesFeatureTests {
     )
 
     await store.send(.openRepositories([tempDir]))
+    await store.receive(\.gitEnvironmentChanged)
     await store.receive(\.openRepositoriesFinished) {
       $0.repositories = [folderRepo]
       $0.repositoryRoots = [standardizedURL]
@@ -7139,6 +8116,9 @@ struct RepositoriesFeatureTests {
       $0.reconcileSidebarForTesting()
     }
     await store.receive(\.delegate.repositoriesChanged)
+    await store.receive(\.openActionsResolved) {
+      $0.openActionByRepositoryID = [folderRepo.id: .finder]
+    }
     await store.finish()
   }
 

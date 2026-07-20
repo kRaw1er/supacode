@@ -4,6 +4,12 @@ import PackageDescription
 #if TUIST
 import ProjectDescription
 
+// Deliberately no `baseSettings`. The app sets `SWIFT_APPROACHABLE_CONCURRENCY`, and
+// letting it reach these packages would make TCA's `Effect.run` operation
+// `nonisolated(nonsending)`, so every `.run` body would inherit its MainActor caller
+// instead of hopping to the global executor. Effects that exist to keep disk reads off
+// the main thread (`OpenActionResolver`) would silently move back onto it, with no
+// compile error and no failing test. See #657.
 let packageSettings = PackageSettings(
   productTypes: [
     "Sparkle": .framework,
@@ -18,7 +24,7 @@ let package = Package(
     .package(url: "https://github.com/ibrahimcetin/libgit2", exact: "1.9.2"),
     .package(url: "https://github.com/apple/swift-collections", exact: "1.3.0"),
     .package(url: "https://github.com/onevcat/Kingfisher.git", exact: "8.8.0"),
-    .package(url: "https://github.com/PostHog/posthog-ios.git", exact: "3.38.0"),
+    .package(url: "https://github.com/PostHog/posthog-ios.git", exact: "3.64.6"),
     .package(url: "https://github.com/getsentry/sentry-cocoa/", exact: "9.3.0"),
     .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.0-beta.2"),
     // Syntax highlighting for the diff viewer (Phase 4), via ChimeHQ neon (Phase 0

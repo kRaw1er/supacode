@@ -4,6 +4,7 @@ import Sentry
 import SupacodeSettingsShared
 
 enum GitOperation: String {
+  case version = "version"
   case repoRoot = "repo_root"
   case worktreeList = "worktree_list"
   case worktreeCreate = "worktree_create"
@@ -233,8 +234,10 @@ struct GitClient {
     _ = try await runGit(operation: .worktreeCreate, arguments: arguments)
   }
 
-  // Backfill-only: never drop Supacode-owned locks here. Supacode-initiated
-  // `removeWorktree` is the sole release path.
+  // Backfill-only, with one exception: a worktree whose `.git` link is broken
+  // has its Supacode lock released so the prune can reclaim the orphan (#616).
+  // Every other Supacode-owned lock is left intact; `removeWorktree` is the
+  // normal release path.
   nonisolated func reconcileSupacodeLocks(for repoRoot: URL) async {
     // Folder-kind roots have no git admin dir; skip the shell-outs.
     guard Repository.isGitRepository(at: repoRoot) else { return }
@@ -249,10 +252,31 @@ struct GitClient {
     }
     let fileManager = FileManager.default
     for entry in entries {
-      guard entry.lockReason == nil else { continue }
       let exists = fileManager.fileExists(
         atPath: entry.worktreeDirectory.path(percentEncoded: false)
       )
+      // A worktree whose `.git` link is gone is an orphan git can't use, yet its
+      // path resolves up to the repo root and shadows the main worktree (#616).
+      // Release our own lock (checked before the `lockReason` guard, since the
+      // orphan is already locked) so the prune below reclaims it. `exists` gates
+      // this so a transiently missing worktree keeps its lock (#338).
+      if exists, Self.isGitdirLinkBroken(worktreeDirectory: entry.worktreeDirectory) {
+        let name = entry.worktreeDirectory.lastPathComponent
+        switch Self.removeSupacodeLock(at: entry.adminDirectory) {
+        case .removed:
+          gitLogger.info("Released Supacode lock on broken worktree \(name)")
+        case .keptForeignLock:
+          // A user `git worktree lock --reason` orphan is never reclaimed here, so
+          // flag it rather than let the prune silently skip it.
+          gitLogger.warning("Broken worktree \(name) keeps a user lock; prune cannot reclaim it")
+        case .failed(let error):
+          gitLogger.warning("Failed to release Supacode lock on broken worktree \(name): \(error)")
+        case .notPresent:
+          break
+        }
+        continue
+      }
+      guard entry.lockReason == nil else { continue }
       guard exists else { continue }
       Self.writeSupacodeLock(at: entry.adminDirectory)
       gitLogger.info(
@@ -343,21 +367,45 @@ struct GitClient {
     return nil
   }
 
+  /// A linked worktree whose `.git` pointer file is missing: git can't use it and
+  /// resolves its path up to the repo root (#616). Only the missing-file case
+  /// counts (git's own prune criterion), so a transiently unreadable `.git` is
+  /// never treated as broken.
+  nonisolated static func isGitdirLinkBroken(worktreeDirectory: URL) -> Bool {
+    let gitPointer = worktreeDirectory.appending(path: ".git")
+    return !FileManager.default.fileExists(atPath: gitPointer.path(percentEncoded: false))
+  }
+
+  /// Outcome of `removeSupacodeLock`, so callers can log precisely rather than
+  /// assume a release happened.
+  nonisolated enum SupacodeLockRemoval {
+    case removed
+    case keptForeignLock
+    case notPresent
+    case failed(Error)
+  }
+
   nonisolated static func writeSupacodeLock(at adminDirectory: URL) {
     let lockFile = adminDirectory.appending(path: "locked")
     try? currentSupacodeLockPayload().write(to: lockFile, atomically: true, encoding: .utf8)
   }
 
-  nonisolated static func removeSupacodeLock(at adminDirectory: URL) {
+  @discardableResult
+  nonisolated static func removeSupacodeLock(at adminDirectory: URL) -> SupacodeLockRemoval {
     let lockFile = adminDirectory.appending(path: "locked")
     let path = lockFile.path(percentEncoded: false)
-    guard FileManager.default.fileExists(atPath: path) else { return }
-    // Don't strip a user's `git worktree lock --reason "..."`; only
-    // remove the file when it parses as a Supacode-owned payload.
+    guard FileManager.default.fileExists(atPath: path) else { return .notPresent }
+    // Don't strip a user's `git worktree lock --reason "..."`; only remove the
+    // file when it parses as a Supacode-owned payload.
     guard let raw = try? String(contentsOf: lockFile, encoding: .utf8),
       parseSupacodeLockMetadata(from: raw) != nil
-    else { return }
-    try? FileManager.default.removeItem(at: lockFile)
+    else { return .keptForeignLock }
+    do {
+      try FileManager.default.removeItem(at: lockFile)
+      return .removed
+    } catch {
+      return .failed(error)
+    }
   }
 
   // Stamp version/build for forensics on stranded lock files.
@@ -585,15 +633,19 @@ struct GitClient {
             baseRef: baseRef,
             directoryOverride: directoryOverride
           )
-          let envURL = URL(fileURLWithPath: "/usr/bin/env")
           let localeArguments = ["LANG=C", "LC_ALL=C", "LC_MESSAGES=C"]
-          let invocationArguments = localeArguments + [wtURL.path(percentEncoded: false)] + arguments
-          let command = ([envURL.path(percentEncoded: false)] + invocationArguments).joined(separator: " ")
+          let baseCommand =
+            ["/usr/bin/env"] + localeArguments
+            + [wtURL.path(percentEncoded: false)] + arguments
+          let command = baseCommand.joined(separator: " ")
+          // `git worktree add` checks out the working tree, which runs the LFS
+          // smudge filter; augment PATH so `git` can find `git-lfs` (#663).
+          let invocation = Self.pathAugmentedInvocation(command: baseCommand)
           var pathLine: String?
           do {
             for try await streamEvent in shell.runLoginStream(
-              envURL,
-              invocationArguments,
+              invocation.executable,
+              invocation.arguments,
               repoRoot
             ) {
               switch streamEvent {
@@ -666,7 +718,6 @@ struct GitClient {
       let destinationHadContent = Self.destinationHasContent(at: destinationURL)
       let arguments = Self.cloneArguments(
         repositoryURL: repositoryURL, destination: destinationURL, branch: branch, depth: depth)
-      let envURL = URL(fileURLWithPath: "/usr/bin/env")
       // `GIT_TERMINAL_PROMPT=0` suppresses git's own HTTPS prompt; the ssh command
       // fails fast on a passphrase / host-key prompt and a stalled connect instead
       // of hanging the modal with no tty to answer.
@@ -676,18 +727,21 @@ struct GitClient {
         "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new",
         "git",
       ]
-      let invocationArguments = environmentArguments + arguments
+      let baseCommand = ["/usr/bin/env"] + environmentArguments + arguments
       // Redact the url userinfo (token / password) from everything shown to the
       // user. Match the credential substring, not the whole url, so it survives
       // git's url normalization in echoed auth-failure messages.
       let credentials = Self.cloneCredentials(of: repositoryURL)
       let command = Self.redacting(
-        ([envURL.path(percentEncoded: false)] + invocationArguments).joined(separator: " "),
+        baseCommand.joined(separator: " "),
         credentials: credentials
       )
+      // Cloning an LFS repo checks out the working tree, which runs the LFS
+      // smudge filter; augment PATH so `git` can find `git-lfs` (#663).
+      let invocation = Self.pathAugmentedInvocation(command: baseCommand)
       // `log: false` keeps the clone command (and any embedded token) out of the
       // shell debug log.
-      let process = shell.runLoginProcess(envURL, invocationArguments, nil, log: false)
+      let process = shell.runLoginProcess(invocation.executable, invocation.arguments, nil, log: false)
       let cancelRequested = LockIsolated(false)
       // Drain to completion even after the consumer cancels so partial-clone
       // cleanup runs after git exits rather than racing its teardown.
@@ -735,6 +789,35 @@ struct GitClient {
         process.terminate()
       }
     }
+  }
+
+  /// Well-known fixed directories where `git-lfs` and similar PATH-based git
+  /// filter helpers install, appended to PATH so a non-interactive login shell
+  /// that misses them can still run the LFS smudge filter (#663). The per-user
+  /// `~/.local/bin` is added separately so it resolves on the execution host.
+  nonisolated static func gitFilterHelperDirectories() -> [String] {
+    [
+      "/opt/homebrew/bin",
+      "/usr/local/bin",
+      "/opt/local/bin",
+    ]
+  }
+
+  /// Wraps `command` so `directories` and the execution host's `~/.local/bin`
+  /// are appended to the caller login shell's PATH, then execs it in place:
+  /// appending keeps an rc-resolvable helper's precedence, and `exec` keeps a
+  /// single pid so termination still targets `git`.
+  nonisolated static func pathAugmentedInvocation(
+    command: [String],
+    directories: [String] = gitFilterHelperDirectories()
+  ) -> (executable: URL, arguments: [String]) {
+    // The fixed dirs are single-quoted literals; `$HOME/.local/bin` is left for
+    // the executing shell to expand so a remote host uses its own HOME (and it
+    // is dropped when HOME is unset). `${PATH:+$PATH:}` avoids a leading colon
+    // that would otherwise put the cwd on PATH.
+    let fixed = SSHCommand.shellQuote(directories.joined(separator: ":"))
+    let script = "export PATH=\"${PATH:+$PATH:}\"\(fixed)\"${HOME:+:$HOME/.local/bin}\"; exec \"$@\""
+    return (URL(fileURLWithPath: "/bin/sh"), ["-c", script, "sh"] + command)
   }
 
   /// `git clone` argv. The url and destination travel as positional arguments
@@ -1051,14 +1134,38 @@ struct GitClient {
     GitReferenceQueries.preferredBaseRef(remote: remote, localHead: localHead)
   }
 
+  /// Probe whether the `git` binary itself is blocked at the environment level
+  /// (e.g. an unaccepted Xcode license). Returns `nil` when git runs normally or
+  /// fails for a repository-specific reason.
+  nonisolated func gitEnvironmentError() async -> GitEnvironmentError? {
+    do {
+      _ = try await runGit(operation: .version, arguments: ["--version"], localePinned: true)
+      return nil
+    } catch {
+      // `git --version` failing at all means git is unusable. Classify the known
+      // gates; otherwise fall back to the command-line-tools remedy (covers a
+      // missing binary / exit 127) and log so a reworded gate stays diagnosable.
+      if let classified = GitEnvironmentError(classifying: error) {
+        return classified
+      }
+      gitLogger.warning(
+        "git --version failed without a known gate signature: \(error.localizedDescription)")
+      return .developerToolsUnavailable
+    }
+  }
+
   nonisolated private func runGit(
     operation: GitOperation,
-    arguments: [String]
+    arguments: [String],
+    localePinned: Bool = false
   ) async throws -> String {
     let env = URL(fileURLWithPath: "/usr/bin/env")
-    let command = ([env.path(percentEncoded: false)] + ["git"] + arguments).joined(separator: " ")
+    // Pin the C locale for the environment probe so its diagnostics stay English
+    // and classify regardless of the user's system language.
+    let invocation = (localePinned ? ["LC_ALL=C", "LANG=C"] : []) + ["git"] + arguments
+    let command = ([env.path(percentEncoded: false)] + invocation).joined(separator: " ")
     do {
-      return try await shell.run(env, ["git"] + arguments, nil).stdout
+      return try await shell.run(env, invocation, nil).stdout
     } catch {
       throw wrapShellError(error, operation: operation, command: command)
     }

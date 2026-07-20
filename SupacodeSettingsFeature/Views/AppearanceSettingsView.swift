@@ -14,7 +14,7 @@ public struct AppearanceSettingsView: View {
   }
 
   public var body: some View {
-    let openActionOptions = OpenWorktreeAction.availableCases
+    let openActionOptions = store.installedOpenActions
     Form {
       Section {
         LabeledContent("Appearance") {
@@ -53,10 +53,46 @@ public struct AppearanceSettingsView: View {
             """
           )
         }
+        Toggle(isOn: $store.remoteSessionPersistenceEnabled) {
+          Text("Persist Remote Sessions on Host")
+          Text(
+            """
+            Keeps SSH surfaces alive across disconnects when \
+            [zmx \u{2197}](https://github.com/neurosnap/zmx) is installed on the host.
+            """
+          )
+        }
+      }
+      Section {
+        LabeledContent("Visibility") {
+          HStack(spacing: 12) {
+            ForEach(AppVisibility.allCases) { visibility in
+              AppVisibilityOptionCardView(
+                visibility: visibility,
+                isSelected: visibility == store.appVisibility
+              ) {
+                store.send(.setAppVisibility(visibility))
+              }
+            }
+          }
+        }
       }
       Section("Editor") {
+        // The stored id deliberately keeps naming an uninstalled editor, so the choice
+        // survives a reinstall. No row is tagged with it though, and an untagged
+        // selection renders blank, so normalize for display and write back raw.
+        let storedEditorID = $store.defaultEditorID
+        let defaultEditorID = Binding(
+          get: {
+            OpenWorktreeAction.normalizedDefaultEditorID(
+              storedEditorID.wrappedValue,
+              installed: openActionOptions
+            )
+          },
+          set: { storedEditorID.wrappedValue = $0 }
+        )
         Picker(
-          selection: $store.defaultEditorID
+          selection: defaultEditorID
         ) {
           Text("Automatic")
             .tag(OpenWorktreeAction.automaticSettingsID)

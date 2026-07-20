@@ -9,6 +9,8 @@ import AppKit
 import ComposableArchitecture
 import Foundation
 import GhosttyKit
+import IdentifiedCollections
+import OrderedCollections
 import Sharing
 import SupacodeSettingsFeature
 import SupacodeSettingsShared
@@ -74,19 +76,27 @@ final class SupacodeAppDelegate: NSObject, NSApplicationDelegate {
     // the main window. Opt the singleton out per-process so a panel
     // left open from a previous session can't survive the relaunch.
     NSColorPanel.shared.isRestorable = false
-    appStore?.send(.appLaunched)
+    guard let appStore else {
+      SupaLogger("App").error("applicationDidFinishLaunching with no store; launch setup skipped.")
+      return
+    }
+    // Apply the saved Dock/menu-bar visibility before the first window shows.
+    NSApplication.shared.applyActivationPolicy(for: appStore.state.settings.appVisibility)
+    appStore.send(.appLaunched)
   }
 
   func applicationDidBecomeActive(_ notification: Notification) {
+    appStore?.send(.applicationDidBecomeActive)
     let app = NSApplication.shared
-    // Filter `NSPanel` out of the visibility check — the system
-    // color / font panels (and any sheet-attached child panels) are
-    // not "main windows" that should suppress surfacing.
     let hasVisibleMainWindow = app.windows.contains { window in
-      window.isVisible && !(window is NSPanel)
+      window.isVisible && window.isSurfaceableAppWindow
     }
     guard !hasVisibleMainWindow else { return }
     app.surfaceMainWindow()
+  }
+
+  func applicationDidResignActive(_ notification: Notification) {
+    appStore?.send(.applicationDidResignActive)
   }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -119,6 +129,7 @@ struct SupacodeApp: App {
   @State private var terminalManager: WorktreeTerminalManager
   @State private var worktreeInfoWatcher: WorktreeInfoWatcherManager
   @State private var commandKeyObserver: CommandKeyObserver
+  @State private var openActionIcons = OpenActionIconStore()
   @State private var store: StoreOf<AppFeature>
 
   @MainActor init() {
@@ -195,6 +206,9 @@ struct SupacodeApp: App {
   @MainActor
   private static func makeTerminalManager(runtime: GhosttyRuntime) -> WorktreeTerminalManager {
     let terminalManager = WorktreeTerminalManager(runtime: runtime)
+    runtime.focusedSurfaceBackgroundColorProvider = { [weak terminalManager] in
+      terminalManager?.focusedSurfaceBackground
+    }
     terminalManager.saveLayoutSnapshot = { worktreeID, snapshot in
       @Shared(.layouts) var layouts: [String: TerminalLayoutSnapshot] = [:]
       $layouts.withLock { dict in
@@ -235,6 +249,9 @@ struct SupacodeApp: App {
         isDiffTab: { worktreeID, tabID in
           terminalManager.isDiffTab(worktreeID: worktreeID, tabID: tabID)
         },
+        tabCanRename: { worktreeID, tabID in
+          terminalManager.tabCanRename(worktreeID: worktreeID, tabID: tabID)
+        },
         surfaceExists: { worktreeID, tabID, surfaceID in
           terminalManager.surfaceExists(worktreeID: worktreeID, tabID: tabID, surfaceID: surfaceID)
         },
@@ -261,6 +278,9 @@ struct SupacodeApp: App {
         },
         markNotificationRead: { worktreeID, notificationID in
           terminalManager.markNotificationRead(worktreeID: worktreeID, notificationID: notificationID)
+        },
+        markAllNotificationsRead: {
+          terminalManager.markAllNotificationsRead()
         },
         hasInflightBlockingScripts: {
           terminalManager.hasInflightBlockingScripts
@@ -391,47 +411,97 @@ struct SupacodeApp: App {
         return
       }
       AgentHookSocketServer.sendQueryResponse(clientFD: clientFD, data: surfaces)
+    case "worktreeAppearance":
+      handleWorktreeAppearanceQuery(params: params, repos: repos, clientFD: clientFD, store: store)
     case "scripts":
-      guard let worktreeID = params["worktreeID"] else {
-        AgentHookSocketServer.sendCommandResponse(
-          clientFD: clientFD, ok: false, error: "Missing worktreeID for script list.")
-        return
-      }
-      let decoded = worktreeID.removingPercentEncoding ?? worktreeID
-      // Worktree IDs from standardizedFileURL include a trailing slash, so
-      // accept both forms — matching the deeplink reducer's resolveWorktreeID.
-      let allWorktrees = repos.flatMap(\.worktrees)
-      let worktree =
-        allWorktrees.first(where: { $0.id.rawValue == decoded })
-        ?? allWorktrees.first(where: { $0.id.rawValue == decoded + "/" })
-      guard let worktree else {
-        AgentHookSocketServer.sendCommandResponse(
-          clientFD: clientFD, ok: false, error: "Worktree not found: \(worktreeID)")
-        return
-      }
-      @SharedReader(.repositorySettings(worktree.repositoryRootURL, host: worktree.host)) var settings
-      @SharedReader(.settingsFile) var settingsFile
-      let runningIDs: Set<UUID> =
-        store.repositories.sidebarItems[id: worktree.id]
-        .map { Set($0.runningScripts.ids) } ?? []
-      let scripts: [ScriptDefinition] = .merged(
-        repo: settings.scripts,
-        global: settingsFile.global.globalScripts,
-      )
-      let data = scripts.map { script in
-        [
-          "id": script.id.uuidString,
-          "kind": script.kind.rawValue,
-          "name": script.name,
-          "displayName": script.displayName,
-          "running": runningIDs.contains(script.id) ? "1" : "",
-        ]
-      }
-      AgentHookSocketServer.sendQueryResponse(clientFD: clientFD, data: data)
+      handleScriptsQuery(params: params, repos: repos, clientFD: clientFD, store: store)
     default:
       AgentHookSocketServer.sendCommandResponse(
         clientFD: clientFD, ok: false, error: "Unknown resource: \(resource)")
     }
+  }
+
+  private static func handleWorktreeAppearanceQuery(
+    params: [String: String],
+    repos: IdentifiedArrayOf<Repository>,
+    clientFD: Int32,
+    store: StoreOf<AppFeature>
+  ) {
+    guard let worktreeID = params["worktreeID"] else {
+      AgentHookSocketServer.sendCommandResponse(
+        clientFD: clientFD, ok: false, error: "Missing worktreeID for appearance.")
+      return
+    }
+    guard let (repository, worktree) = resolveWorktree(worktreeID, in: repos) else {
+      AgentHookSocketServer.sendCommandResponse(
+        clientFD: clientFD, ok: false, error: "Worktree not found: \(worktreeID)")
+      return
+    }
+    let bucket = store.repositories.sidebar.currentBucket(of: worktree.id, in: repository.id)
+    let item = bucket.flatMap {
+      store.repositories.sidebar.sections[repository.id]?.buckets[$0]?.items[worktree.id]
+    }
+    AgentHookSocketServer.sendQueryResponse(
+      clientFD: clientFD,
+      data: [
+        WorktreeAppearanceQueryResponse.fields(
+          repository: repository,
+          worktree: worktree,
+          item: item
+        )
+      ]
+    )
+  }
+
+  private static func handleScriptsQuery(
+    params: [String: String],
+    repos: IdentifiedArrayOf<Repository>,
+    clientFD: Int32,
+    store: StoreOf<AppFeature>
+  ) {
+    guard let worktreeID = params["worktreeID"] else {
+      AgentHookSocketServer.sendCommandResponse(
+        clientFD: clientFD, ok: false, error: "Missing worktreeID for script list.")
+      return
+    }
+    guard let (_, worktree) = resolveWorktree(worktreeID, in: repos) else {
+      AgentHookSocketServer.sendCommandResponse(
+        clientFD: clientFD, ok: false, error: "Worktree not found: \(worktreeID)")
+      return
+    }
+    @SharedReader(.repositorySettings(worktree.repositoryRootURL, host: worktree.host)) var settings
+    @SharedReader(.settingsFile) var settingsFile
+    let runningIDs: Set<UUID> =
+      store.repositories.sidebarItems[id: worktree.id]
+      .map { Set($0.runningScripts.ids) } ?? []
+    let scripts: [ScriptDefinition] = .merged(
+      repo: settings.scripts,
+      global: settingsFile.global.globalScripts,
+    )
+    let data = scripts.map { script in
+      [
+        "id": script.id.uuidString,
+        "kind": script.kind.rawValue,
+        "name": script.name,
+        "displayName": script.displayName,
+        "running": runningIDs.contains(script.id) ? "1" : "",
+      ]
+    }
+    AgentHookSocketServer.sendQueryResponse(clientFD: clientFD, data: data)
+  }
+
+  private static func resolveWorktree(
+    _ worktreeID: String,
+    in repos: IdentifiedArrayOf<Repository>
+  ) -> (Repository, Worktree)? {
+    let decoded = worktreeID.removingPercentEncoding ?? worktreeID
+    return repos.lazy.compactMap { repo -> (Repository, Worktree)? in
+      // IDs from standardizedFileURL carry a trailing slash; accept both forms.
+      let worktree = repo.worktrees.first { candidate in
+        candidate.id.rawValue == decoded || candidate.id.rawValue == decoded + "/"
+      }
+      return worktree.map { (repo, $0) }
+    }.first
   }
 
   var body: some Scene {
@@ -440,6 +510,7 @@ struct SupacodeApp: App {
         ContentView(store: store, terminalManager: terminalManager)
           .environment(ghosttyShortcuts)
           .environment(commandKeyObserver)
+          .environment(openActionIcons)
       }
       .openSettingsOnSelection(store: store)
       .openDeeplinkReferenceOnRequest(store: store)
@@ -447,6 +518,7 @@ struct SupacodeApp: App {
     .handlesExternalEvents(matching: [])
     .environment(ghosttyShortcuts)
     .environment(commandKeyObserver)
+    .environment(openActionIcons)
     .commands {
       WorktreeCommands(store: store)
       SidebarCommands()
@@ -457,8 +529,15 @@ struct SupacodeApp: App {
       }
       WindowCommands(ghosttyShortcuts: ghosttyShortcuts)
       CommandGroup(after: .textEditing) {
+        Button("Go to Worktree") {
+          guard NSApp.currentEvent?.isAutoRepeatKeyDown != true else { return }
+          store.send(.commandPalette(.togglePresentInMode(.worktreeSwitcher)))
+        }
+        .appKeyboardShortcut(AppShortcuts.worktreeSwitcher.effective(from: store.settings.shortcutOverrides))
+        .help("Switch between worktrees, sorted by most recently used")
         Button("Command Palette") {
-          store.send(.commandPalette(.togglePresented))
+          guard NSApp.currentEvent?.isAutoRepeatKeyDown != true else { return }
+          store.send(.commandPalette(.togglePresentInMode(.commands)))
         }
         .appKeyboardShortcut(AppShortcuts.commandPalette.effective(from: store.settings.shortcutOverrides))
         .help("Command Palette")
@@ -517,5 +596,26 @@ struct SupacodeApp: App {
     .windowToolbarStyle(.unified)
     .defaultSize(width: 720, height: 640)
     .restorationBehavior(.disabled)
+    MenuBarExtra(isInserted: menuBarInserted) {
+      MenuBarNotificationsMenu(store: store)
+    } label: {
+      MenuBarNotificationsLabel(unreadCount: store.notificationIndicatorCount)
+    }
+    // `.window`, not `.menu`: a native menu item can't host the sidebar row's
+    // dots, agent badges, and diff stats. The panel is styled to read like a menu.
+    .menuBarExtraStyle(.window)
+  }
+
+  /// Dragging the status item out of the menu bar falls back to `.dock`, so at
+  /// least one surface stays enabled.
+  private var menuBarInserted: Binding<Bool> {
+    Binding(
+      get: { store.settings.appVisibility.showsMenuBarIcon },
+      set: { newValue in
+        // Ignore MenuBarExtra's scene-evaluation echo; only a real flip should persist.
+        guard newValue != store.settings.appVisibility.showsMenuBarIcon else { return }
+        store.send(.settings(.setAppVisibility(newValue ? .dockAndMenuBar : .dock)))
+      }
+    )
   }
 }
