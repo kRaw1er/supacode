@@ -350,6 +350,33 @@ struct DiffViewportControllerTests {
     }
   }
 
+  /// The live composer inserted on a line INSIDE a change block sits directly under
+  /// that line, not after the whole block (which for an all-change hunk reads as "the
+  /// editor appeared at the bottom of the hunk").
+  @Test func commentWidgetInsideChangeBlockAnchorsUnderItsOwnLine() {
+    for mode in [DiffViewMode.unified, .split] {
+      let hunk = DiffFixture.hunk([
+        DiffFixture.line(.deletion, old: 1, "d1"), DiffFixture.line(.deletion, old: 2, "d2"),
+        DiffFixture.line(.deletion, old: 3, "d3"), DiffFixture.line(.addition, new: 1, "a1"),
+        DiffFixture.line(.addition, new: 2, "a2"), DiffFixture.line(.addition, new: 3, "a3"),
+      ])
+      let controller = ViewportTestSupport.controller()
+      let tree = ChunkTreeFixture.files(
+        [.init(file: DiffFixture.file(), hunks: [hunk])],
+        options: ChunkTreeBuilder.Options(disableFileHeader: true))
+      controller.apply(tree: tree, mode: mode, scrollPreserving: false)
+
+      let ownerBottom = controller.lineRect(line: 2, side: .new)?.maxY
+      let widgetID = controller.insertCommentWidget(
+        side: .new, startLine: 2, endLine: 2, anchorID: UUID(), estimatedHeight: 60)
+      #expect(widgetID != nil)
+      // Directly below the commented line — NOT below the last row of the block.
+      #expect(controller.frame(forChunk: widgetID!)?.minY == ownerBottom)
+      // The line below the thread is still line 3: the block kept its order.
+      #expect(controller.lineRect(line: 3, side: .new)?.minY == (ownerBottom ?? 0) + 60)
+    }
+  }
+
   // MARK: - B §15 — both-sides-same-line: 1 element / 2 slots unified vs separate
   //          cells in split
 

@@ -264,6 +264,40 @@ extension ChunkTree {
     return rightNode
   }
 
+  /// Shrink the existing node to `left` and produce the right node, each over its OWN
+  /// line array. Used for a split-mode pair cut of a `.change` leaf, where the canonical
+  /// deletions-then-additions backing makes the boundary non-contiguous, so the windows
+  /// cannot share it. `rowCount` is the left half's rendered-row count — the boundary
+  /// the sparse per-row deltas / checkpoints are partitioned at.
+  func performRebuildingSplit(
+    node: ChunkNode,
+    segment: LineSegment,
+    left: [DiffLine],
+    right: [DiffLine],
+    at rowCount: Int
+  ) -> ChunkNode {
+    let leftSegment = LineSegment(
+      hunkID: segment.hunkID, lines: left, window: 0..<left.count, classification: segment.classification)
+    let rightSegment = LineSegment(
+      hunkID: segment.hunkID, lines: right, window: 0..<right.count, classification: segment.classification)
+    let (leftDeltas, rightDeltas) = partitionDeltas(node.heightDeltas, at: rowCount)
+    let (leftCheckpoints, rightCheckpoints) = partitionCheckpoints(node.checkpoints, at: rowCount)
+
+    node.chunk = .lineSegment(leftSegment)
+    node.heightDeltas = leftDeltas
+    node.checkpoints = leftCheckpoints
+    node.summary = leafSummary(for: node.chunk, heightDeltas: leftDeltas)
+
+    return ChunkNode(
+      id: allocID(),
+      chunk: .lineSegment(rightSegment),
+      summary: leafSummary(for: .lineSegment(rightSegment), heightDeltas: rightDeltas),
+      heightDeltas: rightDeltas,
+      checkpoints: rightCheckpoints,
+      color: .red
+    )
+  }
+
   /// Partition sparse deltas at `offset`: `< offset` stay left, `>= offset` move
   /// right re-based by `−offset`.
   func partitionDeltas(

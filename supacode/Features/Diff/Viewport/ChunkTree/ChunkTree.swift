@@ -209,6 +209,32 @@ final class ChunkTree {
     return (id, rightNode.id)
   }
 
+  /// Cut the leaf so a chunk inserted **after the returned id** renders directly under
+  /// rendered row `localRow` in `mode`, and return that id. No cut (and the leaf's own
+  /// id) when the row is already the leaf's last rendered row. This is the anchoring
+  /// primitive every comment thread is placed with — both the builder's post-pass and
+  /// the live composer insert — so a comment never drifts to the end of its block.
+  /// O(log n) plus, for a split-mode pair cut, one ≤maxLeafSpan line-array rebuild.
+  @discardableResult
+  func splitAnchor(_ id: ChunkID, afterRenderedRow localRow: Int, mode: DiffViewMode) -> ChunkID {
+    guard let node = nodesByID[id], let segment = node.chunk.lineSegment else { return id }
+    switch segment.splitPlan(afterRenderedRow: localRow, mode: mode) {
+    case .none:
+      return id
+    case .window(let offset):
+      return split(id, atLocalRow: offset).left
+    case .rebuild(let left, let right, let leftRowCount):
+      let rightNode = performRebuildingSplit(node: node, segment: segment, left: left, right: right, at: leftRowCount)
+      register(rightNode)
+      bstInsertAsSuccessor(rightNode, after: id)
+      rightNode.subtreeSummary = rightNode.summary
+      reaggregatePath(from: rightNode)
+      insertFixup(rightNode)
+      root?.color = .black
+      return id
+    }
+  }
+
   // MARK: - Measured-height write-back
 
   /// Record a row's measured height, updating the leaf's sparse delta + summary,

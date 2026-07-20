@@ -54,9 +54,10 @@ enum ChunkTreeBuilder {
 
   // MARK: - Build
 
-  /// Build a single-file tree, then run the comment post-pass. `mode` is accepted
-  /// for API fidelity but does NOT change the structure — the tree is dual-mode
-  /// and answers seeks in either mode without a rebuild.
+  /// Build a single-file tree, then run the comment post-pass. `mode` does not change
+  /// the LINE structure — the tree is dual-mode and answers seeks in either mode
+  /// without a rebuild — but it does steer where each comment thread is cut in
+  /// (`insertComments`), because a change block's rendered rows are mode-specific.
   static func build(
     file: FileChange,
     hunks: [DiffHunk],
@@ -68,7 +69,7 @@ enum ChunkTreeBuilder {
     let tree = ChunkTree(metrics: options.metrics)
     tree.diagnostics.buildRowsCallCount += 1
     appendFile(into: tree, file: file, hunks: hunks, expanded: expanded, options: options, comments: comments)
-    insertComments(into: tree, comments: comments, options: options)
+    insertComments(into: tree, comments: comments, mode: mode, options: options)
     return tree
   }
 

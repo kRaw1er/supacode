@@ -1089,7 +1089,7 @@ final class DiffViewportController: NSObject {
       estimatedHeight: estimatedHeight,
       payload: .commentThread(anchorID: anchorID)
     )
-    let anchorChunk = splitAnchor(for: node, localRow: location.localRow)
+    let anchorChunk = tree.splitAnchor(node.id, afterRenderedRow: location.localRow, mode: mode)
     let inserted = tree.insert(.widget(widget), after: anchorChunk)
     let scrollAnchor = captureAnchor()
     restoreScrollAnchor(scrollAnchor)
@@ -1109,26 +1109,6 @@ final class DiffViewportController: NSObject {
     return removed
   }
 
-  /// The chunk id to insert the widget after: the commented row's own leaf when it
-  /// is that leaf's last rendered row (or a single-row leaf), otherwise the LEFT
-  /// half of a split so the widget lands directly under the commented line rather
-  /// than after the rest of the leaf. Splitting is defined for the 1:1 context
-  /// projection; a mid-change-leaf comment inserts after the whole leaf.
-  private func splitAnchor(for node: ChunkNode, localRow: Int) -> ChunkID {
-    guard let segment = node.chunk.lineSegment else { return node.id }
-    let renderedCount = segment.renderedRows(mode).count
-    guard localRow + 1 < renderedCount else { return node.id }  // last row → no split
-    switch segment.classification {
-    case .context, .contextExpanded:
-      // 1:1 projection (barring markers): rendered row r ↔ window offset r.
-      let offset = localRow + 1
-      guard offset > 0, offset < segment.window.count else { return node.id }
-      let (left, _) = tree.split(node.id, atLocalRow: offset)
-      return left
-    case .change:
-      return node.id  // coarser placement (after the change block) — never mis-orders
-    }
-  }
 }
 
 // MARK: - WidgetLayoutHost

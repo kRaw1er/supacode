@@ -303,6 +303,49 @@ struct ChunkTreeBuilderTests {
     #expect(after?.windowedLines.first?.newLineNumber == 3)
   }
 
+  /// A comment anchored INSIDE a change block lands directly under its own line in
+  /// either mode — the regression this pins is the thread (and with it the live
+  /// composer) drifting to the bottom of the block, i.e. the end of the hunk.
+  @Test(arguments: [DiffViewMode.unified, DiffViewMode.split])
+  func commentInsideChangeBlockAnchorsUnderItsOwnLine(mode: DiffViewMode) {
+    let hunk = DiffFixture.hunk([
+      DiffFixture.line(.deletion, old: 1, "d1"), DiffFixture.line(.deletion, old: 2, "d2"),
+      DiffFixture.line(.deletion, old: 3, "d3"), DiffFixture.line(.addition, new: 1, "a1"),
+      DiffFixture.line(.addition, new: 2, "a2"), DiffFixture.line(.addition, new: 3, "a3"),
+    ])
+    let comment = ReviewComment(
+      filePath: "a.swift", side: .new, startLine: 2, endLine: 2,
+      anchorSnippet: "a2", contextBefore: "", body: "note"
+    )
+    let bare = ChunkTreeBuilder.build(
+      file: DiffFixture.file(), hunks: [hunk], mode: mode, expanded: [], options: headerless)
+    let tree = ChunkTreeBuilder.build(
+      file: DiffFixture.file(), hunks: [hunk], mode: mode, expanded: [], options: headerless, comments: [comment])
+
+    // The thread costs exactly one extra rendered row — no line is dropped or duplicated.
+    #expect(tree.rowCount(mode) == bare.rowCount(mode) + 1)
+
+    let widgetRow = Self.rowIndex(ofWidget: .commentThread(anchorID: comment.id), in: tree, mode: mode)
+    #expect(widgetRow != nil)
+    // The row directly ABOVE the thread is the commented line itself (new-side 2).
+    #expect(Self.newNumber(atRow: widgetRow! - 1, in: tree, mode: mode) == 2)
+    // ...and the block resumes below it rather than having been emptied out.
+    #expect(Self.newNumber(atRow: widgetRow! + 1, in: tree, mode: mode) == 3)
+  }
+
+  /// The global rendered-row index of a widget in `mode`, or `nil` when absent.
+  private static func rowIndex(ofWidget key: WidgetKey, in tree: ChunkTree, mode: DiffViewMode) -> Int? {
+    (0..<tree.rowCount(mode)).first { tree.seek(index: $0, mode: mode)?.chunk.widget?.key == key }
+  }
+
+  /// The new-side source number the rendered row at `index` displays.
+  private static func newNumber(atRow index: Int, in tree: ChunkTree, mode: DiffViewMode) -> Int? {
+    guard let hit = tree.seek(index: index, mode: mode), let segment = hit.chunk.lineSegment else { return nil }
+    return segment.lineNumbers(
+      atRenderedRow: hit.localRow, mode: mode, deletionCount: segment.windowDeletionCount
+    ).new
+  }
+
   // MARK: - Count oracle & deep fixture
 
   @Test func verifyHunkLineValuesOracle() {

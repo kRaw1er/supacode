@@ -109,46 +109,48 @@ extension ChunkTreeBuilder {
 
 extension ChunkTreeBuilder {
   /// Insert each comment as a `.widget(commentThread)` immediately after its
-  /// anchor row: split the anchor's segment after the anchored line and slot the
-  /// widget between. A comment whose anchor isn't present appends at the end
+  /// anchor ROW: cut the anchor's segment under the anchored rendered row and slot
+  /// the widget between. A comment whose anchor isn't present appends at the end
   /// (never silently dropped). Older comments insert first (createdAt order).
-  static func insertComments(into tree: ChunkTree, comments: [ReviewComment], options: Options) {
+  ///
+  /// `mode` matters here even though the tree itself is dual-mode: a change block's
+  /// rendered rows differ per mode (unified renders del-then-add; split pairs them),
+  /// so the cut that puts the thread under the commented line is mode-specific.
+  static func insertComments(
+    into tree: ChunkTree, comments: [ReviewComment], mode: DiffViewMode, options: Options
+  ) {
     guard !comments.isEmpty else { return }
     for comment in comments.sorted(by: { $0.createdAt < $1.createdAt }) {
-      insertComment(into: tree, comment: comment, options: options)
+      insertComment(into: tree, comment: comment, mode: mode, options: options)
     }
   }
 
-  private static func insertComment(into tree: ChunkTree, comment: ReviewComment, options: Options) {
+  private static func insertComment(
+    into tree: ChunkTree, comment: ReviewComment, mode: DiffViewMode, options: Options
+  ) {
     let widget = commentWidget(comment, options)
-    guard let anchor = findAnchor(in: tree, comment: comment) else {
+    guard let anchor = findAnchor(in: tree, comment: comment, mode: mode) else {
       tree.insert(widget, after: tree.inorderNodes().last?.id)
       return
     }
-    if anchor.isLastLine {
-      tree.insert(widget, after: anchor.nodeID)
-    } else {
-      let (left, _) = tree.split(anchor.nodeID, atLocalRow: anchor.windowOffset)
-      tree.insert(widget, after: left)
-    }
+    let after = tree.splitAnchor(anchor.nodeID, afterRenderedRow: anchor.localRow, mode: mode)
+    tree.insert(widget, after: after)
   }
 
   private struct AnchorMatch {
     var nodeID: ChunkID
-    var windowOffset: Int  // split at this window offset (line index + 1)
-    var isLastLine: Bool  // anchor is the last line of its segment → insert-after, no split
+    var localRow: Int  // the anchored RENDERED row within that leaf, in `mode`
   }
 
-  /// The LAST segment line matching `(side, endLine)` in document order (mirrors
+  /// The LAST rendered row matching `(side, endLine)` in document order (mirrors
   /// `DiffRowBuilder.lastRowIndex`).
-  private static func findAnchor(in tree: ChunkTree, comment: ReviewComment) -> AnchorMatch? {
+  private static func findAnchor(in tree: ChunkTree, comment: ReviewComment, mode: DiffViewMode) -> AnchorMatch? {
     var match: AnchorMatch?
     for node in tree.inorderNodes() {
       guard let segment = node.chunk.lineSegment else { continue }
-      let lines = Array(segment.windowedLines)
-      for (offset, line) in lines.enumerated() where line.origin != .noNewlineMarker {
-        if line.lineNumber(on: comment.side) == comment.endLine {
-          match = AnchorMatch(nodeID: node.id, windowOffset: offset + 1, isLastLine: offset == lines.count - 1)
+      for (localRow, row) in segment.renderedRows(mode).enumerated() where !row.isMarker {
+        if row.number(on: comment.side) == comment.endLine {
+          match = AnchorMatch(nodeID: node.id, localRow: localRow)
         }
       }
     }

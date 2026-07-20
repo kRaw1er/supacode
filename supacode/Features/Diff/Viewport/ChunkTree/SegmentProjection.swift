@@ -8,6 +8,15 @@ nonisolated struct RenderedRow: Equatable, Sendable {
   var newNumber: Int?
   var origin: DiffLineOrigin
   var isMarker: Bool
+
+  /// The 1-based source number this row displays on `side` (`nil` when the row has
+  /// no line on that side — an unpaired split-mode buffer slot).
+  func number(on side: DiffSide) -> Int? {
+    switch side {
+    case .old: oldNumber
+    case .new: newNumber
+    }
+  }
 }
 
 extension LineSegment {
@@ -151,6 +160,57 @@ extension LineSegment {
       let addOffset = deletionCount + localRow
       let new = addOffset < window.count ? windowLine(at: addOffset).newLineNumber : nil
       return (old, new)
+    }
+  }
+
+  /// How a leaf must be cut so a widget inserted after the left half lands directly
+  /// UNDER a rendered row — the shape a comment thread anchors with.
+  nonisolated enum SplitPlan: Equatable, Sendable {
+    /// The row is the leaf's last rendered row: insert after the whole leaf, no cut.
+    case none
+    /// A contiguous window cut at this offset (the cheap COW-sharing split).
+    case window(offset: Int)
+    /// A split-mode PAIR cut. The leaf's canonical deletions-then-additions backing
+    /// makes a pair boundary non-contiguous, so each half gets its own line array.
+    case rebuild(left: [DiffLine], right: [DiffLine], leftRowCount: Int)
+  }
+
+  /// Where to cut so a widget lands directly below rendered row `localRow` in `mode`.
+  ///
+  /// The plan is MODE-AWARE because a change block renders differently per mode: in
+  /// unified the rendered row IS the window offset (del-then-add order), while in
+  /// split rendered row `r` pairs `deletions[r]` with `additions[r]`, so cutting at a
+  /// window offset there would tear the columns apart. Off the hot path — this runs on
+  /// a comment insert / re-projection, never per frame.
+  func splitPlan(afterRenderedRow localRow: Int, mode: DiffViewMode) -> SplitPlan {
+    let rows = renderedRows(mode)
+    guard localRow >= 0, localRow < rows.count else { return .none }
+    // A no-newline marker duplicates its parent row's numbers, so keep it glued to the
+    // line it belongs to: the widget goes after the marker, never between the two.
+    var boundary = localRow
+    while boundary + 1 < rows.count, rows[boundary + 1].isMarker { boundary += 1 }
+    guard boundary + 1 < rows.count else { return .none }
+    // Marker rows have no backing line, so the line count is the non-marker prefix.
+    let lineCount = rows[0...boundary].count(where: { !$0.isMarker })
+    guard lineCount > 0 else { return .none }
+
+    switch classification {
+    case .context, .contextExpanded:
+      return .window(offset: lineCount)
+    case .change:
+      // Unified renders the window in order, so the prefix line count IS the offset.
+      if mode == .unified { return .window(offset: lineCount) }
+      let deletions = windowDeletions
+      let additions = windowAdditions
+      // Every deletion already sits left of the cut ⇒ the pair boundary happens to be
+      // contiguous in the backing, so the cheap window split is exact.
+      if lineCount >= deletions.count {
+        return .window(offset: deletions.count + lineCount)
+      }
+      let left = Array(deletions.prefix(lineCount)) + Array(additions.prefix(lineCount))
+      let right = Array(deletions.dropFirst(lineCount)) + Array(additions.dropFirst(lineCount))
+      guard !left.isEmpty, !right.isEmpty else { return .none }
+      return .rebuild(left: left, right: right, leftRowCount: boundary + 1)
     }
   }
 

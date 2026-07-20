@@ -128,7 +128,13 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     let expansionChanged = coordinator.lastExpansion != expansion
     let revealedCounts = revealed.mapValues(\.count)
     let revealedChanged = coordinator.lastRevealedCounts != revealedCounts
-    let contentChanged = sigChanged || (generationChanged && !expansionChanged)
+    // A mode flip is normally a no-rebuild re-seek, but a comment thread's insertion
+    // point is mode-specific (a change block renders del-then-add in unified and
+    // paired in split), so a file that carries comments re-projects instead — else the
+    // threads stay cut at the previous mode's row and drift off their line.
+    let modeChanged = coordinator.lastMode != mode
+    let contentChanged =
+      sigChanged || (generationChanged && !expansionChanged) || (modeChanged && !comments.isEmpty)
 
     if contentChanged {
       // Content changed (re-diff / comment insert-remove / composer open-close):
@@ -143,7 +149,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
       coordinator.rebuildKeyboardNav()
       coordinator.syncExpansion(expansion: expansion, revealed: revealed, hunks: hunks, file: file, rebuilt: true)
     } else {
-      if coordinator.lastMode != mode {
+      if modeChanged {
         // Only the unified↔split preference flipped: O(log #hunks) re-seek, no rebuild.
         controller.toggleMode(to: mode)
         coordinator.rebuildKeyboardNav()
