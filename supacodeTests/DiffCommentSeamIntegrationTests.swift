@@ -286,10 +286,14 @@ struct DiffCommentSeamIntegrationTests {
     #expect(coord.composerAnchorID == nil)
     #expect(try #require(resolveThread(coord, anchor: anchor)).isEditing == false)
 
-    // The content Signature (BEFORE the edit) — captured so we can prove the edit
-    // changes it, which is what forces the re-project that flips the host to editing.
-    let signatureBefore = DiffViewerRepresentable.Coordinator.Signature(
-      comments: comments, wordDiffEnabled: true, composerAnchorID: nil)
+    // Opening the editor is a RENDER change, not a structural one: the document keeps
+    // exactly the same shape, only that one widget draws differently. Captured before
+    // the edit so we can prove which of the two signatures moves.
+    let structureBefore = DiffViewerRepresentable.Coordinator.Signature(
+      commentAnchorRevision: store.state.anchorRevision)
+    let renderBefore = DiffViewerRepresentable.Coordinator.RenderSignature(
+      commentContentRevision: store.state.contentRevision, wordDiffEnabled: true, composerAnchorID: nil,
+      collapsedThreads: [])
 
     // A comment-row "edit" tap → `.editComment` opens the composer over the existing anchor.
     await store.send(.editComment(id: anchor))
@@ -297,18 +301,18 @@ struct DiffCommentSeamIntegrationTests {
     #expect(composerState.isEditing == true)
     #expect(composerState.draft.id == anchor)
 
-    // The composer anchor now enters the content Signature (≠ the pre-edit one), so
-    // `updateNSView` re-projects and the widget host re-mounts editing.
-    let signatureAfter = DiffViewerRepresentable.Coordinator.Signature(
-      comments: Array(store.state.comments), wordDiffEnabled: true, composerAnchorID: anchor)
-    #expect(signatureBefore != signatureAfter)
+    let structureAfter = DiffViewerRepresentable.Coordinator.Signature(
+      commentAnchorRevision: store.state.anchorRevision)
+    let renderAfter = DiffViewerRepresentable.Coordinator.RenderSignature(
+      commentContentRevision: store.state.contentRevision, wordDiffEnabled: true, composerAnchorID: anchor,
+      collapsedThreads: [])
+    #expect(structureBefore == structureAfter)  // the document did NOT change shape
+    #expect(renderBefore != renderAfter)  // only what that widget renders did
 
-    // Round-trip the open composer + re-project → the SAME anchor's widget flips editing.
+    // So a plain layout pass — no re-projection — flips the SAME anchor's widget to
+    // editing, off the resolver's fresh model.
     syncComposer(coord, state: store.state)
-    coord.controller.apply(
-      tree: ChunkTreeBuilder.build(
-        file: file, hunks: hunks, mode: .unified, comments: Array(store.state.comments)), mode: .unified,
-      scrollPreserving: true)
+    coord.controller.layoutVisibleChunks()
     #expect(coord.composerAnchorID == anchor)
     let thread = try #require(resolveThread(coord, anchor: anchor))
     #expect(thread.isEditing == true)

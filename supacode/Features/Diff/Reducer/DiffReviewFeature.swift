@@ -313,7 +313,30 @@ struct DiffReviewFeature {
     /// Review comments for the selected worktree, spanning every open diff tab
     /// (5.4/5.9). Session-only — not persisted (no `Codable` on `State`). Kept
     /// across a diff-tab close/reopen; cleared only on send or explicit discard.
-    var comments: IdentifiedArrayOf<ReviewComment> = []
+    var comments: IdentifiedArrayOf<ReviewComment> = [] {
+      didSet {
+        guard comments != oldValue else { return }
+        contentRevision &+= 1
+        if Self.anchors(of: comments) != Self.anchors(of: oldValue) { anchorRevision &+= 1 }
+      }
+    }
+
+    /// Bumped on ANY comment change, and `anchorRevision` only when a comment's
+    /// identity or its anchored range changes — i.e. only when the DOCUMENT's shape
+    /// changes and the tree has to be re-projected. Editing a body bumps the first and
+    /// not the second, so typing no longer rebuilds the document.
+    ///
+    /// They are maintained here, in `didSet`, rather than by whoever mutates
+    /// `comments`, because a revision that someone has to remember to bump is a
+    /// revision that eventually doesn't get bumped. Readers compare an `Int` — the
+    /// viewport's per-update check is O(1) rather than a walk of every comment.
+    private(set) var contentRevision: Int = 0
+    private(set) var anchorRevision: Int = 0
+
+    /// The projection-relevant part of a comment: who it is and where it sits.
+    private static func anchors(of comments: IdentifiedArrayOf<ReviewComment>) -> [CommentAnchorKey] {
+      comments.map { CommentAnchorKey(id: $0.id, side: $0.side, startLine: $0.startLine, endLine: $0.endLine) }
+    }
     /// Comment threads the user has collapsed via the thread chevron, keyed by the
     /// thread's anchor (head comment id). Session-only, spans every open diff tab; a
     /// membership toggle flips the thread widget between its collapsed summary and the
@@ -1227,9 +1250,18 @@ struct DiffReviewFeature {
   }
 
   private static func relocateComments(_ state: inout State, key: DiffDocumentKey, lines: [DiffLine]) {
+    // Rebuilt and assigned ONCE: a per-comment write would re-derive the revisions on
+    // every element, turning a re-diff into quadratic work in the number of comments.
+    var relocated = state.comments
+    var changed = false
     for comment in state.comments where comment.filePath == key.path && comment.source == key.source {
-      state.comments[id: comment.id] = CommentAnchor.relocate(comment, in: lines, side: comment.side)
+      let next = CommentAnchor.relocate(comment, in: lines, side: comment.side)
+      guard next != comment else { continue }
+      relocated[id: comment.id] = next
+      changed = true
     }
+    guard changed else { return }
+    state.comments = relocated
   }
 
   /// Single dismiss-only alert for the missing-terminal case (5.7).

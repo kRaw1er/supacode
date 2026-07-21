@@ -7,6 +7,16 @@ nonisolated enum DiffSide: String, Codable, Sendable, Equatable {
   case new
 }
 
+/// What a PROJECTION of the document depends on in a comment: its identity and the
+/// range it anchors to. A body edit leaves this untouched, which is what lets the
+/// viewport tell "the document changed shape" from "a comment's text changed".
+nonisolated struct CommentAnchorKey: Hashable, Sendable {
+  var id: UUID
+  var side: DiffSide
+  var startLine: Int
+  var endLine: Int
+}
+
 /// A single user review note anchored to a line range on one side of a file's
 /// diff. Content-anchored (`anchorSnippet` + `contextBefore`) so it survives a
 /// live re-diff; on relocation failure it is marked `orphaned`, never deleted

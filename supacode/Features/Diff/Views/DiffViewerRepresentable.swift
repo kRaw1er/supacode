@@ -21,6 +21,13 @@ struct DiffViewerRepresentable: NSViewRepresentable {
   let file: FileChange
   let hunks: [DiffHunk]
   let comments: [ReviewComment]
+  /// Bumped by the reducer when a comment's anchored RANGE changes — the only comment
+  /// change that alters the document's structure. Compared instead of the comment array
+  /// so the per-update check is O(1).
+  var commentAnchorRevision: Int = 0
+  /// Bumped on any comment change at all (a body edit included) — drives a re-render,
+  /// never a re-projection.
+  var commentContentRevision: Int = 0
   let mode: DiffViewMode
   /// Monotonic load/expand token — a change re-projects the tree scroll-preserving.
   let generation: Int
@@ -102,6 +109,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     coordinator.rebuildKeyboardNav()
     coordinator.keyboardNav?.revealFirstChange()
     coordinator.lastSignature = signature
+    coordinator.lastRenderSignature = renderSignature
     coordinator.lastMode = mode
     coordinator.lastGeneration = generation
     coordinator.lastExpansion = expansion
@@ -123,6 +131,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     // an expansion change is a real re-diff (rebuild); a bump WITH one is an expand
     // (incremental splice, no rebuild — F7).
     let sigChanged = coordinator.lastSignature != signature
+    let renderChanged = coordinator.lastRenderSignature != renderSignature
     let generationChanged = coordinator.lastGeneration != generation
     let expansionChanged = coordinator.lastExpansion != expansion
     let revealedCounts = revealed.mapValues(\.count)
@@ -160,6 +169,12 @@ struct DiffViewerRepresentable: NSViewRepresentable {
         // An expand / collapse without a re-diff: splice ONLY the changed gaps.
         coordinator.syncExpansion(expansion: expansion, revealed: revealed, hunks: hunks, file: file)
       }
+      // A render-only change (a comment's body, a collapsed thread, the composer
+      // opening or closing, the word-diff gate) — one layout pass re-resolves the
+      // widget models and re-projects the visible rows. This used to go through a full
+      // re-projection, which threw away the expansions, the measured heights and the
+      // scroll position to change what one widget draws.
+      if renderChanged { controller.layoutVisibleChunks() }
       // Pull-model: re-warm the span cache when the blobs / size gate change without a
       // full re-project (e.g. the size gate resolving after the first batch).
       if coordinator.lastHighlightBlobKey != highlightBlobKey {
@@ -181,6 +196,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     coordinator.focusViewportIfNeeded(editing: composerDraft != nil)
 
     coordinator.lastSignature = signature
+    coordinator.lastRenderSignature = renderSignature
     coordinator.lastMode = mode
     coordinator.lastGeneration = generation
     coordinator.lastExpansion = expansion
@@ -243,9 +259,13 @@ struct DiffViewerRepresentable: NSViewRepresentable {
   /// recycle, so the re-project mounts a fresh editing host). `generation` (a re-diff
   /// vs expand token) and `expansion` are classified separately in `updateNSView`.
   private var signature: Coordinator.Signature {
-    Coordinator.Signature(
-      comments: comments, wordDiffEnabled: wordDiffEnabled, composerAnchorID: composerDraft?.id,
-      collapsedThreads: collapsedThreads)
+    Coordinator.Signature(commentAnchorRevision: commentAnchorRevision)
+  }
+
+  private var renderSignature: Coordinator.RenderSignature {
+    Coordinator.RenderSignature(
+      commentContentRevision: commentContentRevision, wordDiffEnabled: wordDiffEnabled,
+      composerAnchorID: composerDraft?.id, collapsedThreads: collapsedThreads)
   }
 
   /// Identity of the warm inputs (per-side blob OID + the size gate) — the controller
@@ -279,6 +299,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
 
     // Change-detection baselines.
     var lastSignature: Signature?
+    var lastRenderSignature: RenderSignature?
     var lastMode: DiffViewMode = .unified
     var lastHighlightBlobKey: String = ""
     var lastGeneration: Int = .min
@@ -292,11 +313,25 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     private var installed = false
     private var didFocusViewport = false
 
+    /// What the tree's STRUCTURE depends on — the only thing that may force a
+    /// re-projection. Everything else about a comment (its body, whether its thread is
+    /// collapsed, whether it is being edited) changes what a widget RENDERS, which the
+    /// widget's own `modelToken` already picks up on the next layout pass.
+    ///
+    /// Scalars only, so the per-update comparison is O(1). Comparing the comment array
+    /// meant every SwiftUI pass walked every comment — and re-projected the whole
+    /// document when a body changed by one character.
     struct Signature: Equatable {
-      var comments: [ReviewComment]
+      var commentAnchorRevision: Int
+    }
+
+    /// What the visible widgets / rows RENDER from. A change here needs one layout
+    /// pass, not a rebuild.
+    struct RenderSignature: Equatable {
+      var commentContentRevision: Int
       var wordDiffEnabled: Bool
       var composerAnchorID: UUID?
-      var collapsedThreads: Set<UUID> = []
+      var collapsedThreads: Set<UUID>
     }
 
     // MARK: - Install (once)

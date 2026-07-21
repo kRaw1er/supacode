@@ -269,6 +269,8 @@ struct DiffTabContentView: View {
           file: document.file,
           hunks: document.hunks,
           comments: tabComments,
+          commentAnchorRevision: store.anchorRevision,
+          commentContentRevision: store.contentRevision,
           // View-only ~900pt breakpoint: a stored `.split` renders inline below it
           // (`SplitColumnLayout.effectiveMode`); the stored flag stays put so widening
           // restores split. Unified is never coerced.

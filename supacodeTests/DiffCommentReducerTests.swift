@@ -280,4 +280,48 @@ struct DiffCommentReducerTests {
     }
     #expect(store.state.comments.isEmpty)
   }
+
+  // MARK: - Editing a body is not a structural change
+
+  /// The revisions are what the viewport compares, so they have to separate "the
+  /// document changed shape" from "a comment's text changed". A body edit must move
+  /// only the content revision: bumping the anchor one would re-project the whole
+  /// document — throwing away the expansions, the measured heights and the scroll
+  /// position — because a character was typed.
+  @Test(.dependencies) func bodyEditBumpsContentRevisionButNotTheAnchorOne() async {
+    let store = TestStore(initialState: DiffReviewFeature.State()) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 1000))
+      $0[CommentPersistenceStoreClient.self] = CommentPersistenceStoreClient(load: { _ in [] }, save: { _, _ in })
+    }
+    store.exhaustivity = .off
+    let comment = ReviewComment(
+      filePath: "a.swift", side: .new, startLine: 3, endLine: 3,
+      anchorSnippet: "x", contextBefore: "", body: "first")
+
+    await store.send(.commitComment(comment))
+    let anchorAfterInsert = store.state.anchorRevision
+    let contentAfterInsert = store.state.contentRevision
+
+    // Same anchor, new body.
+    var edited = comment
+    edited.body = "second"
+    await store.send(.commitComment(edited))
+    #expect(store.state.anchorRevision == anchorAfterInsert)  // same shape
+    #expect(store.state.contentRevision > contentAfterInsert)  // different content
+
+    // Moving the anchored range IS structural.
+    var moved = edited
+    moved.startLine = 9
+    moved.endLine = 9
+    await store.send(.commitComment(moved))
+    #expect(store.state.anchorRevision > anchorAfterInsert)
+
+    // ...and so is removing it.
+    let anchorAfterMove = store.state.anchorRevision
+    await store.send(.deleteComment(id: comment.id))
+    #expect(store.state.anchorRevision > anchorAfterMove)
+  }
 }
