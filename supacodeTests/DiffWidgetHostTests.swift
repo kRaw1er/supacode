@@ -146,6 +146,46 @@ struct DiffWidgetHostTests {
     #expect(controller.visibleRect.minY == 1000)  // same line, same pixel
   }
 
+  /// A wrapped code row's measured height survives a re-projection too. It lives on
+  /// the node as a sparse delta, so a rebuild dropped every one of them and the
+  /// document went back to assuming uniform rows — shorter than it really is, with the
+  /// scrollbar growing again as you scroll back over lines that were already measured.
+  @Test func measuredRowHeightsSurviveReprojection() {
+    /// Leaves whose content really does wrap at the fixture's width, so the heights
+    /// come from the actual measure pass rather than being poked into the tree.
+    func wrappedLeaves() -> ChunkTree {
+      let tree = ChunkTree(metrics: .production)
+      let hunkID = HunkID(fileID: "wrap", index: 0)
+      let lines = (0..<60).map {
+        DiffLine(
+          origin: .context, oldLineNumber: $0 + 1, newLineNumber: $0 + 1,
+          content: "line\($0) " + String(repeating: "token\($0) ", count: 30), noNewlineAtEof: false)
+      }
+      var after: ChunkID?
+      for offset in lines.indices {
+        after = tree.insert(
+          .lineSegment(
+            LineSegment(hunkID: hunkID, lines: lines, window: offset..<(offset + 1), classification: .context)),
+          after: after)
+      }
+      return tree
+    }
+
+    let controller = ViewportTestSupport.controller()
+    controller.apply(tree: wrappedLeaves(), mode: .unified, scrollPreserving: false)
+    // Scroll through the document so every row gets measured at least once.
+    let estimated = CGFloat(60) * ChunkLayoutMetrics.production.lineHeight
+    for step in 0...10 { controller.scroll(toY: controller.documentView.bounds.height * CGFloat(step) / 10) }
+    controller.scroll(toY: 0)
+    let measured = controller.tree.totalHeight(.unified)
+    #expect(measured > estimated)  // the wraps are in the document height
+
+    // Re-project: the wraps come back with it, instead of being re-earned one scroll
+    // at a time from a document that is briefly far too short.
+    controller.apply(tree: wrappedLeaves(), mode: .unified, scrollPreserving: true)
+    #expect(controller.tree.totalHeight(.unified) == measured)
+  }
+
   // MARK: - C 6.5 — collapse toggles node height + reaggregate, anchored no-jump
   //                 (even for a widget ABOVE the fold)
 

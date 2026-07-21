@@ -273,6 +273,37 @@ final class DiffViewportController: NSObject {
   /// re-seeds the fresh nodes from here.
   private var widgetMeasured: [WidgetKey: (width: CGFloat, height: CGFloat)] = [:]
 
+  /// The same record for wrapped CODE rows, keyed by the line itself rather than by
+  /// its node. A row's measured height lives on the node as a sparse delta, so a
+  /// re-projection drops every one of them and the document goes back to assuming
+  /// uniform rows: shorter than it really is, with the scrollbar growing again as you
+  /// scroll back through what was already measured. Only rows that actually differ
+  /// from the estimate are here (a wrap, a marker), so it stays small.
+  private var rowMeasured: [MeasuredRowKey: MeasuredRowHeight] = [:]
+
+  /// A rendered code row's identity across re-projections: which region it belongs to
+  /// and the source numbers it displays. Deliberately not the `(ChunkID, localRow)`
+  /// the tree stores it under — both move on a rebuild.
+  nonisolated struct MeasuredRowKey: Hashable, Sendable {
+    var region: RegionKey
+    var old: Int?
+    var new: Int?
+  }
+
+  /// A measured row height, per mode, and the width it was measured at (a wrap is a
+  /// function of width, so a resize invalidates it).
+  nonisolated struct MeasuredRowHeight: Equatable, Sendable {
+    var width: CGFloat
+    var unified: CGFloat?
+    var split: CGFloat?
+
+    func height(_ mode: DiffViewMode) -> CGFloat? { mode == .unified ? unified : split }
+
+    mutating func set(_ height: CGFloat, mode: DiffViewMode) {
+      if mode == .unified { unified = height } else { split = height }
+    }
+  }
+
   // C7 measure↔layout guard (Phase 3 uses it; inert while heights are fixed).
   private(set) var measurePass = 0
   private let maxMeasurePasses = 5
@@ -860,11 +891,25 @@ final class DiffViewportController: NSObject {
     let node = tree.nodesByID[id]
     let base = tree.metrics.lineHeight
     var changed = false
+    let segment = node?.chunk.lineSegment
+    let deletionCount = segment?.windowDeletionCount ?? 0
     for (localRow, measured) in heights {
       let current = base + (node?.heightDeltas?[localRow]?.value(mode) ?? 0)
       if abs(measured - current) > heightEpsilon {
         tree.setMeasuredHeight(measured, chunk: id, localRow: localRow, mode: mode)
         changed = true
+      }
+      // Record it against the LINE as well, so the measurement survives the next
+      // re-projection instead of being re-earned one scroll at a time.
+      if let segment {
+        let numbers = segment.lineNumbers(atRenderedRow: localRow, mode: mode, deletionCount: deletionCount)
+        let key = MeasuredRowKey(region: segment.region, old: numbers.old, new: numbers.new)
+        let width = documentView.bounds.width
+        var entry =
+          rowMeasured[key].map { $0.width == width ? $0 : MeasuredRowHeight(width: width) }
+          ?? MeasuredRowHeight(width: width)
+        entry.set(measured, mode: mode)
+        rowMeasured[key] = entry
       }
     }
     return changed
@@ -1108,6 +1153,24 @@ final class DiffViewportController: NSObject {
       guard measured.width == width, let node = tree.widgetNode(for: key) else { continue }
       tree.setMeasuredHeight(measured.height, chunk: node.id, localRow: 0, mode: .unified)
       tree.setMeasuredHeight(measured.height, chunk: node.id, localRow: 0, mode: .split)
+    }
+    restoreMeasuredRowHeights(width: width)
+  }
+
+  /// Re-seed the wrapped code rows the same way. Each entry resolves its row by line
+  /// number — an O(log n) descent — so this is O(#wrapped rows · log n), not a walk of
+  /// the document, and only rows that ever differed from the estimate are in the set.
+  private func restoreMeasuredRowHeights(width: CGFloat) {
+    for (key, measured) in rowMeasured {
+      guard measured.width == width else { continue }
+      let side: DiffSide = key.new != nil ? .new : .old
+      guard let line = key.new ?? key.old else { continue }
+      for mode in [DiffViewMode.unified, DiffViewMode.split] {
+        guard let height = measured.height(mode), let hit = tree.locate(line: line, side: side, mode: mode),
+          hit.chunk.lineSegment?.region == key.region
+        else { continue }
+        tree.setMeasuredHeight(height, chunk: hit.id, localRow: hit.localRow, mode: mode)
+      }
     }
   }
 
