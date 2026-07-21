@@ -318,7 +318,24 @@ struct DiffReviewFeature {
         guard comments != oldValue else { return }
         contentRevision &+= 1
         if Self.anchors(of: comments) != Self.anchors(of: oldValue) { anchorRevision &+= 1 }
+        commentsByScope = Self.indexedByScope(comments)
       }
+    }
+
+    /// The comments of each diff tab, in document order. Derived here, on mutation,
+    /// because the readers are per-frame: a tab's view resolves its own comments on
+    /// every body pass, and scanning the whole set there is a walk of every comment in
+    /// the worktree to render one file.
+    private(set) var commentsByScope: [CommentScope: [ReviewComment]] = [:]
+
+    private static func indexedByScope(
+      _ comments: IdentifiedArrayOf<ReviewComment>
+    ) -> [CommentScope: [ReviewComment]] {
+      var index: [CommentScope: [ReviewComment]] = [:]
+      for comment in comments {
+        index[CommentScope(filePath: comment.filePath, source: comment.source), default: []].append(comment)
+      }
+      return index
     }
 
     /// Bumped on ANY comment change, and `anchorRevision` only when a comment's
@@ -362,9 +379,9 @@ struct DiffReviewFeature {
     }
 
     /// Comments scoped to one diff tab, keyed by `(filePath, source)` so a
-    /// working-tree thread and a base-branch thread on the same file stay apart.
+    /// working-tree thread and a base-branch thread on the same file stay apart. O(1).
     func comments(forPath path: String, source: DiffSource) -> [ReviewComment] {
-      comments.filter { $0.filePath == path && $0.source == source }
+      commentsByScope[CommentScope(filePath: path, source: source)] ?? []
     }
 
     enum LoadState: Equatable {
@@ -1046,9 +1063,8 @@ struct DiffReviewFeature {
         // Editing an existing identical-range comment instead of stacking a dup.
         // Scoped by `source` too, so the same range on the working-tree and the
         // base-branch diff are distinct threads.
-        if let existing = state.comments.first(where: {
-          $0.filePath == filePath && $0.source == source && $0.side == side && $0.startLine == startLine
-            && $0.endLine == endLine
+        if let existing = state.comments(forPath: filePath, source: source).first(where: {
+          $0.side == side && $0.startLine == startLine && $0.endLine == endLine
         }) {
           state.composer = CommentComposer.State(draft: existing, isEditing: true)
         } else {
@@ -1254,7 +1270,7 @@ struct DiffReviewFeature {
     // every element, turning a re-diff into quadratic work in the number of comments.
     var relocated = state.comments
     var changed = false
-    for comment in state.comments where comment.filePath == key.path && comment.source == key.source {
+    for comment in state.comments(forPath: key.path, source: key.source) {
       let next = CommentAnchor.relocate(comment, in: lines, side: comment.side)
       guard next != comment else { continue }
       relocated[id: comment.id] = next

@@ -324,4 +324,43 @@ struct DiffCommentReducerTests {
     await store.send(.deleteComment(id: comment.id))
     #expect(store.state.anchorRevision > anchorAfterMove)
   }
+
+  // MARK: - Per-tab comments are indexed, not scanned
+
+  /// A tab's view resolves its own comments on every body pass, so that lookup has to
+  /// be a keyed one — scanning the whole set there walks every comment in the worktree
+  /// to render a single file. The index is derived on mutation and has to stay exact:
+  /// same membership, same document order, and separate scopes for the working-tree
+  /// and base-branch diffs of one file.
+  @Test(.dependencies) func commentsAreIndexedPerTabInDocumentOrder() async {
+    let store = TestStore(initialState: DiffReviewFeature.State()) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 1000))
+      $0[CommentPersistenceStoreClient.self] = CommentPersistenceStoreClient(load: { _ in [] }, save: { _, _ in })
+    }
+    store.exhaustivity = .off
+
+    func comment(_ path: String, _ source: DiffSource, line: Int) -> ReviewComment {
+      ReviewComment(
+        filePath: path, source: source, side: .new, startLine: line, endLine: line,
+        anchorSnippet: "x", contextBefore: "", body: "b")
+    }
+    let first = comment("a.swift", .workingTree, line: 1)
+    let second = comment("a.swift", .workingTree, line: 2)
+    let base = comment("a.swift", .baseBranch(ref: "main"), line: 1)
+    let other = comment("b.swift", .workingTree, line: 1)
+    for entry in [first, second, base, other] { await store.send(.commitComment(entry)) }
+
+    let tab = store.state.comments(forPath: "a.swift", source: .workingTree)
+    #expect(tab.map(\.id) == [first.id, second.id])  // this tab only, in insertion order
+    #expect(store.state.comments(forPath: "a.swift", source: .baseBranch(ref: "main")).map(\.id) == [base.id])
+    #expect(store.state.comments(forPath: "b.swift", source: .workingTree).map(\.id) == [other.id])
+    #expect(store.state.comments(forPath: "missing.swift", source: .workingTree).isEmpty)
+
+    // The index tracks removals, not just inserts.
+    await store.send(.deleteComment(id: first.id))
+    #expect(store.state.comments(forPath: "a.swift", source: .workingTree).map(\.id) == [second.id])
+  }
 }

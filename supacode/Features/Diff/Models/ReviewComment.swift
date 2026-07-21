@@ -7,6 +7,13 @@ nonisolated enum DiffSide: String, Codable, Sendable, Equatable {
   case new
 }
 
+/// Which diff tab a comment belongs to. A working-tree thread and a base-branch
+/// thread on the same file are separate conversations, so the pair is the scope.
+nonisolated struct CommentScope: Hashable, Sendable {
+  var filePath: String
+  var source: DiffSource
+}
+
 /// What a PROJECTION of the document depends on in a comment: its identity and the
 /// range it anchors to. A body edit leaves this untouched, which is what lets the
 /// viewport tell "the document changed shape" from "a comment's text changed".

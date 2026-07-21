@@ -264,7 +264,7 @@ struct DiffTabContentView: View {
         // seed a transient editor in this tree.
         let composerBelongsHere =
           store.composer.map { $0.draft.filePath == filePath && $0.draft.source == source } ?? false
-        let tabComments: [ReviewComment] = store.comments.filter { $0.filePath == filePath && $0.source == source }
+        let tabComments = store.state.comments(forPath: filePath, source: source)
         DiffViewerRepresentable(
           file: document.file,
           hunks: document.hunks,
@@ -296,7 +296,7 @@ struct DiffTabContentView: View {
             store.send(.expandGap(key: key, gap: gap, step: step, direction: direction))
           },
           onEditComment: { id in store.send(.editComment(id: id)) },
-          collapsedThreads: store.collapsedCommentThreads.intersection(tabComments.map(\.id)),
+          collapsedThreads: store.collapsedCommentThreads,
           onToggleCommentThreadCollapsed: { id in store.send(.toggleCommentThreadCollapsed(anchorID: id)) }
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
