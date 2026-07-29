@@ -44,10 +44,22 @@ struct DeveloperSettingsView: View {
           Text(
             "Re-installs hooks for any agent reporting an outdated integration when Supacode comes to the foreground.")
         }
-        .help("Silently re-applies the canonical hook layout to outdated agent integrations when Supacode activates.")
+      }
+      Section("Advanced") {
+        Picker(selection: $store.automatedActionPolicy.sending(\.setAutomatedActionPolicy)) {
+          ForEach(AutomatedActionPolicy.allCases, id: \.self) { policy in
+            Text(policy.displayName).tag(policy)
+          }
+        } label: {
+          Text("Allow dangerous actions")
+          Text(
+            "Skips the confirmation dialog when running commands or scripts, closing tabs or splits, "
+              + "and archiving or deleting worktrees.")
+        }
       }
     }
     .formStyle(.grouped)
+    .contentMargins(.trailing, 6, for: .scrollIndicators)
     .padding(.top, -20)
     .padding(.leading, -8)
     .padding(.trailing, -6)

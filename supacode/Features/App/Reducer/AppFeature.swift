@@ -162,6 +162,7 @@ struct AppFeature {
     var lastKnownSystemNotificationsEnabled: Bool
     var lastKnownAgentPresenceBadgesEnabled: Bool
     var lastKnownAppVisibility: AppVisibility
+    var lastKnownTerminalHibernationEnabled: Bool
     var pendingDeeplinks: [Deeplink] = []
     var isDeeplinkReferenceRequested = false
     /// Cached projection of every primitive the menu-bar `WorktreeCommands`
@@ -201,6 +202,7 @@ struct AppFeature {
       lastKnownSystemNotificationsEnabled = settings.systemNotificationsEnabled
       lastKnownAgentPresenceBadgesEnabled = settings.agentPresenceBadgesEnabled
       lastKnownAppVisibility = settings.appVisibility
+      lastKnownTerminalHibernationEnabled = settings.terminalHibernationEnabled
       // Seed from settings so `state.allScripts` doesn't start empty before the
       // first `settingsChanged` delegate fires. Globals aren't worktree-scoped,
       // so deselection (line below in `selectedWorktreeChanged(nil)`)
@@ -646,6 +648,9 @@ struct AppFeature {
         let agentBadgesFlipped =
           settings.agentPresenceBadgesEnabled != state.lastKnownAgentPresenceBadgesEnabled
         state.lastKnownAgentPresenceBadgesEnabled = settings.agentPresenceBadgesEnabled
+        let hibernationFlipped =
+          settings.terminalHibernationEnabled != state.lastKnownTerminalHibernationEnabled
+        state.lastKnownTerminalHibernationEnabled = settings.terminalHibernationEnabled
         let visibilityChanged = settings.appVisibility != state.lastKnownAppVisibility
         let previousVisibility = state.lastKnownAppVisibility
         // Surface the main window when the Dock icon comes back, so leaving
@@ -680,9 +685,6 @@ struct AppFeature {
           },
           .run { _ in
             await terminalClient.send(.enforceNotificationRetentionLimit)
-          },
-          .run { _ in
-            await terminalClient.send(.refreshTabBarVisibility)
           },
         ]
         if let selectedWorktree = state.repositories.worktree(for: state.repositories.selectedWorktreeID) {
@@ -746,6 +748,12 @@ struct AppFeature {
               badgesEnabled: settings.agentPresenceBadgesEnabled,
               state: state
             )
+          )
+        }
+        if hibernationFlipped {
+          let enabled = settings.terminalHibernationEnabled
+          effects.append(
+            .run { _ in await terminalClient.send(.setTerminalHibernationEnabled(enabled)) }
           )
         }
         return .merge(effects)
@@ -1631,8 +1639,25 @@ struct AppFeature {
             return false
           }
         }
+        // Only a brand-new tab consumes this snapshot; existing tabs already
+        // track agent state, so skip the rollup on their projection churn.
+        let initialAgentSnapshot =
+          state.terminals.terminalTabs[id: projection.tabID] == nil
+          ? state.agentPresence.rowSnapshot(
+            across: projection.surfaceIDs,
+            badgesEnabled: state.lastKnownAgentPresenceBadgesEnabled
+          )
+          : AgentPresenceFeature.RowSnapshot()
         return .merge(
-          .send(.terminals(.tabProjectionChanged(worktreeID: worktreeID, projection: projection))),
+          .send(
+            .terminals(
+              .tabProjectionChanged(
+                worktreeID: worktreeID,
+                projection: projection,
+                initialAgentSnapshot: initialAgentSnapshot
+              )
+            )
+          ),
           ackEffect)
 
       case .terminalEvent(.tabCreated(let worktreeID)):
@@ -1776,7 +1801,12 @@ struct AppFeature {
       guard let rowID = surfaceToItemID[surfaceID] else { continue }
       affectedRowIDs.insert(rowID)
     }
-    return agentSnapshotEffects(for: affectedRowIDs, state: state, badgesEnabled: badgesEnabled)
+    return agentSnapshotEffects(
+      for: affectedRowIDs,
+      tabSurfaceIDs: surfaces,
+      state: state,
+      badgesEnabled: badgesEnabled
+    )
   }
 
   // Per-surface fan-out, deliberately separate from `agentPresenceFanOutEffect`:
@@ -1832,20 +1862,28 @@ struct AppFeature {
     badgesEnabled: Bool,
     state: State
   ) -> Effect<Action> {
-    let rowIDs = state.repositories.sidebarItems
-      .filter { !$0.surfaceIDs.isEmpty }
-      .map(\.id)
-    return agentSnapshotEffects(for: Set(rowIDs), state: state, badgesEnabled: badgesEnabled)
+    var rowIDs: Set<SidebarItemID> = []
+    var tabSurfaceIDs: Set<UUID> = []
+    for row in state.repositories.sidebarItems where !row.surfaceIDs.isEmpty {
+      rowIDs.insert(row.id)
+      tabSurfaceIDs.formUnion(row.surfaceIDs)
+    }
+    return agentSnapshotEffects(
+      for: rowIDs,
+      tabSurfaceIDs: tabSurfaceIDs,
+      state: state,
+      badgesEnabled: badgesEnabled
+    )
   }
 
   private func agentSnapshotEffects(
     for rowIDs: Set<SidebarItemID>,
+    tabSurfaceIDs: Set<UUID>,
     state: State,
     badgesEnabled: Bool
   ) -> Effect<Action> {
     let presence = state.agentPresence
     var effects: [Effect<Action>] = []
-    var affectedSurfaces: Set<UUID> = []
     for rowID in rowIDs {
       guard let row = state.repositories.sidebarItems[id: rowID] else { continue }
       let snapshot = presence.rowSnapshot(across: row.surfaceIDs, badgesEnabled: badgesEnabled)
@@ -1856,16 +1894,15 @@ struct AppFeature {
           )
         )
       )
-      affectedSurfaces.formUnion(row.surfaceIDs)
     }
     // Per-tab fanout: any tab containing an affected surface re-projects its
-    // agent snapshot. Tab leaves observe `state.agents` directly so per-tab
+    // agent snapshot. Each tab reads its own `agentSnapshot`, so per-tab
     // mutations don't invalidate sibling tab leaves.
     for tab in state.terminals.terminalTabs
-    where tab.surfaceIDs.contains(where: affectedSurfaces.contains) {
-      let agents = presence.agents(across: tab.surfaceIDs, badgesEnabled: badgesEnabled)
+    where tab.surfaceIDs.contains(where: tabSurfaceIDs.contains) {
+      let snapshot = presence.rowSnapshot(across: tab.surfaceIDs, badgesEnabled: badgesEnabled)
       effects.append(
-        .send(.terminals(.terminalTabs(.element(id: tab.id, action: .agentSnapshotChanged(agents)))))
+        .send(.terminals(.terminalTabs(.element(id: tab.id, action: .agentSnapshotChanged(snapshot)))))
       )
     }
     return .merge(effects)
