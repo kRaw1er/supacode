@@ -306,4 +306,49 @@ struct GutterRibbonControllerTests {
     // The fast index-seek rect matches the slow reverse line→rect resolution exactly.
     #expect(highlight.contentRow == controller.lineRect(line: highlight.line.lineNumber, side: highlight.line.side))
   }
+
+  // MARK: - pierre `[data-utility-button]` — the "+" hugs the number column's RIGHT edge
+
+  /// The button must NOT sit centered over the digits (it used to, hiding the line
+  /// number under a translucent glyph). It hugs the column's right edge, overhung
+  /// outward so it bites exactly the reserved trailing padding — never a digit.
+  @Test func plusButtonHugsNumberColumnRightEdge() {
+    let (controller, _) = makeSetup()
+    let metrics = controller.lineMetrics
+    let row = NSRect(x: 0, y: 40, width: 800, height: metrics.lineHeight)
+    let button = GutterRibbonController.plusButtonRect(
+      for: SelectionPoint(lineNumber: 3, side: .old), row: row, mode: .unified, metrics: metrics)
+
+    let numberRight = DiffHitTest.changeBarWidth + metrics.gutterWidth
+    #expect(button.width == metrics.lineHeight)  // 1lh × 1lh
+    #expect(button.height == metrics.lineHeight)
+    #expect(button.maxX == numberRight + (metrics.lineHeight - GutterRenderer.numberTrailingPad))
+    // It eats only the column's trailing pad, so the DIGITS stay fully legible — the
+    // right edge of the number text is exactly the button's left edge.
+    let numberTextRight = numberRight - GutterRenderer.numberTrailingPad
+    #expect(button.minX == numberTextRight)
+    // NOT centered on the column (the old bug): its center sits past the right edge.
+    #expect(button.midX > numberRight)
+    #expect(button.minY == row.minY)  // aligned with the number's own line box
+  }
+
+  /// Split mode places it on the HOVERED pane. The old hand-rolled math was
+  /// unified-only, so a new-side hover drew the "+" over the left pane's gutter.
+  @Test func plusButtonFollowsThePaneInSplit() {
+    let (controller, _) = makeSetup()
+    let metrics = controller.lineMetrics
+    let row = NSRect(x: 0, y: 0, width: 800, height: metrics.lineHeight)
+    let mid = (row.width / 2).rounded()
+    let old = GutterRibbonController.plusButtonRect(
+      for: SelectionPoint(lineNumber: 3, side: .old), row: row, mode: .split, metrics: metrics)
+    let new = GutterRibbonController.plusButtonRect(
+      for: SelectionPoint(lineNumber: 3, side: .new), row: row, mode: .split, metrics: metrics)
+
+    #expect(old.maxX < mid)  // left pane
+    #expect(new.minX > mid)  // right pane, NOT the left one
+    #expect(
+      new.maxX
+        == mid + DiffHitTest.changeBarWidth + metrics.gutterWidth
+        + (metrics.lineHeight - GutterRenderer.numberTrailingPad))
+  }
 }

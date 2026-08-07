@@ -721,7 +721,8 @@ final class LineRowView: NSView, DiffViewportRecyclable {
     ]
     let vPad = context.metrics.vPad
     let inset = NSRect(
-      x: originX, y: top + vPad, width: context.metrics.gutterWidth - 4, height: context.rowHeight - 2 * vPad)
+      x: originX, y: top + vPad, width: context.metrics.gutterWidth - GutterRenderer.numberTrailingPad,
+      height: context.rowHeight - 2 * vPad)
     (String(number) as NSString).draw(in: inset, withAttributes: attributes)
   }
 

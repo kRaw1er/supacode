@@ -36,6 +36,12 @@ struct GutterRenderer {
   /// pierre change-bar affordance width.
   static let changeBarWidth: CGFloat = 4
 
+  /// Padding reserved after the right-aligned digits inside a number column, so the
+  /// number never abuts the column edge. `LineRowView.drawNumber` insets by it, and the
+  /// gutter ribbon's hover "+" bites exactly this much off the column instead of the
+  /// digits (`GutterRibbonController.plusButtonRect`).
+  static let numberTrailingPad: CGFloat = 4
+
   /// gutterWidth = `max(3, maxDigits)·advance + 2·advance + 1·advance`, per file
   /// (recomputed on expand / materialize). The `+2` reserves the two bar rails and
   /// the `+1` a hair of trailing padding (brainstorm §Round-3 hit-test / gutter).

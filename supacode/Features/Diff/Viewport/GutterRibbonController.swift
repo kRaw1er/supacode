@@ -353,7 +353,7 @@ final class GutterRibbonController: NSView {
     } else if let highlight = hoverHighlight {
       drawHoverHighlight(highlight)
       // Reuse the row rect the highlight already resolved — no second row lookup.
-      drawPlusGlyph(for: highlight.line, docRect: highlight.contentRow, controller: controller)
+      drawPlusButton(for: highlight.line, docRect: highlight.contentRow, controller: controller)
     }
   }
 
@@ -370,22 +370,58 @@ final class GutterRibbonController: NSView {
     numberLocal.fill()
   }
 
-  private func drawPlusGlyph(for target: SelectionPoint, docRect: NSRect, controller: DiffViewportController) {
-    let rowRect = localRect(fromDocument: docRect)
-    guard !rowRect.isEmpty else { return }
-    let diameter = min(rowRect.height - 2, 16)
-    let gutter = controller.gutterWidth
-    let bar = DiffHitTest.changeBarWidth
-    let centerX = target.side == .old ? bar + gutter * 0.5 : bar + gutter + bar + gutter * 0.5
-    let origin = NSPoint(x: max(1, centerX - diameter / 2), y: rowRect.midY - diameter / 2)
-    let glyphRect = NSRect(origin: origin, size: NSSize(width: diameter, height: diameter))
-    let config = NSImage.SymbolConfiguration(pointSize: diameter, weight: .semibold)
+  /// The hover "+" affordance's rect (document space) — ported from pierre
+  /// `[data-utility-button]` (`style.css:1697-1714`): a `1lh × 1lh` button pinned to
+  /// the RIGHT edge of the hovered side's number column and overhung outward by
+  /// `1lh − 1ch` (`margin-right: calc((1lh - 1ch) * -1)`), so it straddles the column
+  /// boundary rather than sitting centered on top of the digits.
+  ///
+  /// The overhang is `1lh − trailing pad` rather than pierre's `1lh − 1ch`: pierre's
+  /// number cell has NO padding-right (`style.css:1425-1431`), so its `1ch` bite lands
+  /// on the last digit; ours reserves `GutterRenderer.numberTrailingPad` after the
+  /// digits (`LineRowView.drawNumber`), so biting exactly that much leaves the hovered
+  /// line number fully legible — the point of the affordance is to comment on that line,
+  /// so its number must stay readable.
+  ///
+  /// Vertically it hugs the row's FIRST visual line — the line the number itself is
+  /// drawn on — so a wrapped (multi-sub-line) row does not float the button down into
+  /// its middle. Mode-correct via `DiffHitTest.bands`, so split places it on the hovered
+  /// pane (the old hand-rolled unified-only math put it in the wrong pane in split).
+  static func plusButtonRect(
+    for point: SelectionPoint, row: NSRect, mode: DiffViewMode, metrics: DiffMetrics
+  ) -> NSRect {
+    let bands = DiffHitTest.bands(mode: mode, width: row.width, gutterW: metrics.gutterWidth)
+    guard let band = bands.first(where: { $0.column == .gutter(point.side) }) else { return .zero }
+    let size = min(metrics.lineHeight, row.height)
+    let overhang = max(0, size - GutterRenderer.numberTrailingPad)
+    let maxX = band.range.upperBound + overhang
+    return NSRect(x: maxX - size, y: row.minY, width: size, height: size)
+  }
+
+  /// Paint the hover "+" as an opaque accent-filled rounded button (pierre
+  /// `background-color: var(--diffs-modified-base); color: var(--diffs-bg)`), NOT a
+  /// translucent template symbol laid over the digits.
+  private func drawPlusButton(for target: SelectionPoint, docRect: NSRect, controller: DiffViewportController) {
+    let buttonDoc = Self.plusButtonRect(
+      for: target, row: docRect, mode: controller.mode, metrics: controller.lineMetrics)
+    let buttonRect = localRect(fromDocument: buttonDoc)
+    guard !buttonRect.isEmpty else { return }
+    let radius: CGFloat = 4
+    NSColor.controlAccentColor.setFill()
+    NSBezierPath(roundedRect: buttonRect, xRadius: radius, yRadius: radius).fill()
+    let pointSize = (buttonRect.height * 0.6).rounded()
+    let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
     guard
-      let image = NSImage(systemSymbolName: "plus.circle.fill", accessibilityDescription: "Comment on this line")?
+      let image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Comment on this line")?
         .withSymbolConfiguration(config)
     else { return }
     image.isTemplate = true
-    NSColor.controlAccentColor.set()
+    // The system's on-accent foreground (white in both appearances) — no custom colors.
+    NSColor.alternateSelectedControlTextColor.set()
+    let glyphRect = NSRect(
+      x: (buttonRect.midX - image.size.width / 2).rounded(),
+      y: (buttonRect.midY - image.size.height / 2).rounded(),
+      width: image.size.width, height: image.size.height)
     image.draw(in: glyphRect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
     toolTip = "Comment on this line — drag to select a range"
   }

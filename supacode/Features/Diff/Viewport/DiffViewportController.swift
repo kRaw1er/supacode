@@ -1040,6 +1040,10 @@ final class DiffViewportController: NSObject {
   /// gutter ribbon uses it to place the "+" glyph and gate number-column hits.
   var gutterWidth: CGFloat { metrics.gutterWidth }
 
+  /// The resolved line metrics (`lineHeight` = pierre `1lh`, `charWidth` = `1ch`). The
+  /// gutter ribbon sizes and pins the hover "+" button off them.
+  var lineMetrics: DiffMetrics { metrics }
+
   /// Side-pinned geometric hit (drag continuation): read the git line number on
   /// `side` under `point.y` regardless of which x-band `point.x` fell in (pierre
   /// `requireNumberColumn: false` on drag, side pinned to the anchor).
