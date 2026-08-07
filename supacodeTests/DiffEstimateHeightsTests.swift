@@ -106,21 +106,28 @@ struct DiffEstimateHeightsTests {
   /// Mirrors virtualFileMetricsPadding.test.ts
   /// "keeps current line-info separator estimates for first, middle, and trailing
   /// collapsed context": the second hunk's first CODE row sits below the file
-  /// header + leading gap separator + hunk-1 header + all of hunk 1's rows + the
-  /// middle gap separator + hunk-2 header. Asserted on the REAL tree geometry
-  /// (`seek` yOrigin over the materialized expander/hunk-header widget rows).
+  /// header + leading gap separator + all of hunk 1's rows + the middle gap
+  /// separator. The separator IS the `@@ … @@` header (pierre `createSeparator`), so
+  /// there is exactly ONE widget row per collapsed gap — never a second header row.
+  /// Asserted on the REAL tree geometry (`seek` yOrigin over the materialized rows).
   @Test func secondHunkFirstRowTopIncludesFirstHunkAndMiddleSeparator() {
     let fixture = twoHunkFile()
     let options = ChunkTreeBuilder.Options(totalNewLines: twoHunkTotalNewLines)
     let tree = ChunkTreeBuilder.build(file: fixture.file, hunks: fixture.hunks, mode: .unified, options: options)
 
-    let hunk2HeaderKey = WidgetKey.hunkHeader(hunkID: HunkID(fileID: fixture.file.id, index: 1))
-    let hunk2Header = tree.widgetNode(for: hunk2HeaderKey)
-    #expect(hunk2Header != nil)
-    let headerRow = tree.rowIndex(for: (hunk2Header!.id, 0), mode: .unified)
-    #expect(headerRow != nil)
+    let middleGapKey = WidgetKey.expander(GapKey(fileID: fixture.file.id, hunkIndex: 1))
+    let middleGap = tree.widgetNode(for: middleGapKey)
+    #expect(middleGap != nil)
+    // The separator carries hunk 2's header — the only place it is rendered.
+    if case .expander(_, _, _, let header)? = middleGap?.chunk.widget?.payload {
+      #expect(header == fixture.hunks[1].header)
+    } else {
+      Issue.record("middle gap is not a separator widget")
+    }
+    let separatorRow = tree.rowIndex(for: (middleGap!.id, 0), mode: .unified)
+    #expect(separatorRow != nil)
 
-    let firstBodyRow = headerRow! + 1
+    let firstBodyRow = separatorRow! + 1
     let hit = tree.seek(index: firstBodyRow, mode: .unified)
     #expect(hit != nil)
     // The first row of the second hunk's body is real code, not another widget.
@@ -130,13 +137,11 @@ struct DiffEstimateHeightsTests {
     let counts1 = ChunkTreeBuilder.hunkCounts(fixture.hunks[0])
     let expectedTop =
       metrics.diffHeaderHeight  // file header widget
-      + metrics.expanderHeight  // leading collapsed-gap separator
-      + metrics.separatorHeight  // hunk 1 header widget
+      + metrics.expanderHeight  // leading collapsed-gap separator (= hunk 1's header)
       + CGFloat(counts1.unified) * metrics.lineHeight  // all of hunk 1's rows
-      + metrics.expanderHeight  // middle collapsed-gap separator
-      + metrics.separatorHeight  // hunk 2 header widget
+      + metrics.expanderHeight  // middle collapsed-gap separator (= hunk 2's header)
     #expect(hit?.yOrigin == expectedTop)
-    #expect(expectedTop == 284)  // 44 + 28 + 32 + 120 + 28 + 32
+    #expect(expectedTop == 220)  // 44 + 28 + 120 + 28
   }
 
   // MARK: - Item 2: unknown-tail diffs reserve no trailing separator

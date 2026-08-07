@@ -13,29 +13,37 @@ extension ChunkTreeBuilder {
     )
   }
 
-  static func hunkHeaderWidget(_ fileID: FileID, _ index: Int, _ hunk: DiffHunk, _ options: Options) -> Chunk {
-    .widget(
-      Widget(
-        key: .hunkHeader(hunkID: HunkID(fileID: fileID, index: index)),
-        estimatedHeight: options.metrics.separatorHeight,
-        payload: .hunkHeader(anchor: hunk.newStart, text: hunk.header)
-      )
-    )
+  /// Everything one hunk separator is built from: which gap it is, where it sits,
+  /// how much it still hides, and the `"@@ … @@"` of the hunk it introduces. Travels
+  /// as one value because every construction path — the projection, the live splice,
+  /// the re-collapse — needs all of it, and a path that assembled its own subset is
+  /// exactly how a spliced separator would start disagreeing with a projected one.
+  nonisolated struct GapSeparator: Equatable, Sendable {
+    var gap: GapKey
+    /// The new-side line the gap is anchored at.
+    var anchor: Int
+    /// The new-side range the gap covers.
+    var range: Range<Int>
+    /// Lines still hidden behind this separator.
+    var hidden: Int
+    /// The introduced hunk's raw header — `nil` for the trailing gap and for an
+    /// in-hunk collapsed run, neither of which introduces a hunk.
+    var header: String?
   }
 
-  static func expanderWidget(
-    fileID: FileID,
-    hunkIndex: Int,
-    anchor: Int,
-    range: Range<Int>,
-    hidden: Int,
-    _ options: Options
-  ) -> Chunk {
+  /// The hunk separator — ONE leaf carrying both the expand affordance and the
+  /// `"@@ … @@"` header of the hunk it introduces (pierre `createSeparator`: the
+  /// expand buttons live INSIDE the separator). Emitted only where lines are still
+  /// hidden, so a fully-revealed gap leaves no orphan header behind (pierre
+  /// `pushSeparator` returns early on `collapsedLines <= 0`,
+  /// `DiffHunksRenderer.ts:1647`).
+  static func expanderWidget(_ separator: GapSeparator, _ options: Options) -> Chunk {
     .widget(
       Widget(
-        key: .expander(GapKey(fileID: fileID, hunkIndex: hunkIndex)),
+        key: .expander(separator.gap),
         estimatedHeight: options.metrics.expanderHeight,
-        payload: .expander(anchor: anchor, range: range, hidden: hidden)
+        payload: .expander(
+          anchor: separator.anchor, range: separator.range, hidden: separator.hidden, header: separator.header)
       )
     )
   }
@@ -113,11 +121,14 @@ extension ChunkTreeBuilder {
   /// (`collapsedLines == 0`) ⇒ one `.contextExpanded` segment, no expander (the
   /// eager-slice cap means a whole-file expand's remaining lines window in on
   /// scroll, a separate mechanism). Partial ⇒ `head + shrunken expander + tail`.
-  /// `revealedLines` is guaranteed non-empty by the caller.
+  /// `revealedLines` is guaranteed non-empty by the caller. `header` is the
+  /// `"@@ … @@"` of the hunk this gap introduces — it rides the surviving separator
+  /// and disappears WITH it once nothing is left to hide.
   static func gapChunks(
     gap: GapKey,
     region: ExpansionState.ResolvedRegion,
     revealedLines: [DiffLine],
+    header: String?,
     metrics: ChunkLayoutMetrics
   ) -> [Chunk] {
     if region.collapsedLines <= 0 {
@@ -129,7 +140,10 @@ extension ChunkTreeBuilder {
     let tail = tailCount > 0 ? Array(revealedLines.suffix(tailCount)) : []
     var chunks: [Chunk] = []
     chunks += gapSegmentChunks(head, gap: gap)
-    chunks.append(shrunkenExpander(gap: gap, hidden: region.collapsedLines, head: head, tail: tail, metrics: metrics))
+    chunks.append(
+      expanderWidget(
+        shrunkenSeparator(gap: gap, hidden: region.collapsedLines, head: head, tail: tail, header: header),
+        Options(metrics: metrics)))
     chunks += gapSegmentChunks(tail, gap: gap)
     return chunks
   }
@@ -151,22 +165,16 @@ extension ChunkTreeBuilder {
     return chunks
   }
 
-  /// The still-hidden expander leaf for a partial reveal — same `WidgetKey` (so the
-  /// gap identity survives) with the shrunken `hidden` count and a best-effort range
-  /// derived from the revealed edges.
-  private static func shrunkenExpander(
-    gap: GapKey, hidden: Int, head: [DiffLine], tail: [DiffLine], metrics: ChunkLayoutMetrics
-  ) -> Chunk {
+  /// The still-hidden separator for a partial reveal — same `GapKey` (so the gap
+  /// identity survives) with the shrunken `hidden` count, the header it keeps
+  /// carrying, and a best-effort range derived from the revealed edges.
+  private static func shrunkenSeparator(
+    gap: GapKey, hidden: Int, head: [DiffLine], tail: [DiffLine], header: String?
+  ) -> GapSeparator {
     let anchor = head.last?.newLineNumber ?? tail.first?.newLineNumber ?? 0
     let lower = (head.last?.newLineNumber).map { $0 + 1 } ?? anchor
     let upper = tail.first?.newLineNumber ?? (lower + hidden)
-    return .widget(
-      Widget(
-        key: .expander(gap),
-        estimatedHeight: metrics.expanderHeight,
-        payload: .expander(anchor: anchor, range: lower..<max(upper, lower), hidden: hidden)
-      )
-    )
+    return GapSeparator(gap: gap, anchor: anchor, range: lower..<max(upper, lower), hidden: hidden, header: header)
   }
 }
 

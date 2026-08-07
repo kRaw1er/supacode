@@ -16,7 +16,7 @@ struct ChunkTreeTests {
       Widget(
         key: .expander(GapKey(fileID: "a.swift", hunkIndex: index)),
         estimatedHeight: height,
-        payload: .expander(anchor: index, range: index..<(index + 1), hidden: 1)
+        payload: .expander(anchor: index, range: index..<(index + 1), hidden: 1, header: nil)
       )
     )
   }
@@ -46,17 +46,19 @@ struct ChunkTreeTests {
     )
     let tree = ChunkTreeBuilder.build(file: DiffFixture.file(), hunks: [hunk], mode: .unified, expanded: [])
 
-    // Unified: fh, hh, ctx(1), del(2), add(2), ctx(3)
+    // Unified: fh, ctx(1), del(2), add(2), ctx(3). No separator row — the hunk starts
+    // at line 1, so nothing is collapsed in front of it and the separator (which is
+    // also the `@@` header) is not emitted.
     #expect(tree.seek(index: 0, mode: .unified)?.chunk.widget?.reuseKind == .fileHeader)
-    #expect(tree.seek(index: 2, mode: .unified)?.chunk.lineSegment?.classification == .context)
-    #expect(tree.seek(index: 3, mode: .unified)?.chunk.lineSegment?.classification == .change)
-    #expect(tree.seek(index: 5, mode: .unified)?.chunk.lineSegment?.windowedLines.first?.newLineNumber == 3)
-    // Split: fh, hh, ctx(1), pair(2/2), ctx(3) — one fewer row than unified
-    #expect(tree.seek(index: 3, mode: .split)?.chunk.lineSegment?.classification == .change)
-    #expect(tree.seek(index: 4, mode: .split)?.chunk.lineSegment?.windowedLines.first?.newLineNumber == 3)
-    #expect(tree.rowCount(.unified) == 6)
-    #expect(tree.rowCount(.split) == 5)
-    #expect(tree.seek(index: 6, mode: .unified) == nil)
+    #expect(tree.seek(index: 1, mode: .unified)?.chunk.lineSegment?.classification == .context)
+    #expect(tree.seek(index: 2, mode: .unified)?.chunk.lineSegment?.classification == .change)
+    #expect(tree.seek(index: 4, mode: .unified)?.chunk.lineSegment?.windowedLines.first?.newLineNumber == 3)
+    // Split: fh, ctx(1), pair(2/2), ctx(3) — one fewer row than unified
+    #expect(tree.seek(index: 2, mode: .split)?.chunk.lineSegment?.classification == .change)
+    #expect(tree.seek(index: 3, mode: .split)?.chunk.lineSegment?.windowedLines.first?.newLineNumber == 3)
+    #expect(tree.rowCount(.unified) == 5)
+    #expect(tree.rowCount(.split) == 4)
+    #expect(tree.seek(index: 5, mode: .unified) == nil)
   }
 
   @Test func seekByYReturnsLeafInBothModes() {
@@ -70,11 +72,12 @@ struct ChunkTreeTests {
       header: "@@ -1,3 +1,3 @@"
     )
     let tree = ChunkTreeBuilder.build(file: DiffFixture.file(), hunks: [hunk], mode: .split)
-    // fileHeader 44, hunkHeader 32, then 20-pt rows: ctx [76,96), then change/context.
+    // fileHeader 44, then 20-pt rows: ctx [44,64), then change/context. The hunk
+    // starts at line 1, so nothing is collapsed in front of it and no separator
+    // (which is also the `@@` header) is emitted.
     #expect(tree.seek(y: 10, mode: .unified)?.chunk.widget?.reuseKind == .fileHeader)
-    #expect(tree.seek(y: 60, mode: .unified)?.chunk.widget?.reuseKind == .hunkHeader)
-    #expect(tree.seek(y: 80, mode: .unified)?.chunk.lineSegment?.classification == .context)
-    #expect(tree.seek(y: 100, mode: .unified)?.chunk.lineSegment?.classification == .change)
+    #expect(tree.seek(y: 50, mode: .unified)?.chunk.lineSegment?.classification == .context)
+    #expect(tree.seek(y: 70, mode: .unified)?.chunk.lineSegment?.classification == .change)
     // A y past the end clamps to the last row.
     let end = tree.totalHeight(.split)
     #expect(tree.seek(y: end + 500, mode: .split)?.chunk.lineSegment?.windowedLines.first?.newLineNumber == 3)
@@ -192,7 +195,7 @@ struct ChunkTreeTests {
             Widget(
               key: .expander(GapKey(fileID: "a.swift", hunkIndex: 0)),
               estimatedHeight: 20,
-              payload: .expander(anchor: 0, range: 0..<1, hidden: 1)
+              payload: .expander(anchor: 0, range: 0..<1, hidden: 1, header: nil)
             )
           ),
           after: nil
@@ -252,9 +255,10 @@ struct ChunkTreeTests {
     ])
     let hit = tree.offsetForFile(fileB.id, mode: .unified)
     #expect(hit?.chunk.widget?.key == .fileHeader(fileID: fileB.id))
-    // fileA rendered rows: fileHeader + hunkHeader + change segment (2 unified rows) = 4.
-    #expect(hit?.rowIndex == 4)
-    let expectedY: CGFloat = 44 + 32 + 40  // fileHeader + hunkHeader + 2×20
+    // fileA rendered rows: fileHeader + change segment (2 unified rows) = 3 (the hunk
+    // starts at line 1, so it has no separator in front of it).
+    #expect(hit?.rowIndex == 3)
+    let expectedY: CGFloat = 44 + 40  // fileHeader + 2×20
     #expect(hit?.yOrigin == expectedY)
   }
 

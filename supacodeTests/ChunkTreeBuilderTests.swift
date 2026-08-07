@@ -17,7 +17,7 @@ struct ChunkTreeBuilderTests {
 
   private func expanders(_ chunks: [Chunk]) -> [(anchor: Int, hidden: Int)] {
     chunks.compactMap { chunk in
-      if case .widget(let widget) = chunk, case .expander(let anchor, _, let hidden) = widget.payload {
+      if case .widget(let widget) = chunk, case .expander(let anchor, _, let hidden, _) = widget.payload {
         return (anchor, hidden)
       }
       return nil
@@ -384,6 +384,54 @@ struct ChunkTreeBuilderTests {
     #expect(expanded.widgetNode(for: .expander(GapKey(fileID: file.id, hunkIndex: 1))) == nil)  // fully revealed
     #expect(expanded.locate(line: 10, side: .new, mode: .unified) != nil)  // the gap line IS in the document
     #expect(expanded.totalHeight(.unified) > collapsed.totalHeight(.unified))
+  }
+
+  /// A fully-revealed gap leaves NOTHING behind — no separator, and no `@@ … @@`
+  /// header stranded in the middle of now-contiguous code. The header has no leaf of
+  /// its own: it rides the separator (pierre `createSeparator` puts the expand
+  /// buttons inside the separator, and `pushSeparator` returns early once
+  /// `collapsedLines <= 0`), so the two can never get out of step.
+  @Test func fullyRevealedGapLeavesNoHunkHeaderBehind() {
+    let file = DiffFixture.file()
+    let hunks = [
+      DiffFixture.hunk([DiffFixture.line(.addition, new: 1, "a")], oldStart: 1, newStart: 1, header: "@@ -1 +1 @@"),
+      DiffFixture.hunk(
+        [DiffFixture.line(.addition, new: 20, "z")], oldStart: 20, newStart: 20, header: "@@ -20 +20 @@ func z()"),
+    ]
+    let revealed = (2..<20).map {
+      DiffLine(origin: .context, oldLineNumber: $0, newLineNumber: $0, content: "gap\($0)", noNewlineAtEof: false)
+    }
+
+    // Collapsed: exactly ONE widget — the separator, carrying hunk 2's header.
+    let collapsed = ChunkTreeBuilder.classify(file: file, hunks: hunks, expanded: [], options: headerless)
+    let collapsedWidgets = collapsed.compactMap(\.widget)
+    #expect(collapsedWidgets.count == 1)
+    #expect(collapsedWidgets.first?.payload == .expander(anchor: 2, range: 2..<20, hidden: 18, header: hunks[1].header))
+
+    // Fully revealed: ZERO widgets. Before the merge this left the `@@ -20 +20 @@`
+    // header sitting between line 19 and line 20 of one continuous file.
+    let expanded = ChunkTreeBuilder.classify(
+      file: file, hunks: hunks, expanded: [],
+      reveal: GapReveal(state: .full, lines: [1: revealed]), options: headerless)
+    #expect(expanded.compactMap(\.widget).isEmpty)
+    // …and the code really is contiguous: 1, 2…19, 20 with no gaps.
+    let rendered = expanded.compactMap(\.lineSegment).flatMap { $0.windowedLines.compactMap(\.newLineNumber) }
+    #expect(rendered == Array(1...20))
+
+    // A PARTIAL reveal keeps the separator — and therefore keeps the header visible,
+    // because there is still something collapsed under it.
+    let partial = ChunkTreeBuilder.classify(
+      file: file, hunks: hunks, expanded: [],
+      reveal: GapReveal(state: .regions([1: HunkExpansionRegion(fromStart: 4)]), lines: [1: Array(revealed.prefix(4))]),
+      options: headerless)
+    let partialWidgets = partial.compactMap(\.widget)
+    #expect(partialWidgets.count == 1)
+    if case .expander(_, _, let hidden, let header)? = partialWidgets.first?.payload {
+      #expect(hidden == 14)  // 18 − 4 revealed
+      #expect(header == hunks[1].header)
+    } else {
+      Issue.record("expected the shrunken separator to survive a partial reveal")
+    }
   }
 
   /// ...and a comment on a revealed gap line therefore anchors to that line, instead

@@ -99,7 +99,7 @@ struct DiffDeepScrollFidelityTests {
     // The gap before hunk 1 (GapKey index 1) collapsed to a single expander whose
     // range covers the hidden lines 4…39 (36 lines) as ONE row — not 36 rows.
     guard let expander = tree.widgetNode(for: .expander(GapKey(fileID: "a.swift", hunkIndex: 1))),
-      case .expander(let anchor, let range, let hidden)? = expander.chunk.widget?.payload
+      case .expander(let anchor, let range, let hidden, let header)? = expander.chunk.widget?.payload
     else {
       Issue.record("expected a collapsed-gap expander for GapKey(1)")
       return
@@ -107,16 +107,18 @@ struct DiffDeepScrollFidelityTests {
     #expect(anchor == 4)
     #expect(range == 4..<40)
     #expect(hidden == 36)
+    #expect(header == hunk1.header)  // the separator carries hunk 1's `@@ … @@`
     #expect(range.contains(20))  // the hidden line we probe below is inside this expander
     #expect(expander.summary.count(.unified) == 1)  // ONE separator row for the whole gap
 
     // The expander's geometry is the separator row's position: top == fileHeader
-    // (44) + hunk-0 header (32) + hunk-0 body (ctx 20 + change 40 + ctx 20 = 80),
-    // height == the reserved expander height (28) — a single row, never 36 × 20.
+    // (44) + hunk-0 body (ctx 20 + change 40 + ctx 20 = 80) — hunk 0 starts at line 1,
+    // so nothing precedes its body — height == the reserved expander height (28), a
+    // single row, never 36 × 20.
     let metrics = ChunkLayoutMetrics.production
-    let expectedTop = metrics.diffHeaderHeight + metrics.separatorHeight + (metrics.lineHeight * 4)
+    let expectedTop = metrics.diffHeaderHeight + (metrics.lineHeight * 4)
     let expanderFrame = controller.frame(forChunk: expander.id)
-    #expect(expanderFrame?.minY == expectedTop)  // 156
+    #expect(expanderFrame?.minY == expectedTop)  // 124
     #expect(expanderFrame?.height == metrics.expanderHeight)  // 28, not 36 * lineHeight
 
     // The hidden lines do NOT resolve to any rendered line row (no phantom rows):

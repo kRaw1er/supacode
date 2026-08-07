@@ -194,25 +194,40 @@ enum ChunkTreeBuilder {
 
   // MARK: - Hunk walk
 
+  /// The hunk walk. A hunk's `"@@ … @@"` header is NOT its own leaf: it rides the
+  /// separator of the gap that introduces the hunk (pierre — the separator carries
+  /// both the header text and the expand buttons, and is emitted only while
+  /// something is still hidden). So a hunk with no collapsed run in front of it
+  /// (the file starts at line 1, or the user revealed the whole gap) gets no
+  /// separator at all, instead of an orphan `@@` stranded in contiguous code.
   private static func appendHunks(_ chunks: inout [Chunk], hunks: [DiffHunk], context: BuildContext) {
+    func separator(_ hunkIndex: Int, anchor: Int, range: Range<Int>, header: String?) -> GapSeparator {
+      GapSeparator(
+        gap: GapKey(fileID: context.fileID, hunkIndex: hunkIndex), anchor: anchor, range: range, hidden: range.count,
+        header: header)
+    }
     if let first = hunks.first, first.newStart > 1 {
-      appendGap(&chunks, hunkIndex: 0, anchor: 1, range: 1..<first.newStart, context: context)
+      appendGap(&chunks, separator(0, anchor: 1, range: 1..<first.newStart, header: first.header), context: context)
     }
     for (index, hunk) in hunks.enumerated() {
       if index > 0 {
         let prev = hunks[index - 1]
         let prevEnd = prev.newStart + prev.newCount
         if hunk.newStart > prevEnd {
-          appendGap(&chunks, hunkIndex: index, anchor: prevEnd, range: prevEnd..<hunk.newStart, context: context)
+          appendGap(
+            &chunks, separator(index, anchor: prevEnd, range: prevEnd..<hunk.newStart, header: hunk.header),
+            context: context)
         }
       }
-      chunks.append(hunkHeaderWidget(context.fileID, index, hunk, context.options))
       appendHunkBody(&chunks, hunkIndex: index, hunk: hunk, context: context)
     }
     if let last = hunks.last, let total = context.options.totalNewLines {
       let lastEnd = last.newStart + last.newCount
       if total >= lastEnd {
-        appendGap(&chunks, hunkIndex: hunks.count, anchor: lastEnd, range: lastEnd..<(total + 1), context: context)
+        // The trailing gap introduces no hunk, so it carries no header.
+        appendGap(
+          &chunks, separator(hunks.count, anchor: lastEnd, range: lastEnd..<(total + 1), header: nil),
+          context: context)
       }
     }
   }
@@ -284,10 +299,13 @@ enum ChunkTreeBuilder {
     let hiddenSlice = buffer[edge..<(buffer.count - edge)]
     let firstHidden = hiddenSlice.first?.newLineNumber ?? anchor
     let lastHidden = hiddenSlice.last?.newLineNumber ?? anchor
+    // An in-hunk collapsed run introduces no hunk, so its separator carries no header.
     chunks.append(
       expanderWidget(
-        fileID: hunkID.fileID, hunkIndex: hunkID.index, anchor: anchor, range: firstHidden..<(lastHidden + 1),
-        hidden: hidden, context.options)
+        GapSeparator(
+          gap: GapKey(fileID: hunkID.fileID, hunkIndex: hunkID.index), anchor: anchor,
+          range: firstHidden..<(lastHidden + 1), hidden: hidden, header: nil),
+        context.options)
     )
     if !tail.isEmpty { appendSegments(&chunks, lines: tail, hunkID: hunkID, classification: .context) }
   }
@@ -309,30 +327,23 @@ enum ChunkTreeBuilder {
     }
   }
 
-  private static func appendGap(
-    _ chunks: inout [Chunk],
-    hunkIndex: Int,
-    anchor: Int,
-    range: Range<Int>,
-    context: BuildContext
-  ) {
-    guard !range.isEmpty, !context.expanded.contains(anchor) else { return }
-    let gap = GapKey(fileID: context.fileID, hunkIndex: hunkIndex)
+  private static func appendGap(_ chunks: inout [Chunk], _ separator: GapSeparator, context: BuildContext) {
+    let hunkIndex = separator.gap.hunkIndex
+    guard !separator.range.isEmpty, !context.expanded.contains(separator.anchor) else { return }
     let revealedLines = context.reveal.lines[hunkIndex] ?? []
     let region = context.reveal.state.resolve(
-      gap: hunkIndex, rangeSize: range.count, isTrailing: hunkIndex == context.hunkCount)
-    // Revealed ⇒ project the gap in its revealed shape (head / shrunken expander /
+      gap: hunkIndex, rangeSize: separator.range.count, isTrailing: hunkIndex == context.hunkCount)
+    // Revealed ⇒ project the gap in its revealed shape (head / shrunken separator /
     // tail) through the SAME constructor the live splice uses, so a projection and a
     // splice can never disagree about what a revealed gap looks like. Not revealed —
-    // or the slice hasn't arrived yet — leaves the full expander.
+    // or the slice hasn't arrived yet — leaves the full separator.
     let wantsReveal = region.renderAll || region.fromStart > 0 || region.fromEnd > 0
     guard wantsReveal, !revealedLines.isEmpty else {
-      chunks.append(
-        expanderWidget(
-          fileID: context.fileID, hunkIndex: hunkIndex, anchor: anchor, range: range, hidden: range.count,
-          context.options))
+      chunks.append(expanderWidget(separator, context.options))
       return
     }
-    chunks += gapChunks(gap: gap, region: region, revealedLines: revealedLines, metrics: context.options.metrics)
+    chunks += gapChunks(
+      gap: separator.gap, region: region, revealedLines: revealedLines, header: separator.header,
+      metrics: context.options.metrics)
   }
 }

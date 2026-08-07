@@ -12,14 +12,14 @@ import Foundation
 /// survives, under a distinct name so the render layer never resurrects a flat
 /// row list.)
 nonisolated enum DiffAXRow: Equatable, Sendable {
-  /// `"@@ -a,b +c,d @@ ctx"` header.
-  case hunkHeader(anchor: Int, text: String)
   /// Unified stream line (context / addition / deletion / no-newline marker).
   case line(DiffLine)
   /// Split-view aligned pair; a `nil` side is a gap row (blank cell).
   case splitLine(pairID: Int, old: DiffLine?, new: DiffLine?)
   /// A collapsed run of unchanged lines (inter-hunk gap or long intra-hunk run).
-  case expander(anchor: Int, collapsedRange: Range<Int>, hiddenCount: Int)
+  /// This row IS the hunk separator, so it also carries the `"@@ -a,b +c,d @@ ctx"`
+  /// header of the hunk it introduces (`nil` for the trailing gap / an in-hunk run).
+  case expander(anchor: Int, collapsedRange: Range<Int>, hiddenCount: Int, header: String?)
   /// Whole-file placeholder (binary / mode / deleted / submodule / empty).
   case placeholder(FilePlaceholder)
   /// Large-file / long-line cap: plain monospaced text, no gutter, no tint.

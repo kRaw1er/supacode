@@ -57,7 +57,7 @@ enum ViewportTestSupport {
       let widget = Widget(
         key: .expander(GapKey(fileID: "a.swift", hunkIndex: index)),
         estimatedHeight: height,
-        payload: .expander(anchor: index, range: index..<(index + 1), hidden: 1)
+        payload: .expander(anchor: index, range: index..<(index + 1), hidden: 1, header: nil)
       )
       after = tree.insert(.widget(widget), after: after)
     }

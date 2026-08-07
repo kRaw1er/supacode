@@ -279,10 +279,11 @@ struct DiffViewportControllerTests {
       [.init(file: file, hunks: [hunk])],
       options: ChunkTreeBuilder.Options(expandUnchanged: true)
     )
-    // Reserved = fileHeader (diffHeaderHeight) + hunkHeader (separatorHeight) +
-    // rows × lineHeight — the off-screen estimate that keeps scrollbar / anchor
-    // correct before the file is ever typeset.
-    let expected = metrics.diffHeaderHeight + metrics.separatorHeight + 30 * metrics.lineHeight
+    // Reserved = fileHeader (diffHeaderHeight) + rows × lineHeight — the off-screen
+    // estimate that keeps scrollbar / anchor correct before the file is ever
+    // typeset. No separator: the hunk starts at line 1, so nothing is collapsed in
+    // front of it and the separator (which is also the `@@` header) is not emitted.
+    let expected = metrics.diffHeaderHeight + 30 * metrics.lineHeight
     #expect(tree.totalHeight(.unified) == expected)
 
     let controller = ViewportTestSupport.controller()
@@ -428,16 +429,20 @@ struct DiffViewportControllerTests {
     let chunks = ChunkTreeBuilder.classify(file: DiffFixture.file(), hunks: [hunk1, hunk2], expanded: [])
 
     // The file-scoped widget (file header) is the FIRST chunk, above the leading
-    // separator (the first hunk-header widget).
+    // separator.
     let fileHeaderIndex = chunks.firstIndex { $0.widget?.reuseKind == .fileHeader }
-    let firstSeparator = chunks.firstIndex { $0.widget?.reuseKind == .hunkHeader }
+    let firstSeparator = chunks.firstIndex { $0.widget?.reuseKind == .expander }
     #expect(fileHeaderIndex == 0)
     #expect(firstSeparator != nil)
     #expect(fileHeaderIndex! < firstSeparator!)  // above the leading separator
     // Only in the top chunk — exactly one file-scoped widget across the whole file
-    // (no per-hunk / per-window duplication), one separator per hunk.
+    // (no per-hunk / per-window duplication). Exactly ONE separator: hunk 1 starts at
+    // line 1 (nothing collapsed in front of it), hunk 2 is introduced by the gap.
     #expect(chunks.filter { $0.widget?.reuseKind == .fileHeader }.count == 1)
-    #expect(chunks.filter { $0.widget?.reuseKind == .hunkHeader }.count == 2)
+    #expect(chunks.filter { $0.widget?.reuseKind == .expander }.count == 1)
+    // That one separator carries hunk 2's `@@ … @@` — the header has no leaf of its own.
+    let separator = chunks[firstSeparator!].widget?.payload
+    #expect(separator == .expander(anchor: 3, range: 3..<41, hidden: 38, header: hunk2.header))
   }
 
   // MARK: - B §15, A §7 — the owner line re-indexed by an expand ⇒ the widget follows
@@ -653,7 +658,7 @@ struct DiffViewportControllerTests {
       let widget = Widget(
         key: .expander(GapKey(fileID: "a.swift", hunkIndex: index)),
         estimatedHeight: 28,
-        payload: .expander(anchor: index, range: index..<(index + 1), hidden: 1)
+        payload: .expander(anchor: index, range: index..<(index + 1), hidden: 1, header: nil)
       )
       after = tree.insert(.widget(widget), after: after)
     }

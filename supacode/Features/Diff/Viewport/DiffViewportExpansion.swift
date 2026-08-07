@@ -18,8 +18,15 @@ extension DiffViewportController {
   /// cached out here: a re-projection mints a new tree, and a cached id list would
   /// then address unrelated nodes (or none). The index is maintained by
   /// `register` / `unregister`, so it cannot disagree with the tree it belongs to.
+  ///
+  /// `header` is the `"@@ … @@"` of the hunk this gap introduces: it rides the
+  /// surviving (shrunken) separator on a partial reveal and disappears WITH the bar
+  /// on a full one — the separator is the only carrier of the header, so there is
+  /// nothing left to strand in contiguous code.
   @discardableResult
-  func applyExpansion(gap: GapKey, region: ExpansionState.ResolvedRegion, revealedLines: [DiffLine]) -> Bool {
+  func applyExpansion(
+    gap: GapKey, region: ExpansionState.ResolvedRegion, revealedLines: [DiffLine], header: String? = nil
+  ) -> Bool {
     let existing = tree.nodes(in: .gap(gap))
     guard let firstNode = existing.first else { return false }
     // Nothing revealed yet ⇒ leave the (full) expander in place.
@@ -29,7 +36,8 @@ extension DiffViewportController {
     let scrollAnchor = captureScrollAnchor()
     for node in existing { tree.remove(node.id) }
     spliceGap(
-      ChunkTreeBuilder.gapChunks(gap: gap, region: region, revealedLines: revealedLines, metrics: tree.metrics),
+      ChunkTreeBuilder.gapChunks(
+        gap: gap, region: region, revealedLines: revealedLines, header: header, metrics: tree.metrics),
       after: predecessorID, scrollAnchor: scrollAnchor)
     return true
   }
@@ -40,7 +48,9 @@ extension DiffViewportController {
   /// builder's), and no second copy of the gap's state to keep in step.
   /// Returns whether the gap was expanded.
   @discardableResult
-  func collapseExpansion(gap: GapKey, hiddenLines: Int, anchor: Int, range: Range<Int>) -> Bool {
+  func collapseExpansion(
+    gap: GapKey, hiddenLines: Int, anchor: Int, range: Range<Int>, header: String? = nil
+  ) -> Bool {
     let existing = tree.nodes(in: .gap(gap))
     guard let firstNode = existing.first, existing.contains(where: { $0.chunk.lineSegment != nil }) else {
       return false  // nothing revealed — already just an expander
@@ -49,7 +59,7 @@ extension DiffViewportController {
     let scrollAnchor = captureScrollAnchor()
     for node in existing { tree.remove(node.id) }
     let expander = ChunkTreeBuilder.expanderWidget(
-      fileID: gap.fileID, hunkIndex: gap.hunkIndex, anchor: anchor, range: range, hidden: hiddenLines,
+      ChunkTreeBuilder.GapSeparator(gap: gap, anchor: anchor, range: range, hidden: hiddenLines, header: header),
       ChunkTreeBuilder.Options(metrics: tree.metrics))
     spliceGap([expander], after: predecessorID, scrollAnchor: scrollAnchor)
     return true

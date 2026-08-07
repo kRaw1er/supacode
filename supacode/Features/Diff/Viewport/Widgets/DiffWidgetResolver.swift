@@ -54,13 +54,11 @@ struct DiffWidgetResolver {
         key: widget.key, model: model, coalescer: coalescer,
         onCommentOnFile: { onCommentOnFile(fileID) })
 
-    case .hunkHeader(_, let text):
-      return HunkHeaderWidget(key: widget.key, text: text, coalescer: coalescer)
-
-    case .expander(_, _, let hidden):
+    case .expander(_, _, let hidden, let header):
       guard case .expander(let gap) = widget.key else { return nil }
       return ExpanderWidget(
-        key: widget.key, model: .init(gap: gap, hiddenCount: hidden), coalescer: coalescer, onExpand: onExpand)
+        key: widget.key, model: .init(gap: gap, hiddenCount: hidden, header: header), coalescer: coalescer,
+        onExpand: onExpand)
 
     case .placeholder(let placeholder):
       switch placeholder {
@@ -104,52 +102,6 @@ struct DiffWidgetResolver {
 }
 
 // MARK: - Small widgets with no dedicated model file
-
-/// The per-hunk `@@ … @@` separator header hosted like every `.widget` chunk.
-/// Static content, so a recycled host accepts an identity swap.
-@MainActor
-final class HunkHeaderWidget: DiffWidget {
-  let key: WidgetKey
-  let text: String
-  private unowned let coalescer: LayoutCoalescer
-
-  init(key: WidgetKey, text: String, coalescer: LayoutCoalescer) {
-    self.key = key
-    self.text = text
-    self.coalescer = coalescer
-  }
-
-  var estimatedHeight: CGFloat { ChunkLayoutMetrics.production.separatorHeight }
-
-  func makeHostView(reporter: HeightReporter) -> NSView {
-    let host = NSHostingView(rootView: AnyView(content(reporter: reporter)))
-    host.sizingOptions = []
-    return host
-  }
-
-  func update(hostView: NSView, width: CGFloat) -> Bool {
-    guard let hosting = hostView as? NSHostingView<AnyView> else { return false }
-    hosting.rootView = AnyView(content(reporter: HeightReporter(key: key, coalescer: coalescer)))
-    return true
-  }
-
-  private func content(reporter: HeightReporter) -> some View {
-    Text(text)
-      .font(.caption.monospaced())
-      .foregroundStyle(.secondary)
-      .lineLimit(1)
-      .truncationMode(.middle)
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .padding(.horizontal, 12)
-      .frame(minHeight: ChunkLayoutMetrics.production.separatorHeight)
-      .background(.quaternary.opacity(0.25))
-      .onGeometryChange(for: CGSize.self) {
-        $0.size
-      } action: { size in
-        reporter.report(width: size.width, height: size.height)
-      }
-  }
-}
 
 /// A whole-file placeholder (binary / mode / deleted / submodule / empty) hosted
 /// like every `.widget` chunk.

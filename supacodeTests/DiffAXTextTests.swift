@@ -67,14 +67,19 @@ struct DiffAXTextTests {
 
   @Test func widgetAndFallbackLabelsMatchPortedStrings() {
     #expect(
-      DiffAXText.label(for: .expander(anchor: 1, collapsedRange: 1..<15, hiddenCount: 14), mode: .unified)
+      DiffAXText.label(for: .expander(anchor: 1, collapsedRange: 1..<15, hiddenCount: 14, header: nil), mode: .unified)
         == "Show 14 hidden lines")
     #expect(
-      DiffAXText.label(for: .expander(anchor: 1, collapsedRange: 1..<2, hiddenCount: 1), mode: .unified)
+      DiffAXText.label(for: .expander(anchor: 1, collapsedRange: 1..<2, hiddenCount: 1, header: nil), mode: .unified)
         == "Show 1 hidden line")
+    // The separator IS the hunk header, so one row speaks both.
     #expect(
-      DiffAXText.label(for: .hunkHeader(anchor: 1, text: "@@ -1,3 +1,4 @@"), mode: .unified)
-        == "Hunk header, @@ -1,3 +1,4 @@")
+      DiffAXText.label(
+        for: .expander(anchor: 1, collapsedRange: 1..<15, hiddenCount: 14, header: "@@ -1,3 +1,4 @@"),
+        mode: .unified) == "Show 14 hidden lines, hunk header, @@ -1,3 +1,4 @@")
+    #expect(
+      DiffAXText.label(for: .expander(anchor: 1, collapsedRange: 1..<15, hiddenCount: 14, header: ""), mode: .unified)
+        == "Show 14 hidden lines")
     #expect(
       DiffAXText.label(for: .plainFallback(lineNumber: 8, text: "long line"), mode: .unified) == "line 8: long line")
     #expect(DiffAXText.label(for: .placeholder(.binaryFile), mode: .unified) == "Binary file not shown")
@@ -109,7 +114,7 @@ struct DiffAXTextTests {
     #expect(DiffAXText.commentAnchor(for: oldOnly)?.side == .old)
     #expect(DiffAXText.commentAnchor(for: oldOnly)?.line == 7)
     // Non-line rows have no gutter anchor.
-    #expect(DiffAXText.commentAnchor(for: .hunkHeader(anchor: 1, text: "@@")) == nil)
-    #expect(DiffAXText.commentAnchor(for: .expander(anchor: 1, collapsedRange: 1..<3, hiddenCount: 2)) == nil)
+    #expect(
+      DiffAXText.commentAnchor(for: .expander(anchor: 1, collapsedRange: 1..<3, hiddenCount: 2, header: "@@")) == nil)
   }
 }

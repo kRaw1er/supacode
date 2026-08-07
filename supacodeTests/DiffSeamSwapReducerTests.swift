@@ -288,9 +288,10 @@ struct DiffSeamSwapReducerTests {
     // … every one of the hunk's marker/body lines survives as a rendered segment …
     let renderedBodyLines = chunks.compactMap(\.lineSegment).reduce(0) { $0 + $1.window.count }
     #expect(renderedBodyLines == hunk.lines.count)  // no body row dropped or duplicated
-    // … and the total structure is exactly 3 singleton widgets (file header + conflict
-    // action + hunk header) plus those body segments — no stray inserted rows.
-    #expect(chunks.compactMap(\.widget).count == 3)
+    // … and the total structure is exactly 2 singleton widgets (file header + conflict
+    // action) plus those body segments — no stray inserted rows. The hunk starts at
+    // line 1, so it has no separator (which is also where the `@@` header lives).
+    #expect(chunks.compactMap(\.widget).count == 2)
   }
 
   // MARK: - E 13.2 — grep gate: the retired render symbols have zero live refs

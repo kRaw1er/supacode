@@ -249,11 +249,9 @@ final class DiffAXProvider: NSObject {
     case .fileHeader(let fileID):
       guard let model = snap.fileHeader(fileID) else { return "File" }
       return DiffAXText.fileHeaderLabel(model)
-    case .hunkHeader(let anchor, let text):
-      return DiffAXText.label(for: .hunkHeader(anchor: anchor, text: text), mode: snap.mode)
-    case .expander(let anchor, let range, let hidden):
+    case .expander(let anchor, let range, let hidden, let header):
       return DiffAXText.label(
-        for: .expander(anchor: anchor, collapsedRange: range, hiddenCount: hidden), mode: snap.mode)
+        for: .expander(anchor: anchor, collapsedRange: range, hiddenCount: hidden, header: header), mode: snap.mode)
     case .placeholder(let placeholder):
       return DiffAXText.label(for: .placeholder(placeholder), mode: snap.mode)
     case .commentThread(let anchorID):

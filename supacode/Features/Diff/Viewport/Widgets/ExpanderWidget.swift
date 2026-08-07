@@ -1,18 +1,27 @@
 import AppKit
 import SwiftUI
 
-/// The collapsed-gap expander. Renders a full-width bar that reveals hidden
-/// unchanged lines **incrementally** (Phase 7): a tap dispatches the expand action
-/// keyed by the gap's `GapKey` (Phase 1 S13) with a step + direction from OUR
-/// granularity ladder (`ExpansionState.Step` — ±20 / ±100 / whole; C2, NOT a pierre
-/// constant). The reducer mutates `ExpansionState` and reads only the newly-revealed
-/// blob slice; the viewport does the O(log n) `tree.insert`. Static, so a recycled
-/// host accepts an identity swap.
+/// The collapsed-gap expander — which is also the hunk **separator**: it carries
+/// the `"@@ … @@"` header of the hunk it introduces, exactly like pierre's
+/// `createSeparator` (the expand buttons live inside the separator). There is no
+/// standalone header leaf, so when a gap is fully revealed the header goes away
+/// with the bar instead of being stranded in contiguous code.
+///
+/// Renders a full-width bar that reveals hidden unchanged lines **incrementally**
+/// (Phase 7): a tap dispatches the expand action keyed by the gap's `GapKey`
+/// (Phase 1 S13) with a step + direction from OUR granularity ladder
+/// (`ExpansionState.Step` — ±20 / ±100 / whole; C2, NOT a pierre constant). The
+/// reducer mutates `ExpansionState` and reads only the newly-revealed blob slice;
+/// the viewport does the O(log n) `tree.insert`. Static, so a recycled host accepts
+/// an identity swap.
 @MainActor
 final class ExpanderWidget: DiffWidget {
   struct Model: Hashable {
     var gap: GapKey
     var hiddenCount: Int
+    /// The introduced hunk's raw `"@@ … @@"` header, or `nil` for the trailing gap
+    /// / an in-hunk collapsed run (neither introduces a hunk).
+    var header: String?
   }
 
   /// The hidden-line count is what the label renders and it changes under the same
@@ -55,7 +64,7 @@ final class ExpanderWidget: DiffWidget {
   private func content(reporter: HeightReporter) -> some View {
     let gap = model.gap
     let expand = onExpand
-    return ExpanderView(hiddenCount: model.hiddenCount) { step, direction in
+    return ExpanderView(hiddenCount: model.hiddenCount, header: model.header) { step, direction in
       expand(gap, step, direction)
     }
     .onGeometryChange(for: CGSize.self) {
@@ -66,13 +75,15 @@ final class ExpanderWidget: DiffWidget {
   }
 }
 
-/// The full-width expander bar: reveal-up / reveal-all / reveal-down. Reveal-up
-/// (`.up` → `fromStart`) and reveal-down (`.down` → `fromEnd`) grow the region by
-/// the fine step; the central action reveals the whole gap. The coarse (±100) rung
-/// exists in `ExpansionState.Step` for a future affordance; the tests cover all
-/// three rungs at the model level.
+/// The full-width separator bar: reveal-up / reveal-all / reveal-down, followed by
+/// the introduced hunk's `"@@ … @@"` header. Reveal-up (`.up` → `fromStart`) and
+/// reveal-down (`.down` → `fromEnd`) grow the region by the fine step; the central
+/// action reveals the whole gap. The coarse (±100) rung exists in
+/// `ExpansionState.Step` for a future affordance; the tests cover all three rungs at
+/// the model level.
 private struct ExpanderView: View {
   let hiddenCount: Int
+  let header: String?
   let onExpand: (ExpansionState.Step, ExpansionState.Direction) -> Void
 
   private var fineCount: Int { ExpansionState.Step.fine.lineCount ?? 20 }
@@ -93,7 +104,6 @@ private struct ExpanderView: View {
       } label: {
         Label(label, systemImage: "arrow.up.and.down.text.horizontal")
           .font(.caption)
-          .frame(maxWidth: .infinity)
       }
       .help("Reveal all \(hiddenCount) hidden line\(hiddenCount == 1 ? "" : "s") (⇧E)")
       .accessibilityLabel("Reveal all \(hiddenCount) hidden lines")
@@ -106,6 +116,16 @@ private struct ExpanderView: View {
       }
       .help("Reveal \(fineCount) more lines below")
       .accessibilityLabel("Reveal \(fineCount) lines below")
+
+      if let header, !header.isEmpty {
+        Text(header)
+          .font(.caption.monospaced())
+          .lineLimit(1)
+          .truncationMode(.middle)
+          .padding(.leading, 4)
+          .accessibilityHidden(true)  // the bar's own AX label already carries it
+      }
+      Spacer(minLength: 0)
     }
     .buttonStyle(.borderless)
     .foregroundStyle(.secondary)

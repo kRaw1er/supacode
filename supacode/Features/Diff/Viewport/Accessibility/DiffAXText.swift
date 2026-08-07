@@ -34,10 +34,12 @@ enum DiffAXText {
         ? "\(comment.startLine)" : "\(comment.startLine) to \(comment.endLine)"
       let orphan = comment.orphaned ? "Orphaned — original line no longer present. " : ""
       return "\(orphan)Comment on \(sideWord) line \(range): \(comment.body)"
-    case .hunkHeader(_, let text):
-      return "Hunk header, \(text)"
-    case .expander(_, _, let hiddenCount):
-      return "Show \(hiddenCount) hidden line\(hiddenCount == 1 ? "" : "s")"
+    case .expander(_, _, let hiddenCount, let header):
+      let reveal = "Show \(hiddenCount) hidden line\(hiddenCount == 1 ? "" : "s")"
+      // The separator IS the hunk header, so one row speaks both — a VoiceOver user
+      // gets the `@@ … @@` context without a header row that no longer exists.
+      guard let header, !header.isEmpty else { return reveal }
+      return "\(reveal), hunk header, \(header)"
     }
   }
 

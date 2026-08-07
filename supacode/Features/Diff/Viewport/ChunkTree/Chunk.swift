@@ -183,7 +183,6 @@ nonisolated struct Widget: Equatable, Sendable {
 /// this enum** — Phase 2 keys one `ViewReuseQueue` per case; Phase 6 consumes it.
 nonisolated enum WidgetReuseKind: Hashable, Sendable {
   case fileHeader
-  case hunkHeader
   case expander
   case commentThread
   case placeholder
@@ -196,7 +195,10 @@ nonisolated enum WidgetReuseKind: Hashable, Sendable {
 /// while the tree stays "scalars only".
 nonisolated enum WidgetKey: Hashable, Sendable {
   case fileHeader(fileID: FileID)
-  case hunkHeader(hunkID: HunkID)
+  /// The hunk **separator** — the collapsed gap's own leaf. There is no separate
+  /// `@@ … @@` header leaf: the separator IS the header (pierre
+  /// `DiffHunksRenderer.pushSeparator`), so a gap with nothing left to hide has no
+  /// leaf at all rather than an orphan header stranded in contiguous code.
   case expander(GapKey)  // gap identity (survives re-diff)
   case commentThread(anchorID: UUID)
   case placeholder(fileID: FileID)
@@ -206,7 +208,6 @@ nonisolated enum WidgetKey: Hashable, Sendable {
   var reuseKind: WidgetReuseKind {
     switch self {
     case .fileHeader: .fileHeader
-    case .hunkHeader: .hunkHeader
     case .expander: .expander
     case .commentThread: .commentThread
     case .placeholder: .placeholder
@@ -235,8 +236,10 @@ nonisolated struct GapKey: Hashable, Sendable {
 /// scalars live here so the tree stays scalars-only.
 nonisolated enum WidgetPayload: Equatable, Sendable {
   case fileHeader(fileID: FileID)
-  case hunkHeader(anchor: Int, text: String)
-  case expander(anchor: Int, range: Range<Int>, hidden: Int)
+  /// A hunk separator: the still-hidden run plus the `"@@ … @@"` header of the hunk
+  /// it introduces (`nil` for the trailing gap and for an in-hunk collapsed run,
+  /// which introduce no hunk).
+  case expander(anchor: Int, range: Range<Int>, hidden: Int, header: String?)
   case placeholder(FilePlaceholder)
   case commentThread(anchorID: UUID)
   case noNewlineMarker(side: DiffSide)

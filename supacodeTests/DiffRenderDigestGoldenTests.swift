@@ -124,7 +124,6 @@ struct DiffRenderDigestGoldenTests {
   private func widgetLabel(_ kind: WidgetReuseKind) -> String {
     switch kind {
     case .fileHeader: "fileHeader"
-    case .hunkHeader: "hunkHeader"
     case .expander: "expander"
     case .commentThread: "commentThread"
     case .placeholder: "placeholder"

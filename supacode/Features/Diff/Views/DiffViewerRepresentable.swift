@@ -461,6 +461,10 @@ struct DiffViewerRepresentable: NSViewRepresentable {
         let revealedCountChanged = (baseCounts[gap] ?? 0) != revealedLines.count
         guard before != after || revealedCountChanged else { continue }
         let gapKey = GapKey(fileID: file.id, hunkIndex: gap)
+        // The gap's separator carries the header of the hunk it introduces (the
+        // trailing gap introduces none) — same rule the builder uses, so a spliced
+        // separator and a projected one can never disagree.
+        let header = gap < hunks.count ? hunks[gap].header : nil
         let wantsReveal = after.renderAll || after.fromStart > 0 || after.fromEnd > 0
         let wasRevealed = before.renderAll || before.fromStart > 0 || before.fromEnd > 0
         if wantsReveal {
@@ -468,7 +472,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
           // empty slice (not yet loaded) leaves the collapsed expander for now — the
           // populating `.gapSliceLoaded` re-enters here and splices it.
           if !revealedLines.isEmpty {
-            controller.applyExpansion(gap: gapKey, region: after, revealedLines: revealedLines)
+            controller.applyExpansion(gap: gapKey, region: after, revealedLines: revealedLines, header: header)
           }
         } else if wasRevealed {
           // The full expander is rebuilt from the gap's geometry, so hand over what
@@ -476,7 +480,8 @@ struct DiffViewerRepresentable: NSViewRepresentable {
           let start = geometry.gapNewLineStart(gap)
           let hidden = size == .max ? 0 : size
           controller.collapseExpansion(
-            gap: gapKey, hiddenLines: hidden, anchor: start, range: start..<(start + max(hidden, 1)))
+            gap: gapKey, hiddenLines: hidden, anchor: start, range: start..<(start + max(hidden, 1)),
+            header: header)
         }
       }
     }
