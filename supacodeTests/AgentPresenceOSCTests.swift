@@ -13,6 +13,13 @@ struct AgentPresenceOSCTests {
     #expect(signal?.eventRawValue == "busy")
   }
 
+  @Test func parsesAntigravitySignal() {
+    let signal = AgentPresenceOSC.parse(id: "antigravity", metadata: "event=busy")
+    #expect(signal?.agent == "antigravity")
+    #expect(signal?.eventRawValue == "busy")
+    #expect(SkillAgent(rawValue: signal?.agent ?? "") == .antigravity)
+  }
+
   @Test func rejectsEmptyId() {
     #expect(AgentPresenceOSC.parse(id: "", metadata: "event=busy") == nil)
   }
@@ -368,13 +375,13 @@ struct AgentPresenceOSCTests {
 
   @Test func emitNotifyShellCapturesStdinByDefault() {
     let shell = AgentPresenceOSC.emitNotifyShell(agent: .copilot)
-    #expect(shell.hasPrefix("__in=$(cat); "))
+    #expect(shell.hasPrefix("\(AgentPresenceOSC.readStdinSnippet); "))
     #expect(shell.contains("start=copilot"))
   }
 
   @Test func emitNotifyShellSkipsStdinCaptureWhenCallerOwnsIt() {
     // The notification hook reads `$__in` once itself, so the notify leg must
-    // not re-run `$(cat)` (stdin is already drained).
+    // not read stdin again (it is already drained).
     let shell = AgentPresenceOSC.emitNotifyShell(agent: .copilot, readsStdin: false)
     #expect(!shell.contains("$(cat)"))
     #expect(shell.contains("start=copilot"))

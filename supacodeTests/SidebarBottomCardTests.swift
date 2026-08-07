@@ -8,7 +8,7 @@ import Testing
 struct SidebarBottomCardTests {
   @Test func gitEnvironmentErrorWinsOverEverything() {
     // Even the highest-priority card loses to a blocked-git error.
-    let cards = SidebarBottomCardView.Slot.agent(.updatesAvailable([.claude]))
+    let cards = SidebarBottomCardView.Slot.agent(.promptInstall)
     #expect(
       SidebarBottomCardView.Slot.resolve(gitEnvironmentError: .xcodeLicenseNotAccepted, cards: cards)
         == .gitEnvironmentError(.xcodeLicenseNotAccepted)
@@ -29,79 +29,143 @@ struct SidebarBottomCardTests {
     )
   }
 
-  @Test func agentUpdatesWinOverEverything() {
-    let resolved = SidebarBottomCardView.Slot.resolve(
-      agentMode: .updatesAvailable([.claude]),
-      remoteRepositoriesBetaMode: .visible,
-      terminalPersistenceMode: .visible,
-      highlightMode: .visible,
-      onboardingMode: .visible
-    )
-    #expect(resolved == .agent(.updatesAvailable([.claude])))
-  }
-
   @Test func agentPromptWinsOverEverything() {
     let resolved = SidebarBottomCardView.Slot.resolve(
-      agentMode: .promptInstall,
-      remoteRepositoriesBetaMode: .visible,
-      terminalPersistenceMode: .visible,
-      highlightMode: .visible,
-      onboardingMode: .visible
+      cards: .init(
+        agent: .promptInstall,
+        fileExplorerBeta: .visible,
+        menuBarOnboarding: .visible,
+        remoteRepositoriesBeta: .visible,
+        terminalPersistence: .visible,
+        highlight: .visible,
+        nestedOnboarding: .visible
+      )
     )
     #expect(resolved == .agent(.promptInstall))
   }
 
+  @Test func fileExplorerBetaWinsOverOlderCards() {
+    // Newest card: it pre-empts every announcement below the agent prompt.
+    let resolved = SidebarBottomCardView.Slot.resolve(
+      cards: .init(
+        agent: .hidden,
+        fileExplorerBeta: .visible,
+        menuBarOnboarding: .visible,
+        remoteRepositoriesBeta: .visible,
+        terminalPersistence: .visible,
+        highlight: .visible,
+        nestedOnboarding: .visible
+      )
+    )
+    #expect(resolved == .fileExplorerBeta)
+  }
+
+  @Test func fileExplorerBetaTransitionTokenIsStable() {
+    #expect(SidebarBottomCardView.Slot.fileExplorerBeta.transitionToken == "fileExplorerBeta:visible")
+  }
+
+  @Test func fileExplorerBetaVisibleWhenNotDismissed() {
+    #expect(FileExplorerBetaCardView.resolveMode(dismissedAt: .distantPast) == .visible)
+  }
+
+  @Test func fileExplorerBetaHiddenWhenDismissedAfterRelevance() {
+    let afterRelevance = FileExplorerBetaCardView.cardRelevantSinceDate.addingTimeInterval(1)
+    #expect(FileExplorerBetaCardView.resolveMode(dismissedAt: afterRelevance) == .hidden)
+  }
+
+  @Test func fileExplorerBetaHiddenWhenDismissedAtRelevanceBoundary() {
+    // The relevance date must be on-or-before the ship date so a dismiss on
+    // release day stays sticky.
+    let atBoundary = FileExplorerBetaCardView.cardRelevantSinceDate
+    #expect(FileExplorerBetaCardView.resolveMode(dismissedAt: atBoundary) == .hidden)
+  }
+
+  @Test func menuBarOnboardingWinsOverOlderCards() {
+    let resolved = SidebarBottomCardView.Slot.resolve(
+      cards: .init(
+        agent: .hidden,
+        fileExplorerBeta: .hidden,
+        menuBarOnboarding: .visible,
+        remoteRepositoriesBeta: .visible,
+        terminalPersistence: .visible,
+        highlight: .visible,
+        nestedOnboarding: .visible
+      )
+    )
+    #expect(resolved == .menuBarOnboarding)
+  }
+
   @Test func remoteRepositoriesBetaWinsOverOlderOnboarding() {
     let resolved = SidebarBottomCardView.Slot.resolve(
-      agentMode: .hidden,
-      remoteRepositoriesBetaMode: .visible,
-      terminalPersistenceMode: .visible,
-      highlightMode: .visible,
-      onboardingMode: .visible
+      cards: .init(
+        agent: .hidden,
+        fileExplorerBeta: .hidden,
+        menuBarOnboarding: .hidden,
+        remoteRepositoriesBeta: .visible,
+        terminalPersistence: .visible,
+        highlight: .visible,
+        nestedOnboarding: .visible
+      )
     )
     #expect(resolved == .remoteRepositoriesBeta)
   }
 
   @Test func terminalPersistenceWinsOverHighlightAndNested() {
     let resolved = SidebarBottomCardView.Slot.resolve(
-      agentMode: .hidden,
-      remoteRepositoriesBetaMode: .hidden,
-      terminalPersistenceMode: .visible,
-      highlightMode: .visible,
-      onboardingMode: .visible
+      cards: .init(
+        agent: .hidden,
+        fileExplorerBeta: .hidden,
+        menuBarOnboarding: .hidden,
+        remoteRepositoriesBeta: .hidden,
+        terminalPersistence: .visible,
+        highlight: .visible,
+        nestedOnboarding: .visible
+      )
     )
     #expect(resolved == .terminalPersistenceOnboarding)
   }
 
   @Test func highlightWinsOverNestedOnboarding() {
     let resolved = SidebarBottomCardView.Slot.resolve(
-      agentMode: .hidden,
-      remoteRepositoriesBetaMode: .hidden,
-      terminalPersistenceMode: .hidden,
-      highlightMode: .visible,
-      onboardingMode: .visible
+      cards: .init(
+        agent: .hidden,
+        fileExplorerBeta: .hidden,
+        menuBarOnboarding: .hidden,
+        remoteRepositoriesBeta: .hidden,
+        terminalPersistence: .hidden,
+        highlight: .visible,
+        nestedOnboarding: .visible
+      )
     )
     #expect(resolved == .highlightRelevantOnboarding)
   }
 
   @Test func nestedOnboardingShowsWhenHigherPriorityDismissed() {
     let resolved = SidebarBottomCardView.Slot.resolve(
-      agentMode: .hidden,
-      remoteRepositoriesBetaMode: .hidden,
-      terminalPersistenceMode: .hidden,
-      highlightMode: .hidden,
-      onboardingMode: .visible
+      cards: .init(
+        agent: .hidden,
+        fileExplorerBeta: .hidden,
+        menuBarOnboarding: .hidden,
+        remoteRepositoriesBeta: .hidden,
+        terminalPersistence: .hidden,
+        highlight: .hidden,
+        nestedOnboarding: .visible
+      )
     )
     #expect(resolved == .nestedWorktreesOnboarding)
   }
 
   @Test func noneWhenAllHidden() {
     let resolved = SidebarBottomCardView.Slot.resolve(
-      agentMode: .hidden,
-      remoteRepositoriesBetaMode: .hidden,
-      terminalPersistenceMode: .hidden,
-      highlightMode: .hidden,
-      onboardingMode: .hidden
+      cards: .init(
+        agent: .hidden,
+        fileExplorerBeta: .hidden,
+        menuBarOnboarding: .hidden,
+        remoteRepositoriesBeta: .hidden,
+        terminalPersistence: .hidden,
+        highlight: .hidden,
+        nestedOnboarding: .hidden
+      )
     )
     #expect(resolved == SidebarBottomCardView.Slot.none)
   }
@@ -118,10 +182,36 @@ struct SidebarBottomCardTests {
     )
   }
 
-  @Test func agentVariantStableAcrossSkillAgentOrder() {
-    let lhs = SidebarBottomCardView.Slot.agent(.updatesAvailable([.claude, .codex])).transitionToken
-    let rhs = SidebarBottomCardView.Slot.agent(.updatesAvailable([.codex, .claude])).transitionToken
-    #expect(lhs == rhs)
+  @Test func menuBarOnboardingTransitionTokenIsStable() {
+    #expect(SidebarBottomCardView.Slot.menuBarOnboarding.transitionToken == "menuBarOnboarding:visible")
+  }
+
+  @Test func menuBarCardVisibleWhenMenuBarShownAndNotDismissed() {
+    #expect(
+      MenuBarOnboardingCardView.resolveMode(showsMenuBarIcon: true, dismissedAt: .distantPast) == .visible
+    )
+  }
+
+  @Test func menuBarCardHiddenWhenMenuBarNotShown() {
+    #expect(
+      MenuBarOnboardingCardView.resolveMode(showsMenuBarIcon: false, dismissedAt: .distantPast) == .hidden
+    )
+  }
+
+  @Test func menuBarCardHiddenWhenDismissedAfterRelevance() {
+    let afterRelevance = MenuBarOnboardingCardView.cardRelevantSinceDate.addingTimeInterval(1)
+    #expect(
+      MenuBarOnboardingCardView.resolveMode(showsMenuBarIcon: true, dismissedAt: afterRelevance) == .hidden
+    )
+  }
+
+  @Test func menuBarCardHiddenWhenDismissedAtRelevanceBoundary() {
+    // The relevance date must be on-or-before the ship date so a dismiss on
+    // release day stays sticky.
+    let atBoundary = MenuBarOnboardingCardView.cardRelevantSinceDate
+    #expect(
+      MenuBarOnboardingCardView.resolveMode(showsMenuBarIcon: true, dismissedAt: atBoundary) == .hidden
+    )
   }
 
   @Test func onboardingTransitionTokenUsesNestedWorktreesPrefix() {

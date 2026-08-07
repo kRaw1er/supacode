@@ -280,7 +280,10 @@ private struct SidebarPathGroupHeaderRow: View {
           .foregroundStyle(.secondary)
           .rotationEffect(.degrees(isCollapsed ? 0 : 90))
           .animation(.easeInOut(duration: 0.15), value: isCollapsed)
-          .frame(width: 12)
+          .frame(width: SidebarNestLayout.groupChevronWidth)
+          .padding(
+            .trailing, SidebarNestLayout.leadingSlotWidth - SidebarNestLayout.groupChevronWidth
+          )
           .accessibilityHidden(true)
         Text(label)
           .font(.body)
@@ -496,6 +499,9 @@ private struct SidebarItemBody: View {
           "No terminal state for worktree \(rowID) when focusing notification \(notification.surfaceID).")
         return
       }
+      // Without selecting the row first the jump lands in an off-screen worktree,
+      // marking the notification read on a pane the user never sees.
+      parentStore.send(.selectWorktree(rowID, focusTerminal: true))
       if !terminalState.focusSurface(id: notification.surfaceID) {
         notificationLogger.warning("Failed to focus surface \(notification.surfaceID) for worktree \(rowID).")
       }
@@ -582,7 +588,8 @@ private struct SidebarItemContextMenu: View {
   private var rowIsFolder: Bool { row.isFolder }
 
   /// A terminating row, or one whose repository is being removed, has nothing
-  /// left to act on beyond copying its path.
+  /// left to act on beyond copying its path; `body`'s reduced branch adds the
+  /// pin toggle back for still-creating rows.
   private var isActionable: Bool { row.lifecycle == .idle && !isRepositoryRemoving }
 
   /// Resolved off the main actor by `.resolveOpenActions`: the repository-settings
@@ -604,7 +611,20 @@ private struct SidebarItemContextMenu: View {
     let contextRows = slice.contextRows(rightClicked: row)
     let isBulkSelection = contextRows.count > 1
     if !isActionable {
+      // Mirror the actionable path's mixed-selection suppression.
+      if row.lifecycle.isPending, !isRepositoryRemoving, !(isBulkSelection && slice.hasMixedKindSelection) {
+        pinActions(contextRows: contextRows, isBulkSelection: isBulkSelection)
+      }
       SidebarCopyPathnameButton(path: row.workingDirectoryPath)
+      // Materialized rows running their setup script share the `.pending`
+      // lifecycle but are past cancelling; gate on the throwaway id.
+      if !isBulkSelection, rowID.isPending, !isRepositoryRemoving {
+        Divider()
+        Button("Cancel Creation", systemImage: "xmark.circle", role: .destructive) {
+          store.send(.cancelPendingWorktree(rowID))
+        }
+        .help("Stop creating this worktree and clean up its files and branch")
+      }
     } else if isBulkSelection, slice.hasMixedKindSelection {
       // Folder and worktree actions don't compose, so the selection has none in
       // common; say so instead of putting up an empty menu.
@@ -737,8 +757,7 @@ private struct SidebarItemContextMenu: View {
     }
     if !isBulkSelection, rowIsFolder, row.host != nil {
       // A remote folder is the remote repository; its row has no section header,
-      // so removal lives here and must drop the config (the local delete
-      // pipeline only prunes local roots and would leave the config to reappear).
+      // so surface the dedicated remote-removal flow (and its clearer copy) here.
       Button("Remove Remote Repository…", systemImage: "trash", role: .destructive) {
         store.send(.requestDeleteRepository(repositoryID))
       }
@@ -759,9 +778,10 @@ private struct SidebarItemContextMenu: View {
   @ViewBuilder
   private func pinActions(contextRows: [SidebarContextRow], isBulkSelection: Bool) -> some View {
     // Folder synthetic rows pass `isMainWorktree` by geometry but are pinnable; git "main" still
-    // aren't. Pending rows can't pin (reducer would no-op on the unresolved ID).
+    // aren't. Pending rows pin too: the reducer parks the intent on the
+    // `PendingWorktree` and lands it when the worktree materializes.
     let pinnableRows = contextRows.filter {
-      (!$0.isMainWorktree || $0.isFolder) && !$0.lifecycle.isPending
+      !$0.isMainWorktree || $0.isFolder
     }
     if !pinnableRows.isEmpty {
       let allPinned = pinnableRows.allSatisfy(\.isPinned)

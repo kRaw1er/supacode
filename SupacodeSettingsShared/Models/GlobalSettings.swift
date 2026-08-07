@@ -81,7 +81,6 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
   public var copyUntrackedOnWorktreeCreate: Bool
   public var pullRequestMergeStrategy: PullRequestMergeStrategy
   public var terminalThemeSyncEnabled: Bool
-  public var hideSingleTabBar: Bool
   public var automatedActionPolicy: AutomatedActionPolicy
   public var autoDeleteArchivedWorktreesAfterDays: AutoDeletePeriod?
   public var shortcutOverrides: [AppShortcutID: AppShortcutOverride]
@@ -92,12 +91,10 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
   public var maxPinnedToolbarButtons: Int
   public var richAgentNotificationsEnabled: Bool
   public var agentPresenceBadgesEnabled: Bool
-  /// When true, an agent integration that reports `.outdated` at launch /
-  /// scene activation is silently re-installed so a Supacode update never
-  /// strands stale hooks (e.g. legacy `Notification` / `PostToolUseFailure`
-  /// entries from earlier wire-protocol revisions).
-  public var autoUpdateAgentIntegrationsEnabled: Bool
   public var confirmQuitMode: ConfirmQuitMode
+  /// When true, user-initiated closes ask for confirmation when a terminal
+  /// surface has foreground work that Ghostty considers unsafe to interrupt.
+  public var confirmCloseSurface: Bool
   /// When true, quitting Supacode also closes every terminal tab and tears
   /// down zmx sessions, local and host-side, so nothing keeps running in the
   /// background. Default off because persistence is the headline feature.
@@ -107,6 +104,9 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
   public var remoteSessionPersistenceEnabled: Bool
   /// Where Supacode appears: Dock, menu bar, or both.
   public var appVisibility: AppVisibility
+  /// Beta: hidden terminal tabs release their renderer after a few minutes of
+  /// inactivity and reconnect when viewed. On by default.
+  public var terminalHibernationEnabled: Bool
 
   /// Valid range for `maxPinnedToolbarButtons`, enforced on decode and by the
   /// General-settings stepper.
@@ -140,7 +140,6 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     copyUntrackedOnWorktreeCreate: false,
     pullRequestMergeStrategy: .merge,
     terminalThemeSyncEnabled: true,
-    hideSingleTabBar: false,
     automatedActionPolicy: .cliOnly,
     defaultWorktreeBaseDirectoryPath: nil,
     autoDeleteArchivedWorktreesAfterDays: nil,
@@ -149,11 +148,11 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     maxPinnedToolbarButtons: 4,
     richAgentNotificationsEnabled: true,
     agentPresenceBadgesEnabled: true,
-    autoUpdateAgentIntegrationsEnabled: true,
     confirmQuitMode: .auto,
+    confirmCloseSurface: true,
     terminateSessionsOnQuit: false,
     remoteSessionPersistenceEnabled: true,
-    appVisibility: .dock
+    appVisibility: .dockAndMenuBar
   )
 
   public init(
@@ -179,7 +178,6 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     copyUntrackedOnWorktreeCreate: Bool = false,
     pullRequestMergeStrategy: PullRequestMergeStrategy = .merge,
     terminalThemeSyncEnabled: Bool = true,
-    hideSingleTabBar: Bool = false,
     automatedActionPolicy: AutomatedActionPolicy = .cliOnly,
     defaultWorktreeBaseDirectoryPath: String? = nil,
     autoDeleteArchivedWorktreesAfterDays: AutoDeletePeriod? = nil,
@@ -188,11 +186,12 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     maxPinnedToolbarButtons: Int = 4,
     richAgentNotificationsEnabled: Bool = true,
     agentPresenceBadgesEnabled: Bool = true,
-    autoUpdateAgentIntegrationsEnabled: Bool = true,
     confirmQuitMode: ConfirmQuitMode = .auto,
+    confirmCloseSurface: Bool = true,
     terminateSessionsOnQuit: Bool = false,
     remoteSessionPersistenceEnabled: Bool = true,
-    appVisibility: AppVisibility = .dock
+    appVisibility: AppVisibility = .dockAndMenuBar,
+    terminalHibernationEnabled: Bool = true
   ) {
     self.appearanceMode = appearanceMode
     self.defaultEditorID = defaultEditorID
@@ -216,7 +215,6 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     self.copyUntrackedOnWorktreeCreate = copyUntrackedOnWorktreeCreate
     self.pullRequestMergeStrategy = pullRequestMergeStrategy
     self.terminalThemeSyncEnabled = terminalThemeSyncEnabled
-    self.hideSingleTabBar = hideSingleTabBar
     self.automatedActionPolicy = automatedActionPolicy
     self.defaultWorktreeBaseDirectoryPath = defaultWorktreeBaseDirectoryPath
     self.autoDeleteArchivedWorktreesAfterDays = autoDeleteArchivedWorktreesAfterDays
@@ -225,11 +223,12 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     self.maxPinnedToolbarButtons = maxPinnedToolbarButtons
     self.richAgentNotificationsEnabled = richAgentNotificationsEnabled
     self.agentPresenceBadgesEnabled = agentPresenceBadgesEnabled
-    self.autoUpdateAgentIntegrationsEnabled = autoUpdateAgentIntegrationsEnabled
     self.confirmQuitMode = confirmQuitMode
+    self.confirmCloseSurface = confirmCloseSurface
     self.terminateSessionsOnQuit = terminateSessionsOnQuit
     self.remoteSessionPersistenceEnabled = remoteSessionPersistenceEnabled
     self.appVisibility = appVisibility
+    self.terminalHibernationEnabled = terminalHibernationEnabled
   }
 
   /// Keys for reading renamed settings fields that no longer
@@ -330,9 +329,6 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     terminalThemeSyncEnabled =
       try container.decodeIfPresent(Bool.self, forKey: .terminalThemeSyncEnabled)
       ?? false
-    hideSingleTabBar =
-      try container.decodeIfPresent(Bool.self, forKey: .hideSingleTabBar)
-      ?? Self.default.hideSingleTabBar
     // Migrate from the old Bool `allowArbitraryDeeplinkInput` to the new enum.
     if let policy = try container.decodeIfPresent(AutomatedActionPolicy.self, forKey: .automatedActionPolicy) {
       automatedActionPolicy = policy
@@ -378,9 +374,6 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     agentPresenceBadgesEnabled =
       try container.decodeIfPresent(Bool.self, forKey: .agentPresenceBadgesEnabled)
       ?? Self.default.agentPresenceBadgesEnabled
-    autoUpdateAgentIntegrationsEnabled =
-      try container.decodeIfPresent(Bool.self, forKey: .autoUpdateAgentIntegrationsEnabled)
-      ?? Self.default.autoUpdateAgentIntegrationsEnabled
     // Reject unrecognized values from corrupted or hand-edited settings files.
     // Legacy `confirmBeforeQuit: false` users explicitly opted out of the
     // dialog; `.auto` would silently re-enable it. Map `false` to `.never`
@@ -396,6 +389,9 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     } else {
       confirmQuitMode = Self.default.confirmQuitMode
     }
+    confirmCloseSurface =
+      try container.decodeIfPresent(Bool.self, forKey: .confirmCloseSurface)
+      ?? Self.default.confirmCloseSurface
     terminateSessionsOnQuit =
       try container.decodeIfPresent(Bool.self, forKey: .terminateSessionsOnQuit)
       ?? Self.default.terminateSessionsOnQuit
@@ -408,5 +404,9 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
       ((try? container.decodeIfPresent(String.self, forKey: .appVisibility)) ?? nil)
       .flatMap(AppVisibility.init(rawValue:))
       ?? Self.default.appVisibility
+    // Pre-feature files omit this key; the Beta feature falls back to the default.
+    terminalHibernationEnabled =
+      try container.decodeIfPresent(Bool.self, forKey: .terminalHibernationEnabled)
+      ?? Self.default.terminalHibernationEnabled
   }
 }

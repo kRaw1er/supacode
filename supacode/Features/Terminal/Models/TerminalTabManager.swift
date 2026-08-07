@@ -12,11 +12,24 @@ final class TerminalTabManager {
       editingTabID = nil
     }
   }
-  var selectedTabId: TerminalTabID?
+  var selectedTabId: TerminalTabID? {
+    // Single choke point for the ~nine selection write sites: the owning state
+    // recomputes tab visibility (and its hibernation timers) once per change.
+    didSet {
+      guard oldValue != selectedTabId else { return }
+      onSelectedTabChanged?()
+    }
+  }
   private(set) var editingTabID: TerminalTabID?
+
+  /// Fires whenever `selectedTabId` changes. Set by `WorktreeTerminalState` so a
+  /// selection change drives `refreshTabVisibility()` from one place.
+  @ObservationIgnored var onSelectedTabChanged: (() -> Void)?
 
   private static let logger = SupaLogger("TabManager")
 
+  /// `selecting: false` appends a background tab and leaves the selection alone.
+  /// Keyboard focus is the caller's business; see `TabActivation`.
   func createTab(
     title: String,
     customTitle: String? = nil,
@@ -25,7 +38,8 @@ final class TerminalTabManager {
     tintColor: RepositoryColor? = nil,
     isBlockingScript: Bool = false,
     kind: TerminalTabItem.Kind = .terminal,
-    id: UUID? = nil
+    id: UUID? = nil,
+    selecting: Bool = true
   ) -> TerminalTabID {
     let tabID: TerminalTabID
     if let id {
@@ -52,14 +66,20 @@ final class TerminalTabManager {
       isBlockingScript: isBlockingScript,
       kind: kind,
     )
-    if let selectedTabId,
+    // Background tabs append: inserting after the unchanged selection would land a
+    // run of them in reverse order.
+    if selecting, let selectedTabId,
       let selectedIndex = tabs.firstIndex(where: { $0.id == selectedTabId })
     {
       tabs.insert(tab, at: selectedIndex + 1)
     } else {
       tabs.append(tab)
     }
-    selectedTabId = tab.id
+    // Still select when nothing was selected: "don't move the selection" cannot
+    // mean leaving the worktree with no visible tab at all.
+    if selecting || selectedTabId == nil {
+      selectedTabId = tab.id
+    }
     return tab.id
   }
 
@@ -114,20 +134,12 @@ final class TerminalTabManager {
   }
 
   /// Mark a blocking-script tab as completed. Title / icon / lock survive so
-  /// the row reads as "this WAS an Archive Script run"; tint + dirty clear and
-  /// the completed flag flips so views can show the freeze indicator.
+  /// the row reads as "this WAS an Archive Script run"; tint clears and the
+  /// completed flag flips so views can show the freeze indicator.
   func markBlockingScriptCompleted(_ id: TerminalTabID) {
     guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
     tabs[index].tintColor = nil
-    tabs[index].isDirty = false
     tabs[index].isBlockingScriptCompleted = true
-  }
-
-  func updateDirty(_ id: TerminalTabID, isDirty: Bool) {
-    guard let index = tabs.firstIndex(where: { $0.id == id }),
-      tabs[index].isDirty != isDirty
-    else { return }
-    tabs[index].isDirty = isDirty
   }
 
   func reorderTabs(_ orderedIds: [TerminalTabID]) {
@@ -136,6 +148,26 @@ final class TerminalTabManager {
     guard existingIds == incomingIds else { return }
     let map = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, $0) })
     tabs = orderedIds.compactMap { map[$0] }
+  }
+
+  /// Moves the tab by `amount`, wrapping cyclically at the ends per Ghostty's
+  /// `move_tab` contract. Leaves the selection untouched. Returns whether the
+  /// order actually changed.
+  @discardableResult
+  func moveTab(_ id: TerminalTabID, by amount: Int) -> Bool {
+    guard amount != 0, tabs.count > 1,
+      let current = tabs.firstIndex(where: { $0.id == id })
+    else { return false }
+    let count = tabs.count
+    // Reduce first: `amount` is Ghostty's unrestricted `ssize_t`, so adding a
+    // near-`Int.max` offset straight to `current` would overflow and trap.
+    let destination = (current + amount % count + count) % count
+    guard destination != current else { return false }
+    var moved = tabs
+    let item = moved.remove(at: current)
+    moved.insert(item, at: destination)
+    tabs = moved
+    return true
   }
 
   func closeTab(_ id: TerminalTabID) {

@@ -1,15 +1,19 @@
 import ComposableArchitecture
 import Sharing
+import SupacodeSettingsFeature
+import SupacodeSettingsShared
 import SwiftUI
 
 /// Mutually-exclusive host for the pinned sidebar bottom card. Priority order:
 /// 1. Coding-agent updates available / initial install prompt
 ///    (`CodingAgentsSidebarCardView`).
-/// 2. Remote repositories Beta announcement (`RemoteRepositoriesBetaCardView`).
-/// 3. Terminal persistence onboarding prompt (`TerminalPersistenceOnboardingCardView`).
-/// 4. Highlight Relevant onboarding prompt (`HighlightRelevantOnboardingCardView`).
-/// 5. Nested-worktrees onboarding prompt (`NestedWorktreesOnboardingCardView`).
-/// 6. Nothing.
+/// 2. File explorer Beta announcement (`FileExplorerBetaCardView`).
+/// 3. Menu bar visibility announcement (`MenuBarOnboardingCardView`).
+/// 4. Remote repositories Beta announcement (`RemoteRepositoriesBetaCardView`).
+/// 5. Terminal persistence onboarding prompt (`TerminalPersistenceOnboardingCardView`).
+/// 6. Highlight Relevant onboarding prompt (`HighlightRelevantOnboardingCardView`).
+/// 7. Nested-worktrees onboarding prompt (`NestedWorktreesOnboardingCardView`).
+/// 8. Nothing.
 ///
 /// Owns the `@Shared(.appStorage)` reads as stored properties so SwiftUI
 /// observes them at this layer and re-renders when the user dismisses a
@@ -35,16 +39,27 @@ struct SidebarBottomCardView: View {
   private var terminalPersistenceDismissedAt: Date = .distantPast
   @Shared(.appStorage("remoteRepositoriesBetaOnboardingDismissedAt"))
   private var remoteRepositoriesBetaDismissedAt: Date = .distantPast
+  @Shared(.appStorage("menuBarOnboardingDismissedAt"))
+  private var menuBarOnboardingDismissedAt: Date = .distantPast
+  @Shared(.appStorage("fileExplorerBetaOnboardingDismissedAt"))
+  private var fileExplorerBetaDismissedAt: Date = .distantPast
 
   var body: some View {
     let agentMode = CodingAgentsSidebarCardView.resolveMode(
       for: store, dismissedAt: agentDismissedAt
+    )
+    let menuBarOnboardingMode = MenuBarOnboardingCardView.resolveMode(
+      showsMenuBarIcon: store.settings.appVisibility.showsMenuBarIcon,
+      dismissedAt: menuBarOnboardingDismissedAt
     )
     let terminalPersistenceMode = TerminalPersistenceOnboardingCardView.resolveMode(
       dismissedAt: terminalPersistenceDismissedAt
     )
     let remoteRepositoriesBetaMode = RemoteRepositoriesBetaCardView.resolveMode(
       dismissedAt: remoteRepositoriesBetaDismissedAt
+    )
+    let fileExplorerBetaMode = FileExplorerBetaCardView.resolveMode(
+      dismissedAt: fileExplorerBetaDismissedAt
     )
     let highlightMode = HighlightRelevantOnboardingCardView.resolveMode(
       groupPinnedRows: groupPinnedRows,
@@ -58,11 +73,15 @@ struct SidebarBottomCardView: View {
     let resolved = Slot.resolve(
       gitEnvironmentError: store.repositories.gitEnvironmentError,
       cards: Slot.resolve(
-        agentMode: agentMode,
-        remoteRepositoriesBetaMode: remoteRepositoriesBetaMode,
-        terminalPersistenceMode: terminalPersistenceMode,
-        highlightMode: highlightMode,
-        onboardingMode: onboardingMode
+        cards: Slot.CardModes(
+          agent: agentMode,
+          fileExplorerBeta: fileExplorerBetaMode,
+          menuBarOnboarding: menuBarOnboardingMode,
+          remoteRepositoriesBeta: remoteRepositoriesBetaMode,
+          terminalPersistence: terminalPersistenceMode,
+          highlight: highlightMode,
+          nestedOnboarding: onboardingMode
+        )
       )
     )
     Group {
@@ -74,6 +93,12 @@ struct SidebarBottomCardView: View {
           .transition(Slot.transition)
       case .agent(let mode):
         CodingAgentsSidebarCardView(store: store, mode: mode)
+          .transition(Slot.transition)
+      case .fileExplorerBeta:
+        FileExplorerBetaCardView()
+          .transition(Slot.transition)
+      case .menuBarOnboarding:
+        MenuBarOnboardingCardView()
           .transition(Slot.transition)
       case .remoteRepositoriesBeta:
         RemoteRepositoriesBetaCardView()
@@ -104,12 +129,26 @@ struct SidebarBottomCardView: View {
     case none
     case gitEnvironmentError(GitEnvironmentError)
     case agent(CodingAgentsSidebarCardView.Mode)
+    case fileExplorerBeta
+    case menuBarOnboarding
     case remoteRepositoriesBeta
     case terminalPersistenceOnboarding
     case highlightRelevantOnboarding
     case nestedWorktreesOnboarding
 
     static let transition: AnyTransition = .move(edge: .bottom).combined(with: .opacity)
+
+    /// Per-card visibility modes feeding priority resolution, grouped so the
+    /// resolver stays under the parameter-count limit as cards are added.
+    struct CardModes: Equatable {
+      var agent: CodingAgentsSidebarCardView.Mode
+      var fileExplorerBeta: FileExplorerBetaCardView.Mode
+      var menuBarOnboarding: MenuBarOnboardingCardView.Mode
+      var remoteRepositoriesBeta: RemoteRepositoriesBetaCardView.Mode
+      var terminalPersistence: TerminalPersistenceOnboardingCardView.Mode
+      var highlight: HighlightRelevantOnboardingCardView.Mode
+      var nestedOnboarding: NestedWorktreesOnboardingCardView.Mode
+    }
 
     /// Layer a blocked-git error over the resolved card: it makes the app
     /// largely unusable, so it pre-empts every onboarding / announcement card.
@@ -118,23 +157,19 @@ struct SidebarBottomCardView: View {
       return cards
     }
 
-    static func resolve(
-      agentMode: CodingAgentsSidebarCardView.Mode,
-      remoteRepositoriesBetaMode: RemoteRepositoriesBetaCardView.Mode,
-      terminalPersistenceMode: TerminalPersistenceOnboardingCardView.Mode,
-      highlightMode: HighlightRelevantOnboardingCardView.Mode,
-      onboardingMode: NestedWorktreesOnboardingCardView.Mode
-    ) -> Slot {
-      switch agentMode {
-      case .updatesAvailable, .promptInstall: return .agent(agentMode)
+    static func resolve(cards: CardModes) -> Slot {
+      switch cards.agent {
+      case .promptInstall: return .agent(cards.agent)
       case .hidden: break
       }
-      // Newest card wins. `remoteRepositoriesBeta` is the most recent and
-      // pre-empts the older prompts; insert future cards at the top here.
-      if remoteRepositoriesBetaMode == .visible { return .remoteRepositoriesBeta }
-      if terminalPersistenceMode == .visible { return .terminalPersistenceOnboarding }
-      if highlightMode == .visible { return .highlightRelevantOnboarding }
-      return onboardingMode == .visible ? .nestedWorktreesOnboarding : .none
+      // Newest card wins. `fileExplorerBeta` is the most recent and pre-empts
+      // the older prompts; insert future cards at the top here.
+      if cards.fileExplorerBeta == .visible { return .fileExplorerBeta }
+      if cards.menuBarOnboarding == .visible { return .menuBarOnboarding }
+      if cards.remoteRepositoriesBeta == .visible { return .remoteRepositoriesBeta }
+      if cards.terminalPersistence == .visible { return .terminalPersistenceOnboarding }
+      if cards.highlight == .visible { return .highlightRelevantOnboarding }
+      return cards.nestedOnboarding == .visible ? .nestedWorktreesOnboarding : .none
     }
 
     /// Hashable identity used by `.animation(_:value:)`. Same-variant state
@@ -146,10 +181,10 @@ struct SidebarBottomCardView: View {
       switch self {
       case .none: "none"
       case .gitEnvironmentError(let error): "gitEnvironmentError:" + String(describing: error)
-      case .agent(.updatesAvailable(let agents)):
-        "agent:updates:" + agents.map { String(describing: $0) }.sorted().joined(separator: ",")
       case .agent(.promptInstall): "agent:promptInstall"
       case .agent(.hidden): "agent:hidden"
+      case .fileExplorerBeta: "fileExplorerBeta:visible"
+      case .menuBarOnboarding: "menuBarOnboarding:visible"
       case .remoteRepositoriesBeta: "remoteRepositoriesBeta:visible"
       case .terminalPersistenceOnboarding: "terminalPersistence:visible"
       case .highlightRelevantOnboarding: "highlightRelevant:visible"

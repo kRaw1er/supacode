@@ -130,6 +130,29 @@ struct AppShortcutsTests {
     }
   }
 
+  @Test func tabSelectionShortcutDisplaysFallBackToDefaults() {
+    expectNoDifference(
+      AppShortcuts.tabSelectionShortcutDisplays(overrides: [:]),
+      ["⌘1", "⌘2", "⌘3", "⌘4", "⌘5", "⌘6", "⌘7", "⌘8", "⌘9"]
+    )
+  }
+
+  @Test func tabSelectionShortcutDisplaysFollowOverride() {
+    let displays = AppShortcuts.tabSelectionShortcutDisplays(
+      overrides: [.selectTab(1): AppShortcutOverride(keyCode: UInt16(kVK_ANSI_1), modifiers: .control)]
+    )
+
+    expectNoDifference(displays[0], "⌃1")
+    expectNoDifference(displays[1], "⌘2")
+  }
+
+  @Test func tabSelectionShortcutDisplaysAreNilWhenDisabled() {
+    let displays = AppShortcuts.tabSelectionShortcutDisplays(overrides: [.selectTab(3): .disabled])
+
+    #expect(displays[2] == nil)
+    expectNoDifference(displays[3], "⌘4")
+  }
+
   @Test func tabSelectionGhosttyKeybindArgumentsMatchExpected() {
     expectNoDifference(
       AppShortcuts.tabSelectionGhosttyKeybindArguments(from: [:]),
@@ -224,6 +247,22 @@ struct AppShortcutsTests {
     #expect(AppShortcuts.selectWorktree1.displayName == "Select Worktree 1")
     #expect(AppShortcuts.selectWorktree9.displayName == "Select Worktree 9")
     #expect(AppShortcutID.selectWorktree(0).displayName == "Select Worktree 10")
+    #expect(AppShortcuts.renameTab.displayName == "Rename Tab")
+  }
+
+  @Test func renameTabKeyRoundTrips() {
+    let decoded = AppShortcutID(codingKey: PlainCodingKey("renameTab"))
+    #expect(decoded == .renameTab)
+    #expect(decoded?.codingKey.stringValue == "renameTab")
+  }
+
+  @Test func renameTabShortcutHasNoDefaultConflict() {
+    #expect(AppShortcuts.conflictWarnings(from: [:])[.renameTab] == nil)
+  }
+
+  @Test func renameTabShortcutUnbindsInGhostty() {
+    #expect(AppShortcuts.renameTab.ghosttyUnbindArgument == "--keybind=ctrl+shift+r=unbind")
+    #expect(AppShortcuts.ghosttyCLIKeybindArguments.contains(AppShortcuts.renameTab.ghosttyUnbindArgument))
   }
 
   // MARK: - Effective shortcut resolution.
@@ -330,7 +369,7 @@ struct AppShortcutsTests {
 
   @Test func worktreeSelectionShortcutDisplayReturnsNilForOutOfRange() {
     #expect(AppShortcuts.worktreeSelectionShortcutDisplay(atSlot: -1, overrides: [:]) == nil)
-    #expect(AppShortcuts.worktreeSelectionShortcutDisplay(atSlot: 10, overrides: [:]) == nil)
+    #expect(AppShortcuts.worktreeSelectionShortcutDisplay(atSlot: 9, overrides: [:]) == nil)
   }
 
   @Test func worktreeSelectionShortcutDisplayReturnsNilForDisabledSlot() {
@@ -410,7 +449,7 @@ struct AppShortcutsTests {
   // MARK: - Inspector pane shortcuts.
 
   @Test func inspectorShortcutKeysRoundTrip() {
-    for id in [AppShortcutID.togglePullRequestInspector, .toggleNotificationsInspector] {
+    for id in [AppShortcutID.togglePullRequestInspector, .toggleFilesInspector, .toggleNotificationsInspector] {
       let decoded = AppShortcutID(codingKey: PlainCodingKey(id.codingKey.stringValue))
       #expect(decoded == id)
     }
@@ -419,14 +458,17 @@ struct AppShortcutsTests {
   @Test func inspectorShortcutsHaveNoDefaultConflict() {
     let warnings = AppShortcuts.conflictWarnings(from: [:])
     #expect(warnings[.togglePullRequestInspector] == nil)
+    #expect(warnings[.toggleFilesInspector] == nil)
     #expect(warnings[.toggleNotificationsInspector] == nil)
   }
 
   @Test func inspectorShortcutsUnbindInGhostty() {
     #expect(AppShortcuts.togglePullRequestInspector.ghosttyUnbindArgument == "--keybind=alt+super+g=unbind")
+    #expect(AppShortcuts.toggleFilesInspector.ghosttyUnbindArgument == "--keybind=alt+super+f=unbind")
     #expect(AppShortcuts.toggleNotificationsInspector.ghosttyUnbindArgument == "--keybind=alt+super+n=unbind")
     let arguments = AppShortcuts.ghosttyCLIKeybindArguments
     #expect(arguments.contains("--keybind=alt+super+g=unbind"))
+    #expect(arguments.contains("--keybind=alt+super+f=unbind"))
     #expect(arguments.contains("--keybind=alt+super+n=unbind"))
   }
 }

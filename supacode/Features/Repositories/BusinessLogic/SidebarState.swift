@@ -77,6 +77,17 @@ nonisolated struct SidebarState: Equatable, Sendable, Codable {
     case archived
   }
 
+  /// Curation state of a worktree row, flattened for external consumers.
+  /// The raw values are the `supacode worktree` wire and stdout contract.
+  nonisolated enum WorktreeStatus: String, Equatable, Sendable, CaseIterable {
+    case main
+    case pinned
+    case unpinned
+    case archived
+
+    var isArchived: Bool { self == .archived }
+  }
+
   nonisolated struct Section: Equatable, Sendable, Codable {
     var collapsed: Bool
     var buckets: OrderedDictionary<BucketID, Bucket>
@@ -283,6 +294,26 @@ nonisolated extension SidebarState {
     }
     return nil
   }
+
+  /// Whether `worktreeID` sits in the archived bucket. Not a proxy for "on
+  /// screen": collapsed or failed repositories render no rows, and an archived
+  /// worktree re-enters the sidebar while its delete script runs.
+  func isArchived(_ worktreeID: Worktree.ID, in repositoryID: Repository.ID) -> Bool {
+    sections[repositoryID]?.buckets[.archived]?.items[worktreeID] != nil
+  }
+
+  /// Flattens the bucket layout into the four states the CLI reports. Archiving
+  /// wins over `isMain` (the default workspace can be archived) and an unbucketed
+  /// worktree reads as `unpinned` (the bucket the sidebar renders it into).
+  func status(
+    of worktreeID: Worktree.ID,
+    in repositoryID: Repository.ID,
+    isMain: Bool
+  ) -> WorktreeStatus {
+    guard !isArchived(worktreeID, in: repositoryID) else { return .archived }
+    guard !isMain else { return .main }
+    return currentBucket(of: worktreeID, in: repositoryID) == .pinned ? .pinned : .unpinned
+  }
 }
 
 // MARK: - Mutations.
@@ -353,6 +384,35 @@ nonisolated extension SidebarState {
     bucket.items[worktreeID] = item
     section.buckets[destinationBucket] = bucket
     sections[repositoryID] = section
+  }
+
+  /// Pin `worktreeID`: collapse any pre-existing bucket placement into a single
+  /// `.pinned` entry at the top, carrying the Item forward so user-set
+  /// `title` / `color` survive, and clearing `archivedAt`. See `removeAnywhere`
+  /// for the double-bucket recovery rules.
+  mutating func pin(worktree worktreeID: Worktree.ID, in repositoryID: Repository.ID) {
+    var carried =
+      removeAnywhere(
+        worktree: worktreeID,
+        in: repositoryID,
+        preferring: [.unpinned, .pinned, .archived]
+      ) ?? .init()
+    carried.archivedAt = nil
+    insert(worktree: worktreeID, in: repositoryID, bucket: .pinned, item: carried, position: 0)
+  }
+
+  /// Unpin `worktreeID`: the mirror of `pin`, collapsing into a single
+  /// `.unpinned` entry at the top. Prefers `.pinned` so a corrupted
+  /// double-bucket pre-state surfaces the live pinned row's payload.
+  mutating func unpin(worktree worktreeID: Worktree.ID, in repositoryID: Repository.ID) {
+    var carried =
+      removeAnywhere(
+        worktree: worktreeID,
+        in: repositoryID,
+        preferring: [.pinned, .unpinned, .archived]
+      ) ?? .init()
+    carried.archivedAt = nil
+    insert(worktree: worktreeID, in: repositoryID, bucket: .unpinned, item: carried, position: 0)
   }
 
   /// Overwrite a row's user-supplied title / color, falling back to `.unpinned` when the row

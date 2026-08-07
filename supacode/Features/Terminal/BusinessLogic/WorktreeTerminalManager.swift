@@ -13,6 +13,7 @@ private let terminalLogger = SupaLogger("Terminal")
 @Observable
 final class WorktreeTerminalManager {
   private let runtime: GhosttyRuntime
+  @ObservationIgnored private let surfaceBindingActionPerformer: ((GhosttySurfaceView, String) -> Void)?
   private(set) var socketServer: AgentHookSocketServer?
   private var states: [Worktree.ID: WorktreeTerminalState] = [:]
   @ObservationIgnored
@@ -51,6 +52,9 @@ final class WorktreeTerminalManager {
   private var pendingIdleHookEvents: [IdleDebounceKey: Task<Void, Never>] = [:]
   @ObservationIgnored
   private let hookEventSleep: @Sendable (Duration) async throws -> Void
+  /// Injected clock, handed to each `WorktreeTerminalState` so its hibernation
+  /// grace timers run on the same time source as the manager.
+  @ObservationIgnored private let clock: any Clock<Duration>
   @ObservationIgnored @Dependency(\.zmxClient) private var zmxClient
   @ObservationIgnored @Dependency(\.analyticsClient) private var analyticsClient
   /// Serialized off-main writer that merges per-worktree layout changes into
@@ -148,12 +152,15 @@ final class WorktreeTerminalManager {
     socketServer: AgentHookSocketServer? = nil,
     clock: C = ContinuousClock(),
     eventBufferCap: Int = WorktreeTerminalManager.defaultEventBufferCap,
+    surfaceBindingActionPerformer: ((GhosttySurfaceView, String) -> Void)? = nil
   ) {
     self.eventBufferCap = eventBufferCap
     self.runtime = runtime
+    self.surfaceBindingActionPerformer = surfaceBindingActionPerformer
     self.focusedSurfaceBackground = runtime.backgroundColor()
     self.hookEventSleep = { duration in try await clock.sleep(for: duration) }
     self.layoutDebounceSleep = { duration in try await clock.sleep(for: duration) }
+    self.clock = clock
     @Dependency(\.settingsFileStorage) var settingsFileStorage
     self.layoutsWriter = LayoutsIncrementalWriter(storage: settingsFileStorage)
     // A theme reload changes the fallback and every non-OSC surface background.
@@ -284,38 +291,52 @@ final class WorktreeTerminalManager {
     handleManagementCommand(command)
   }
 
+  // swiftlint:disable:next function_parameter_count
+  private func scheduleTabCreation(
+    in worktree: Worktree,
+    runSetupScriptIfNew: Bool,
+    input: String?,
+    tabID: UUID?,
+    customTitle: String?,
+    focusing: Bool
+  ) {
+    Task {
+      createTabAsync(
+        in: worktree,
+        runSetupScriptIfNew: runSetupScriptIfNew,
+        initialInput: input,
+        tabID: tabID,
+        customTitle: customTitle,
+        focusing: focusing
+      )
+    }
+  }
+
   // swiftlint:disable:next cyclomatic_complexity
   private func handleTabCommand(_ command: TerminalClient.Command) -> Bool {
     if handleReviewTabCommand(command) { return true }
     switch command {
-    case .createTab(let worktree, let runSetupScriptIfNew, let id, let title):
-      Task {
-        createTabAsync(
-          in: worktree,
-          runSetupScriptIfNew: runSetupScriptIfNew,
-          tabID: id,
-          customTitle: title
-        )
-      }
-    case .createTabWithInput(let worktree, let input, let runSetupScriptIfNew, let id, let title):
-      Task {
-        createTabAsync(
-          in: worktree,
-          runSetupScriptIfNew: runSetupScriptIfNew,
-          initialInput: input,
-          tabID: id,
-          customTitle: title
-        )
-      }
+    case .createTab(let worktree, let runSetupScriptIfNew, let id, let title, let focusing):
+      scheduleTabCreation(
+        in: worktree, runSetupScriptIfNew: runSetupScriptIfNew, input: nil,
+        tabID: id, customTitle: title, focusing: focusing)
+    case .createTabWithInput(
+      let worktree, let input, let runSetupScriptIfNew, let id, let title, let focusing
+    ):
+      scheduleTabCreation(
+        in: worktree, runSetupScriptIfNew: runSetupScriptIfNew, input: input,
+        tabID: id, customTitle: title, focusing: focusing)
     case .ensureInitialTab(let worktree, let runSetupScriptIfNew, let focusing):
       let state = state(for: worktree) { runSetupScriptIfNew }
       state.ensureInitialTab(focusing: focusing)
-    case .stopRunScript(let worktree):
-      stopBlockingScripts(in: worktree) { $0.stopRunScripts() }
-    case .stopScript(let worktree, let definitionID):
-      stopBlockingScripts(in: worktree) { $0.stopScript(definitionID: definitionID) }
-    case .runBlockingScript(let worktree, let kind, let script):
-      _ = state(for: worktree).runBlockingScript(kind: kind, script)
+    case .stopRunScript(let worktree, let focusing):
+      stopBlockingScripts(in: worktree) { $0.stopRunScripts(focusing: focusing) }
+    case .stopScript(let worktree, let definitionID, let focusing):
+      stopBlockingScripts(in: worktree) {
+        $0.stopScript(definitionID: definitionID, focusing: focusing)
+      }
+    case .runBlockingScript(let worktree, let kind, let script, let focusing):
+      _ = state(for: worktree).runBlockingScript(kind: kind, script, focusing: focusing)
     case .closeFocusedTab(let worktree):
       _ = closeFocusedTab(in: worktree)
     case .closeFocusedSurface(let worktree):
@@ -333,6 +354,9 @@ final class WorktreeTerminalManager {
       stateIfExists(for: worktree.id)?.selectTabAtIndex(index)
     case .focusSurface(let worktree, let tabID, let surfaceID, let input):
       let terminal = state(for: worktree)
+      // Wake explicitly for parity with the split and destroy handlers; selectTab
+      // would wake a dormant tab anyway.
+      terminal.wakeTab(tabID)
       terminal.selectTab(tabID)
       guard terminal.focusSurface(id: surfaceID) else {
         terminalLogger.warning("focusSurface: surface \(surfaceID) not found in worktree \(worktree.id).")
@@ -341,16 +365,25 @@ final class WorktreeTerminalManager {
       if let input, !input.isEmpty {
         terminal.focusAndInsertText(input + "\r")
       }
-    case .splitSurface(let worktree, let tabID, let surfaceID, let direction, let input, let id):
+    case .splitSurface(
+      let worktree, let tabID, let surfaceID, let direction, let input, let id, let focusing
+    ):
       let terminal = state(for: worktree)
-      terminal.selectTab(tabID)
+      // Wake explicitly for parity with the focus and destroy handlers; selectTab
+      // would wake a dormant tab anyway. The wake runs even when not focusing,
+      // since splitting a dormant tab would otherwise land in a frozen layout.
+      terminal.wakeTab(tabID)
+      if focusing {
+        terminal.selectTab(tabID)
+      }
       let ghosttyDirection: GhosttySplitAction.NewDirection = direction == .vertical ? .down : .right
       let resolvedInput = BlockingScriptRunner.makeCommandInput(script: input ?? "")
       let splitSucceeded = terminal.performSplitAction(
         .newSplit(direction: ghosttyDirection),
         for: surfaceID,
         newSurfaceID: id,
-        initialInput: resolvedInput
+        initialInput: resolvedInput,
+        focusing: focusing
       )
       guard splitSucceeded else {
         terminalLogger.warning("splitSurface: failed for surface \(surfaceID) in worktree \(worktree.id).")
@@ -362,7 +395,7 @@ final class WorktreeTerminalManager {
         }
         break
       }
-    case .destroyTab(let worktree, let tabID):
+    case .destroyTab(let worktree, let tabID, let focusing):
       let terminal = state(for: worktree)
       guard terminal.tabManager.tabs.contains(where: { $0.id == tabID }) else {
         terminalLogger.warning("destroyTab: tab \(tabID.rawValue) not found in worktree \(worktree.id).")
@@ -370,10 +403,16 @@ final class WorktreeTerminalManager {
         emit(.tabRemoved(worktreeID: worktree.id, tabID: tabID))
         break
       }
-      terminal.closeTab(tabID)
-    case .destroySurface(let worktree, let tabID, let surfaceID):
+      terminal.closeTab(tabID, focusing: focusing)
+    case .destroySurface(let worktree, let tabID, let surfaceID, let focusing):
       let terminal = state(for: worktree)
-      terminal.selectTab(tabID)
+      // Wake explicitly for parity with the focus and split handlers. The wake
+      // runs even when not focusing, since closing inside a dormant tab would
+      // otherwise operate on a frozen layout.
+      terminal.wakeTab(tabID)
+      if focusing {
+        terminal.selectTab(tabID)
+      }
       if !terminal.closeSurface(id: surfaceID) {
         terminalLogger.warning("destroySurface: surface \(surfaceID) not found in worktree \(worktree.id).")
         // Don't synthesize a `surfacesClosed` here: it drives global presence
@@ -426,8 +465,8 @@ final class WorktreeTerminalManager {
       .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .performBindingAction,
       .performBindingActionOnSurface, .selectTab, .selectTabAtIndex, .focusSurface, .splitSurface,
       .destroyTab, .destroySurface, .renameTab, .setImagePasteAgents, .prune, .setNotificationsEnabled,
-      .enforceNotificationRetentionLimit, .setSelectedWorktreeID, .refreshTabBarVisibility, .beginTabRename,
-      .openDiffTab, .insertTextIntoFocusedSurface:
+      .enforceNotificationRetentionLimit, .setSelectedWorktreeID, .beginTabRename,
+      .setTerminalHibernationEnabled, .openDiffTab, .insertTextIntoFocusedSurface:
       return false
     }
     return true
@@ -445,8 +484,8 @@ final class WorktreeTerminalManager {
       .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .startSearch, .searchSelection,
       .navigateSearchNext, .navigateSearchPrevious, .endSearch, .selectTab, .selectTabAtIndex,
       .focusSurface, .splitSurface, .destroyTab, .destroySurface, .renameTab, .prune, .setNotificationsEnabled,
-      .enforceNotificationRetentionLimit, .setSelectedWorktreeID, .refreshTabBarVisibility, .beginTabRename,
-      .openDiffTab, .insertTextIntoFocusedSurface:
+      .enforceNotificationRetentionLimit, .setSelectedWorktreeID, .beginTabRename,
+      .setTerminalHibernationEnabled, .openDiffTab, .insertTextIntoFocusedSurface:
       return false
     }
     return true
@@ -466,9 +505,9 @@ final class WorktreeTerminalManager {
       setNotificationsEnabled(enabled)
     case .enforceNotificationRetentionLimit:
       enforceNotificationRetentionLimit()
-    case .refreshTabBarVisibility:
+    case .setTerminalHibernationEnabled(let enabled):
       for state in states.values {
-        state.refreshTabBarVisibility()
+        state.applyHibernationEnabled(enabled)
       }
     case .setSelectedWorktreeID(let id):
       guard id != selectedWorktreeID else { return }
@@ -476,10 +515,17 @@ final class WorktreeTerminalManager {
         previousState.rememberFocusedZoom()
         previousState.setAllSurfacesOccluded()
         previousState.forgetLastEmittedFocus()
+        // Deselecting schedules grace timers for every tab of the old worktree.
+        previousState.setWorktreeSelected(false)
         lastEmittedCoalescable.removeValue(forKey: .focus(previousID))
         markLayoutDirty(worktreeID: previousID)
       }
       selectedWorktreeID = id
+      // Selecting cancels the grace timer of the worktree's selected tab; its
+      // other tabs stay scheduled.
+      if let id, let newState = states[id] {
+        newState.setWorktreeSelected(true)
+      }
       // A sidebar click never hands AppKit focus to the terminal, so no focus
       // event fires; refresh here or the window keeps the previous tint.
       refreshFocusedSurfaceBackground()
@@ -542,6 +588,33 @@ final class WorktreeTerminalManager {
     return stream
   }
 
+  /// Wires the presence / hibernation callbacks and seeds the visibility flag.
+  private func configurePresenceCallbacks(for state: WorktreeTerminalState, worktree: Worktree) {
+    // Seed the visibility flag so a background worktree's tabs start their grace
+    // timers, and freeze live agent records into the layout at hibernation time.
+    state.setWorktreeSelected(selectedWorktreeID == worktree.id)
+    state.hibernationAgentsBySurface = { [weak self] in self?.currentAgentsBySurface?() ?? [:] }
+    state.isSelected = { [weak self] in
+      self?.selectedWorktreeID == worktree.id
+    }
+    state.onSurfacesClosed = { [weak self] ids in
+      self?.emit(.surfacesClosed(worktreeID: worktree.id, ids))
+      // The last surface closing leaves no focus target, so no focus event
+      // follows; fall back to the theme background here.
+      self?.refreshFocusedSurfaceBackground()
+    }
+    // Hibernation keeps the zmx sessions and presence records; only the pending
+    // idle-debounce tasks for the torn-down surfaces need cancelling.
+    state.onSurfacesHibernated = { [weak self] ids in self?.cancelPendingIdleHooks(forSurfaceIDs: ids) }
+    // A hibernate / wake leaves the surface set unchanged, so re-emit the row
+    // projection here or the sidebar sleep marker never tracks `allTabsDormant`.
+    state.onDormancyChanged = { [weak self] in self?.emitProjection(for: worktree.id) }
+    // OSC-sourced presence events go through the existing idle-debounce funnel.
+    state.onAgentHookEvent = { [weak self] event in
+      self?.dispatchHookEvent(event)
+    }
+  }
+
   func state(
     for worktree: Worktree,
     runSetupScriptIfNew: () -> Bool = { false }
@@ -551,7 +624,7 @@ final class WorktreeTerminalManager {
         existing.enableSetupScriptIfNeeded()
       }
       // Reload snapshot if the state has no tabs (e.g., setting was just enabled).
-      // If `hasAttemptedInitialTab` is sticky-true (closeAllTabs path), the snapshot
+      // If `hasAttemptedInitialTab` is sticky-true (every tab was closed), the snapshot
       // stays staged but ensureInitialTab won't consume it; that's intentional.
       if existing.tabManager.tabs.isEmpty,
         existing.pendingLayoutSnapshot == nil,
@@ -565,7 +638,9 @@ final class WorktreeTerminalManager {
     let state = WorktreeTerminalState(
       runtime: runtime,
       worktree: worktree,
-      runSetupScript: runSetupScript
+      runSetupScript: runSetupScript,
+      hibernationClock: clock,
+      surfaceBindingActionPerformer: surfaceBindingActionPerformer
     )
     state.socketPath = socketServer?.socketPath
     // Load saved layout snapshot for restoration (skip when a setup script is pending).
@@ -573,19 +648,7 @@ final class WorktreeTerminalManager {
       state.pendingLayoutSnapshot = loadLayoutSnapshot?(worktree.id)
     }
     state.setNotificationsEnabled(notificationsEnabled)
-    state.isSelected = { [weak self] in
-      self?.selectedWorktreeID == worktree.id
-    }
-    state.onSurfacesClosed = { [weak self] ids in
-      self?.emit(.surfacesClosed(worktreeID: worktree.id, ids))
-      // The last surface closing leaves no focus target, so no focus event
-      // follows; fall back to the theme background here.
-      self?.refreshFocusedSurfaceBackground()
-    }
-    // OSC-sourced presence events go through the existing idle-debounce funnel.
-    state.onAgentHookEvent = { [weak self] event in
-      self?.dispatchHookEvent(event)
-    }
+    configurePresenceCallbacks(for: state, worktree: worktree)
     state.onNotificationReceived = { [weak self] surfaceID, title, body, isViewed in
       self?.emit(
         .notificationReceived(
@@ -661,9 +724,16 @@ final class WorktreeTerminalManager {
     runSetupScriptIfNew: Bool,
     initialInput: String? = nil,
     tabID: UUID? = nil,
-    customTitle: String? = nil
+    customTitle: String? = nil,
+    focusing: Bool = true
   ) {
     let state = state(for: worktree) { runSetupScriptIfNew }
+    // A CLI `tab new` on a cold-staged worktree must consume the persisted layout
+    // first, or `ensureInitialTab` later hits its `tabs.isEmpty` guard and strands
+    // the staged snapshot (then the next flush overwrites it).
+    if state.pendingLayoutSnapshot != nil, !state.hasAttemptedInitialTab {
+      state.ensureInitialTab(focusing: false)
+    }
     let setupScript: String?
     if state.needsSetupScript() {
       @SharedReader(.repositorySettings(worktree.repositoryRootURL, host: worktree.host))
@@ -673,6 +743,7 @@ final class WorktreeTerminalManager {
       setupScript = nil
     }
     let created = state.createTab(
+      activation: focusing ? .focused : .background,
       setupScript: setupScript,
       initialInput: initialInput,
       tabID: tabID,
@@ -769,7 +840,9 @@ final class WorktreeTerminalManager {
   private func flushLayoutSnapshot(worktreeID: Worktree.ID) {
     layoutDirtyTasks[worktreeID] = nil
     guard let state = states[worktreeID] else { return }
-    let agents = currentAgentsBySurface?() ?? [:]
+    // A nil map (closure unwired) keeps frozen dormant records instead of wiping
+    // them; production always wires the authoritative live presence source.
+    let agents = currentAgentsBySurface?()
     // A nil snapshot (no remaining tabs) clears the key rather than persisting
     // an empty layout, matching the on-disk "no trace" semantics for emptiness.
     let snapshot = state.captureLayoutSnapshot(agentsBySurface: agents)
@@ -1156,7 +1229,7 @@ final class WorktreeTerminalManager {
 
   /// Embed `agentsBySurface` in each surface so badges survive relaunch.
   func saveAllLayoutSnapshots(
-    agentsBySurface: [UUID: [TerminalLayoutSnapshot.SurfaceAgentRecord]] = [:]
+    agentsBySurface: [UUID: [TerminalLayoutSnapshot.SurfaceAgentRecord]]? = nil
   ) {
     guard let saveLayoutSnapshot else {
       assertionFailure("saveLayoutSnapshot closure not configured.")

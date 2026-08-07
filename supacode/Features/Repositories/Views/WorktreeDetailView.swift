@@ -70,6 +70,15 @@ struct WorktreeDetailView: View {
     // deferred toolbar closure) so the toolbar scheme invalidates on change.
     let toolbarScheme: ColorScheme =
       terminalManager.focusedSurfaceBackground.isLightColor ? .light : .dark
+    // Reveal in Finder is local-only; Open can target a remote worktree when the
+    // resolved editor can express the host. `resolvedSelection` (nil when it
+    // can't) drives the focused-action enablement, the menu label, and the
+    // files inspector's default Open.
+    let resolvedSelection = Self.resolvedOpenSelection(
+      hasActiveWorktree: hasActiveWorktree,
+      selectedWorktree: selectedWorktree,
+      state: state
+    )
     let content = detailContent(
       repositories: repositories,
       loadingInfo: loadingInfo,
@@ -103,31 +112,21 @@ struct WorktreeDetailView: View {
         set: { repositoriesStore.send(.setInspectorPresented($0)) }
       )
     ) {
-      WorktreeStatusInspectorContainer(
+      WorktreeDetailInspector(
+        store: store,
+        terminalManager: terminalManager,
+        repositoriesStore: repositoriesStore,
         pane: inspectorPane,
         isFolder: selectedRow?.isFolder == true,
         isCheckingPullRequest: isCheckingPullRequest,
         pullRequest: inspectorPullRequest,
-        repositoriesStore: repositoriesStore,
-        reviewStore: store.scope(state: \.review, action: \.review),
-        terminalManager: terminalManager,
+        fileOpenActions: state.installedOpenActions.filter(\.canOpenFiles),
+        resolvedOpenAction: resolvedSelection,
         onSelectNotification: selectToolbarNotification,
         onSelectSurface: selectToolbarSurface,
         onPullRequestAction: { sendPullRequestAction($0, worktree: selectedWorktree) }
       )
-      .inspectorColumnWidth(min: 280, ideal: 320, max: 480)
-      // Match the inspector's accent to the terminal background; the appearance
-      // is forced inside `WorktreeStatusInspectorContainer`.
-      .tint(terminalManager.chromeOverlayTint())
     }
-    // Reveal in Finder is local-only; Open can target a remote worktree when the
-    // resolved editor can express the host. `resolvedSelection` (nil when it
-    // can't) drives both the focused-action enablement and the menu label.
-    let resolvedSelection = Self.resolvedOpenSelection(
-      hasActiveWorktree: hasActiveWorktree,
-      selectedWorktree: selectedWorktree,
-      state: state
-    )
     return applyFocusedActions(
       content: content,
       hasActiveWorktree: hasActiveWorktree,
@@ -282,6 +281,7 @@ struct WorktreeDetailView: View {
           terminalsStore: store.scope(state: \.terminals, action: \.terminals),
           reviewStore: store.scope(state: \.review, action: \.review),
           shouldRunSetupScript: shouldRunSetupScript,
+          isLifecycleBusy: selectedSlice?.lifecycle.isBusy ?? false,
           forceAutoFocus: shouldFocusTerminal,
           createTab: { store.send(.newTerminal) }
         )
@@ -323,6 +323,10 @@ struct WorktreeDetailView: View {
       }
       .focusedSceneAction(\.newTerminalAction, enabled: hasActiveWorktree) {
         store.send(.newTerminal)
+      }
+      // Lock and validity are enforced by the terminal model, so this only gates on an active worktree.
+      .focusedSceneAction(\.renameTabAction, enabled: hasActiveWorktree) {
+        store.send(.renameSelectedTerminalTab)
       }
       .focusedAction(\.splitTerminalAction, enabled: hasActiveWorktree) { direction in
         store.send(.splitTerminal(direction))
@@ -541,6 +545,45 @@ struct WorktreeDetailView: View {
       allScripts.hasRunningRunScript(in: runningScriptIDs)
     }
 
+  }
+
+  /// The inspector column's content, split out of `detailBody` so the derived
+  /// locals it needs travel as stored properties rather than growing that body.
+  fileprivate struct WorktreeDetailInspector: View {
+    let store: StoreOf<AppFeature>
+    let terminalManager: WorktreeTerminalManager
+    let repositoriesStore: StoreOf<RepositoriesFeature>
+    let pane: WorktreeInspectorPane
+    let isFolder: Bool
+    let isCheckingPullRequest: Bool
+    let pullRequest: GithubPullRequest?
+    let fileOpenActions: [OpenWorktreeAction]
+    let resolvedOpenAction: OpenWorktreeAction?
+    let onSelectNotification: (Worktree.ID, WorktreeTerminalNotification) -> Void
+    let onSelectSurface: (Worktree.ID, UUID) -> Void
+    let onPullRequestAction: (RepositoriesFeature.PullRequestAction) -> Void
+
+    var body: some View {
+      WorktreeStatusInspectorContainer(
+        pane: pane,
+        isFolder: isFolder,
+        isCheckingPullRequest: isCheckingPullRequest,
+        pullRequest: pullRequest,
+        repositoriesStore: repositoriesStore,
+        reviewStore: store.scope(state: \.review, action: \.review),
+        terminalManager: terminalManager,
+        fileOpenActions: fileOpenActions,
+        resolvedOpenAction: resolvedOpenAction,
+        onSelectNotification: onSelectNotification,
+        onSelectSurface: onSelectSurface,
+        onPullRequestAction: onPullRequestAction,
+        onOpenFile: { store.send(.openFile($0, with: $1)) }
+      )
+      .inspectorColumnWidth(min: 280, ideal: 320, max: 480)
+      // Match the inspector's accent to the terminal background; the appearance
+      // is forced inside `WorktreeStatusInspectorContainer`.
+      .tint(terminalManager.chromeOverlayTint())
+    }
   }
 
   fileprivate struct WorktreeDetailToolbar: ToolbarContent {
@@ -798,6 +841,12 @@ struct WorktreeDetailView: View {
         // full-opacity tint reads as a stark solid pill against the glass.
         let chromeForeground = terminalManager.chromeOverlayTint()
         let chromeTint = chromeForeground.opacity(0.2)
+        WorktreeFilesToolbarButton(
+          isSelected: inspectorPresented && inspectorPane == .files,
+          tint: chromeTint,
+          foreground: chromeForeground,
+          onActivate: { onActivateInspector(.files) }
+        )
         WorktreeGitStatusButton(
           pullRequest: pullRequest,
           isSelected: inspectorPresented && inspectorPane == .git,
@@ -1117,7 +1166,13 @@ private struct ToolbarPlaceholderContent: ToolbarContent {
 
     if includesStatusSkeleton {
       ToolbarItemGroup {
-        // Mirror the trailing inspector toggles (git status + notifications).
+        // Mirror the trailing inspector toggles (files + git status + notifications).
+        Button {
+        } label: {
+          Image(systemName: "list.bullet")
+        }
+        .redacted(reason: .placeholder)
+        .shimmer(isActive: true)
         Button {
         } label: {
           Image(systemName: "arrow.trianglehead.branch")

@@ -68,8 +68,10 @@ if [ -n "${developer_dir}" ]; then
       "sudo DEVELOPER_DIR=${developer_dir} xcodebuild -license accept && sudo DEVELOPER_DIR=${developer_dir} xcodebuild -runFirstLaunch"
   fi
 
-  # 5. Metal Toolchain
-  if DEVELOPER_DIR="${developer_dir}" xcrun metal --version >/dev/null 2>&1; then
+  # 5. Metal Toolchain. xcrun caches a negative tool lookup, so a freshly
+  # downloaded toolchain can read as missing until the cache is killed.
+  metal_installed() { DEVELOPER_DIR="${developer_dir}" xcrun metal --version >/dev/null 2>&1; }
+  if metal_installed || { DEVELOPER_DIR="${developer_dir}" xcrun --kill-cache >/dev/null 2>&1; metal_installed; }; then
     pass "Metal Toolchain installed"
   else
     fail "Metal Toolchain missing (ghostty compiles Metal shaders)" \
@@ -88,6 +90,26 @@ if has_mise; then
   else
     fail "mise tools missing: ${missing_tools[*]}" "mise install"
   fi
+fi
+
+# 7. msgfmt (GNU gettext). Ghostty shells out to msgfmt to compile its .po
+# catalogs, which macOS does not ship. Run it, not just probe PATH, so a
+# broken shim or a non-GNU command named msgfmt can't read as installed.
+if msgfmt --version 2>/dev/null | grep -q "GNU gettext"; then
+  pass "msgfmt available (GNU gettext)"
+else
+  fail "msgfmt missing or not GNU gettext (ghostty compiles .po catalogs)" \
+    "brew install gettext && brew link --force gettext (or, without Homebrew: nix profile install nixpkgs#gettext)"
+fi
+
+# 8. fish. The remote-shell quoting tests run the generated ssh command through
+# a real fish parser, because fish is the shell whose single-quote handling the
+# quoting contract exists for.
+if command -v fish >/dev/null 2>&1; then
+  pass "fish available (remote-shell quoting tests)"
+else
+  fail "fish missing (make test runs the remote-shell quoting tests against it)" \
+    "brew install fish (or, without Homebrew: nix profile install nixpkgs#fish)"
 fi
 
 if [ "${failures}" -gt 0 ]; then

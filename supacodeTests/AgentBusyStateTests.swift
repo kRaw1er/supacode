@@ -3,6 +3,7 @@ import ConcurrencyExtras
 import Dependencies
 import DependenciesTestSupport
 import Foundation
+import GhosttyKit
 import SupacodeSettingsShared
 import Testing
 
@@ -100,6 +101,120 @@ struct AgentBusyStateTests {
     // Clear the other: now idle.
     emit(.idle, surfaceID: surfaceB.id)
     #expect(!presence.state.hasActivity(in: surfaces))
+  }
+
+  @Test func workspaceProgressRollsUpFromEveryTab() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let worktree = makeWorktree()
+
+    manager.handleCommand(.runBlockingScript(worktree, kind: .archive, script: "echo a"))
+    manager.handleCommand(.runBlockingScript(worktree, kind: .delete, script: "echo b"))
+
+    guard let state = manager.stateIfExists(for: worktree.id) else {
+      Issue.record("Expected worktree state")
+      return
+    }
+    let tabs = state.tabManager.tabs.map(\.id)
+    guard tabs.count == 2,
+      let surfaceA = state.splitTree(for: tabs[0]).root?.leftmostLeaf(),
+      let surfaceB = state.splitTree(for: tabs[1]).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected one surface in each tab")
+      return
+    }
+
+    #expect(state.currentTabProjections().allSatisfy { $0.hasTerminalActivity })
+    #expect(state.currentProjection().isProgressBusy)
+
+    surfaceA.bridge.onCommandFinished?(0)
+    #expect(
+      state.currentTabProjections().first(where: { $0.tabID == tabs[0] })?.hasTerminalActivity == false
+    )
+    #expect(
+      state.currentTabProjections().first(where: { $0.tabID == tabs[1] })?.hasTerminalActivity == true
+    )
+    #expect(state.currentProjection().isProgressBusy)
+
+    surfaceB.bridge.onCommandFinished?(0)
+    #expect(state.currentTabProjections().allSatisfy { !$0.hasTerminalActivity })
+    #expect(!state.currentProjection().isProgressBusy)
+  }
+
+  @Test func closingFinalBusySurfaceEmitsIdle() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let worktree = makeWorktree()
+    let state = manager.state(for: worktree)
+    var statuses: [WorktreeTaskStatus] = []
+    state.onTaskStatusChanged = { statuses.append($0) }
+
+    manager.handleCommand(.runBlockingScript(worktree, kind: .archive, script: "echo busy"))
+    guard
+      let tabID = state.tabManager.tabs.first?.id,
+      let surface = state.splitTree(for: tabID).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected a busy tab with one surface")
+      return
+    }
+    #expect(statuses == [.running])
+
+    // Closing must not rely on Ghostty delivering another terminal-state callback.
+    surface.bridge.onProgressReport = nil
+    surface.bridge.onCommandFinished = nil
+    surface.bridge.onChildExited = nil
+    surface.bridge.closeSurface(processAlive: false)
+
+    #expect(statuses == [.running, .idle])
+  }
+
+  @Test func tabStaysBusyUntilEverySplitPaneIdles() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let worktree = makeWorktree()
+    let state = manager.state(for: worktree)
+    guard
+      let tab = state.createTab(),
+      let first = state.splitTree(for: tab).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected a tab with one surface")
+      return
+    }
+    _ = state.performSplitAction(.newSplit(direction: .right), for: first.id)
+    let leaves = state.splitTree(for: tab).leaves()
+    guard leaves.count == 2 else {
+      Issue.record("Expected two surfaces in one tab")
+      return
+    }
+
+    // Both panes report running progress: the tab is busy. Any wired leaf's
+    // report re-runs the tab's worst-of aggregate, so drive them all through
+    // the first pane.
+    for leaf in leaves { leaf.bridge.state.progressState = GHOSTTY_PROGRESS_STATE_INDETERMINATE }
+    leaves[0].bridge.onProgressReport?(GHOSTTY_PROGRESS_STATE_INDETERMINATE)
+    #expect(state.currentTabProjections().first { $0.tabID == tab }?.hasTerminalActivity == true)
+
+    // One pane finishes; the sibling pane keeps the tab busy.
+    leaves[0].bridge.state.progressState = nil
+    leaves[0].bridge.onProgressReport?(GHOSTTY_PROGRESS_STATE_REMOVE)
+    #expect(state.currentTabProjections().first { $0.tabID == tab }?.hasTerminalActivity == true)
+
+    // The last pane finishes: the tab goes idle.
+    leaves[1].bridge.state.progressState = nil
+    leaves[0].bridge.onProgressReport?(GHOSTTY_PROGRESS_STATE_REMOVE)
+    #expect(state.currentTabProjections().first { $0.tabID == tab }?.hasTerminalActivity == false)
+  }
+
+  @Test func rowSnapshotIsWorkingWhenAnySurfaceHasABusyAgent() {
+    var presence = AgentPresenceFeature.State()
+    let busySurface = UUID()
+    let idleSurface = UUID()
+    presence.records[
+      AgentPresenceFeature.PresenceKey(agent: .claude, surfaceID: busySurface)
+    ] = AgentPresenceFeature.PresenceRecord(activity: .busy, pids: [1])
+    presence.records[
+      AgentPresenceFeature.PresenceKey(agent: .codex, surfaceID: idleSurface)
+    ] = AgentPresenceFeature.PresenceRecord(activity: .awaitingInput, pids: [2])
+
+    #expect(!presence.rowSnapshot(across: [idleSurface], badgesEnabled: true).isWorking)
+    #expect(presence.rowSnapshot(across: [busySurface, idleSurface], badgesEnabled: true).isWorking)
   }
 
   // MARK: - Notification deduplication.
@@ -595,7 +710,7 @@ struct AgentBusyStateTests {
       $0.continuousClock = ImmediateClock()
     } operation: {
       withRetentionLimit(.oneHundred) {
-        let fixture = makeStateWithSurface()
+        let fixture = makeStateWithSurface(surfaceBindingActionPerformer: { _, _ in })
         // Split so the tab keeps a sibling pane; the split focuses the sibling,
         // leaving the original pane unfocused so its notification lands unread.
         let sibling = UUID()
@@ -720,8 +835,13 @@ struct AgentBusyStateTests {
     Self.makeHookEvent(name, agent: agent, surfaceID: surfaceID, pid: pid)
   }
 
-  private func makeStateWithSurface(worktree: Worktree? = nil) -> SurfaceFixture {
-    let (manager, presence) = WorktreeTerminalManager.withPresenceHarness()
+  private func makeStateWithSurface(
+    worktree: Worktree? = nil,
+    surfaceBindingActionPerformer: ((GhosttySurfaceView, String) -> Void)? = nil
+  ) -> SurfaceFixture {
+    let (manager, presence) = WorktreeTerminalManager.withPresenceHarness(
+      surfaceBindingActionPerformer: surfaceBindingActionPerformer
+    )
     let resolvedWorktree = worktree ?? makeWorktree()
 
     let state = manager.state(for: resolvedWorktree) { false }

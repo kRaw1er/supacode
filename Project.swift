@@ -15,8 +15,10 @@ let embedRuntimeAssetsScriptPath: Path = "scripts/embed-runtime-assets.sh"
 // modulemap directly, sidestepping SPM's C-target modulemap path.
 let grammarsXCFrameworkPath: Path = ".build/treesitter/TreeSitterGrammars.xcframework"
 let grammarsBuildScriptPath: Path = "scripts/build-treesitter-grammars.sh"
+// Tuist hashes foreign build inputs outside Xcode, where SRCROOT is unset, so
+// this resolves project-relative like the Ghostty fingerprint below.
 let grammarsFingerprintInputScript = """
-"${SRCROOT}/\(grammarsBuildScriptPath.pathString)" --print-fingerprint
+"./\(grammarsBuildScriptPath.pathString)" --print-fingerprint
 """
 
 func shellScript(_ path: Path) -> String {
@@ -24,7 +26,7 @@ func shellScript(_ path: Path) -> String {
 }
 
 let ghosttyFingerprintInputScript = """
-"${SRCROOT}/\(ghosttyBuildScriptPath.pathString)" --print-fingerprint
+"./\(ghosttyBuildScriptPath.pathString)" --print-fingerprint
 """
 
 let appResources: ResourceFileElements = [
@@ -115,6 +117,7 @@ let testDependencies: [TargetDependency] = [
 let sharedTestSupportSources: [Path] = [
   "supacodeTests/AgentPresence+TestHelpers.swift",
   "supacodeTests/BrandedIDTestSupport.swift",
+  "supacodeTests/LoginShellTestSupport.swift",
   "supacodeTests/ProcessTestSupport.swift",
   "supacodeTests/RemoteRepoTestSupport.swift",
   "supacodeTests/RepositoriesSidebarTestHelpers.swift",
@@ -133,7 +136,9 @@ let gitTestSources: [Path] = [
   "supacodeTests/Git*.swift",
   "supacodeTests/RemoteSSHCommandTests.swift",
   "supacodeTests/ShellClient*.swift",
+  "supacodeTests/SocketLivenessCLITests.swift",
   "supacodeTests/WorktreeEnvironmentTests.swift",
+  "supacodeTests/WorktreeStatusCLITests.swift",
 ]
 
 // AppFeature and RepositoriesFeature suites, the two biggest TestStore
@@ -277,6 +282,9 @@ let project = Project(
       bundleId: "app.supabit.supacode.settings-shared",
       deploymentTargets: .macOS("26.0"),
       infoPlist: .default,
+      resources: [
+        .folderReference(path: "Resources/Skills"),
+      ],
       buildableFolders: [
         "SupacodeSettingsShared",
       ],

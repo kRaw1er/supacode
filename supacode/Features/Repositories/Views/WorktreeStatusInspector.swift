@@ -14,9 +14,12 @@ struct WorktreeStatusInspectorContainer: View {
   /// request in the git pane.
   let reviewStore: StoreOf<DiffReviewFeature>
   let terminalManager: WorktreeTerminalManager
+  let fileOpenActions: [OpenWorktreeAction]
+  let resolvedOpenAction: OpenWorktreeAction?
   let onSelectNotification: (Worktree.ID, WorktreeTerminalNotification) -> Void
   let onSelectSurface: (Worktree.ID, UUID) -> Void
   let onPullRequestAction: (RepositoriesFeature.PullRequestAction) -> Void
+  let onOpenFile: (URL, OpenWorktreeAction?) -> Void
 
   var body: some View {
     Group {
@@ -28,6 +31,13 @@ struct WorktreeStatusInspectorContainer: View {
           isCheckingPullRequest: isCheckingPullRequest,
           reviewStore: reviewStore,
           onPullRequestAction: onPullRequestAction
+        )
+      case .files:
+        WorktreeFilesInspectorView(
+          store: repositoriesStore.scope(state: \.fileExplorer, action: \.fileExplorer),
+          fileOpenActions: fileOpenActions,
+          resolvedOpenAction: resolvedOpenAction,
+          onOpenFile: onOpenFile
         )
       case .notifications:
         WorktreeNotificationsInspectorView(
@@ -97,6 +107,9 @@ struct WorktreeGitInspectorView: View {
     } else if let pullRequest {
       VSplitView {
         GitInspectorContent(pullRequest: pullRequest, onPullRequestAction: onPullRequestAction)
+          // The header bar sits only over the pull-request half, so the form
+          // scrolls under it for the native top blur.
+          .safeAreaBar(edge: .top) { GitInspectorHeader(pullRequest: pullRequest) }
           .frame(minHeight: Self.minPullRequestHeight, idealHeight: resolvedInitialHeight)
           // Sub-point jitter would write UserDefaults on every frame of a drag.
           .onGeometryChange(for: CGFloat.self) {
@@ -153,14 +166,39 @@ private struct CollapsedPullRequestRow: View {
   }
 }
 
-private struct GitInspectorContent: View {
+/// Pull-request pane header, shown only over the pull-request content. The Open
+/// in Browser affordance appears when the pull request has a URL.
+private struct GitInspectorHeader: View {
   let pullRequest: GithubPullRequest
-  let onPullRequestAction: (RepositoriesFeature.PullRequestAction) -> Void
   @Environment(\.openURL) private var openURL
   @Environment(\.analyticsClient) private var analyticsClient
 
   var body: some View {
-    let url = URL(string: pullRequest.url)
+    HStack {
+      Text("Pull Request")
+        .font(.headline)
+      Spacer()
+      if let url = URL(string: pullRequest.url) {
+        Button {
+          analyticsClient.capture("github_pr_opened", nil)
+          openURL(url)
+        } label: {
+          Text("Open in Browser \u{2197}")
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+      }
+    }
+    .padding(.horizontal)
+    .padding(.vertical)
+  }
+}
+
+private struct GitInspectorContent: View {
+  let pullRequest: GithubPullRequest
+  let onPullRequestAction: (RepositoriesFeature.PullRequestAction) -> Void
+
+  var body: some View {
     let checks = pullRequest.statusCheckRollup?.checks ?? []
     let breakdown = PullRequestCheckBreakdown(checks: checks)
     let sortedChecks = Self.sortedChecks(checks)
@@ -172,100 +210,81 @@ private struct GitInspectorContent: View {
       isQueued: mergeQueueStatus != nil
     )
 
-    VStack(spacing: 0) {
-      HStack {
-        Text("Pull Request")
-          .font(.headline)
-        Spacer()
-        if let url {
-          Button("Open on GitHub", systemImage: "arrow.up.right.square") {
-            analyticsClient.capture("github_pr_opened", nil)
-            openURL(url)
+    Form {
+      Section {
+        LabeledContent("Author", value: pullRequest.authorLogin ?? "Someone")
+        LabeledContent("Commits", value: (pullRequest.commitsCount ?? 0).formatted())
+        LabeledContent("Changes") {
+          HStack(spacing: 6) {
+            Text("+\(pullRequest.additions.formatted())").foregroundStyle(.green)
+            Text("-\(pullRequest.deletions.formatted())").foregroundStyle(.red)
           }
-          .labelStyle(.iconOnly)
-          .buttonStyle(.borderless)
-          .help("Open pull request on GitHub.")
         }
+        if readiness.isConflicting {
+          Label {
+            Text("Merge Conflicts")
+          } icon: {
+            Image(systemName: "exclamationmark.triangle.fill")
+              .foregroundStyle(.red)
+          }
+        }
+      } header: {
+        VStack(alignment: .leading, spacing: 6) {
+          HStack {
+            if let badge {
+              PullRequestBadgeView(
+                text: pullRequest.isDraft ? "DRAFT" : badge.text,
+                color: badge.color)
+            }
+            Spacer()
+            Text(verbatim: "#\(pullRequest.number)")
+              .foregroundStyle(.secondary)
+          }
+          Text(pullRequest.title)
+            .font(.headline)
+            .textSelection(.enabled)
+          Text(
+            "`\(pullRequest.baseRefName ?? "base")` ← `\(pullRequest.headRefName ?? "branch")`"
+          )
+          .font(.subheadline)
+          .monospaced()
+          .foregroundStyle(.secondary)
+        }
+        .textCase(nil)
+        .padding(.top, 10)
+        .padding(.bottom, 6)
       }
-      .padding(.horizontal)
-      .padding(.vertical, 10)
-      Divider()
 
-      Form {
+      if let mergeQueueStatus {
         Section {
-          LabeledContent("Author", value: pullRequest.authorLogin ?? "Someone")
-          LabeledContent("Commits", value: (pullRequest.commitsCount ?? 0).formatted())
-          LabeledContent("Changes") {
-            HStack(spacing: 6) {
-              Text("+\(pullRequest.additions.formatted())").foregroundStyle(.green)
-              Text("-\(pullRequest.deletions.formatted())").foregroundStyle(.red)
-            }
-          }
-          if readiness.isConflicting {
-            Label {
-              Text("Merge Conflicts")
-            } icon: {
-              Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red)
-            }
-          }
-        } header: {
-          VStack(alignment: .leading, spacing: 6) {
-            HStack {
-              if let badge {
-                PullRequestBadgeView(
-                  text: pullRequest.isDraft ? "DRAFT" : badge.text,
-                  color: badge.color)
-              }
-              Spacer()
-              Text(verbatim: "#\(pullRequest.number)")
-                .foregroundStyle(.secondary)
-            }
-            Text(pullRequest.title)
-              .font(.headline)
-              .textSelection(.enabled)
-            Text(
-              "`\(pullRequest.baseRefName ?? "base")` ← `\(pullRequest.headRefName ?? "branch")`"
-            )
-            .font(.subheadline)
-            .monospaced()
-            .foregroundStyle(.secondary)
-          }
-          .textCase(nil)
-          .padding(.top, 10)
-          .padding(.bottom, 6)
+          PullRequestMergeQueueRow(status: mergeQueueStatus)
         }
+      }
 
-        if let mergeQueueStatus {
-          Section {
-            PullRequestMergeQueueRow(status: mergeQueueStatus)
+      PullRequestActionsSection(
+        pullRequest: pullRequest,
+        breakdown: breakdown,
+        onPullRequestAction: onPullRequestAction
+      )
+
+      if breakdown.total > 0 {
+        Section("Checks") {
+          HStack(spacing: 8) {
+            PullRequestChecksRingView(breakdown: breakdown)
+            Text(breakdown.summaryText)
+              .foregroundStyle(.secondary)
+              .font(.callout)
           }
-        }
-
-        PullRequestActionsSection(
-          pullRequest: pullRequest,
-          breakdown: breakdown,
-          onPullRequestAction: onPullRequestAction
-        )
-
-        if breakdown.total > 0 {
-          Section("Checks") {
-            HStack(spacing: 8) {
-              PullRequestChecksRingView(breakdown: breakdown)
-              Text(breakdown.summaryText)
-                .foregroundStyle(.secondary)
-                .font(.callout)
-            }
-            ForEach(sortedChecks, id: \.self) { check in
-              CheckRow(check: check)
-            }
+          ForEach(sortedChecks, id: \.self) { check in
+            CheckRow(check: check)
           }
         }
       }
-      .formStyle(.grouped)
-      // Let the window's terminal background (set in WindowChromeApplier) show through.
-      .scrollContentBackground(.hidden)
     }
+    .formStyle(.grouped)
+    // Let the window's terminal background (set in WindowChromeApplier) show through.
+    .scrollContentBackground(.hidden)
+    .scrollEdgeEffectStyle(.soft, for: .all)
   }
 
   private static func sortedChecks(_ checks: [GithubPullRequestStatusCheck])
@@ -494,59 +513,64 @@ private struct NotificationsInspectorContent: View {
   var body: some View {
     let count = groups.reduce(0) { $0 + $1.notificationCount }
     let unseenCount = groups.flatMap(\.worktrees).reduce(0) { $0 + $1.unseenNotificationCount }
-    VStack(spacing: 0) {
-      HStack {
-        Text("Notifications")
-          .font(.headline)
-        Spacer()
-        Button("Dismiss All", action: onDismissAll)
-          .buttonStyle(.borderless)
-          .disabled(count == 0 && unseenCount == 0)
-          .help("Dismiss all notifications.")
+    // `List` virtualizes rows (NSTableView), so a large backlog builds only the
+    // on-screen rows on open, never the whole log or its markdown bodies.
+    List {
+      ForEach(groups) { repository in
+        ForEach(repository.worktrees) { worktree in
+          Section {
+            ForEach(worktree.notifications) { notification in
+              NotificationRow(
+                notification: notification,
+                worktreeID: worktree.id,
+                onSelect: onSelectNotification
+              )
+            }
+            // A surface whose unread notifications were all pruned by the cap
+            // still needs a way back, so synthesize one row per orphaned surface.
+            ForEach(worktree.prunedUnseenSurfaces) { surface in
+              PrunedNotificationRow(
+                surface: surface,
+                worktreeID: worktree.id,
+                onSelect: onSelectSurface
+              )
+            }
+          } header: {
+            NotificationWorktreeHeader(repository: repository, worktree: worktree)
+          }
+        }
       }
-      .padding(.horizontal)
-      .padding(.vertical, 10)
-      Divider()
-
+    }
+    .listStyle(.inset)
+    // Let the window's terminal background (set in WindowChromeApplier) show through.
+    .scrollContentBackground(.hidden)
+    .scrollEdgeEffectStyle(.soft, for: .all)
+    // The header bar sits only over the list, so it scrolls under it for the
+    // native top blur; the empty state reserves no bar.
+    .safeAreaBar(edge: .top) {
+      if !groups.isEmpty {
+        HStack {
+          Text("Notifications")
+            .font(.headline)
+          Spacer()
+          Button("Dismiss All", action: onDismissAll)
+            .buttonStyle(.borderless)
+            .disabled(count == 0 && unseenCount == 0)
+            .help("Dismiss all notifications.")
+        }
+        .padding(.horizontal)
+        .padding(.vertical)
+      }
+    }
+    // Empty state as a background so it fills the whole pane (past the safe area)
+    // instead of being offset by the reserved bar.
+    .background {
       if groups.isEmpty {
         ContentUnavailableView(
           "No Notifications",
           systemImage: "bell.slash",
           description: Text("Agent and terminal notifications appear here.")
         )
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-      } else {
-        // `List` virtualizes rows (NSTableView), so a large backlog builds only
-        // the on-screen rows on open, never the whole log or its markdown bodies.
-        List {
-          ForEach(groups) { repository in
-            ForEach(repository.worktrees) { worktree in
-              Section {
-                ForEach(worktree.notifications) { notification in
-                  NotificationRow(
-                    notification: notification,
-                    worktreeID: worktree.id,
-                    onSelect: onSelectNotification
-                  )
-                }
-                // Unread whose notifications the cap pruned still needs a way
-                // back to the surface, so synthesize a row per orphaned surface.
-                ForEach(worktree.prunedUnseenSurfaces) { surface in
-                  PrunedNotificationRow(
-                    surface: surface,
-                    worktreeID: worktree.id,
-                    onSelect: onSelectSurface
-                  )
-                }
-              } header: {
-                NotificationWorktreeHeader(repository: repository, worktree: worktree)
-              }
-            }
-          }
-        }
-        .listStyle(.inset)
-        // Let the window's terminal background (set in WindowChromeApplier) show through.
-        .scrollContentBackground(.hidden)
       }
     }
   }
@@ -650,7 +674,6 @@ private struct NotificationRow: View {
       .frame(maxWidth: .infinity, alignment: .leading)
     }
     .buttonStyle(.plain)
-    .help("Select worktree and focus terminal.")
   }
 
   private static func markdown(_ string: String) -> AttributedString {
@@ -699,7 +722,6 @@ private struct PrunedNotificationRow: View {
       .frame(maxWidth: .infinity, alignment: .leading)
     }
     .buttonStyle(.plain)
-    .help("Select worktree and focus terminal.")
   }
 
   private var title: String {

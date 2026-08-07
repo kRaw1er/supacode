@@ -122,6 +122,8 @@ struct SidebarItemFeature {
     /// Ghostty progress busy on any surface. Combined with `hasAgentActivity` for shimmer.
     var isProgressBusy: Bool = false
     var hasUnseenNotifications: Bool = false
+    /// True when every tab in the worktree is hibernated. Drives the sleep marker.
+    var allTabsDormant: Bool = false
     var notifications: IdentifiedArrayOf<WorktreeTerminalNotification> = []
     /// Per-surface outstanding unread counts. Survives cap trimming of
     /// `notifications`; the inspector synthesizes a row for a surface here whose
@@ -193,6 +195,9 @@ struct SidebarItemFeature {
         if state.hasUnseenNotifications != projection.hasUnseenNotifications {
           state.hasUnseenNotifications = projection.hasUnseenNotifications
         }
+        if state.allTabsDormant != projection.allTabsDormant {
+          state.allTabsDormant = projection.allTabsDormant
+        }
         if state.notifications != projection.notifications { state.notifications = projection.notifications }
         if state.unseenSurfaces != projection.unseenSurfaces {
           state.unseenSurfaces = projection.unseenSurfaces
@@ -254,14 +259,28 @@ enum SidebarDisplayName {
   ) -> String? {
     guard !isMainWorktree else { return nil }
     if id.rawValue.contains("/") {
-      let pathName = URL(fileURLWithPath: id.rawValue).lastPathComponent
+      let pathName = lastPathComponent(of: id.rawValue)
       if !pathName.isEmpty { return pathName }
     }
     if let subtitle, !subtitle.isEmpty, subtitle != "." {
-      let detailName = URL(fileURLWithPath: subtitle).lastPathComponent
+      let detailName = lastPathComponent(of: subtitle)
       if !detailName.isEmpty, detailName != "." { return detailName }
     }
     return branchName
+  }
+
+  /// Lexical `lastPathComponent`: no URL synthesis, since remote row ids are
+  /// relative strings that `fileURLWithPath` would resolve against the cwd and
+  /// stat on every per-tick recompute (gh-764).
+  private static func lastPathComponent(of path: String) -> String {
+    var trimmed = Substring(path)
+    while trimmed.count > 1, trimmed.hasSuffix("/") {
+      trimmed = trimmed.dropLast()
+    }
+    guard let slash = trimmed.lastIndex(of: "/"), trimmed.index(after: slash) < trimmed.endIndex else {
+      return String(trimmed)
+    }
+    return String(trimmed[trimmed.index(after: slash)...])
   }
 
   /// Returns `custom` when set (after trim), otherwise `fallback`. Shared so
@@ -296,6 +315,8 @@ struct WorktreeRowProjection: Equatable, Sendable {
   /// Terminal-tracked user scripts; the sole populator of the row's
   /// `runningScripts`, so the dropdown can't drift from process state (#573).
   var runningScripts: IdentifiedArrayOf<SidebarItemFeature.State.RunningScript> = []
+  /// True when every tab in the worktree is hibernated. Drives the sidebar sleep marker.
+  var allTabsDormant: Bool = false
 }
 
 /// A surface with outstanding unread notifications. `count` counts unread
