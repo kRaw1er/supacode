@@ -50,6 +50,20 @@ struct WorktreeTabProjection: Equatable, Sendable {
   }
 }
 
+/// How a newly created tab claims attention. Selection and keyboard focus are
+/// separate because the initial-tab path needs a selected but unfocused tab.
+enum TabActivation: Equatable {
+  /// Selected and given keyboard focus.
+  case focused
+  /// Selected without taking focus, as the initial-tab and restore paths need.
+  case selected
+  /// Appended without touching the selection or the focus.
+  case background
+
+  var selects: Bool { self != .background }
+  var focuses: Bool { self == .focused }
+}
+
 @MainActor
 @Observable
 final class WorktreeTerminalState {
@@ -345,8 +359,8 @@ final class WorktreeTerminalState {
       wrappedValue: RepositorySettings.default,
       .repositorySettings(worktree.repositoryRootURL, host: worktree.host)
     )
-    // Route every selection write through the single visibility choke point.
-    tabManager.onSelectedTabChanged = { [weak self] in self?.refreshTabVisibility() }
+    // Route every selection write through the single selection choke point.
+    tabManager.onSelectedTabChanged = { [weak self] in self?.reconcileSelection() }
     // Route dormant-session OSC signals into the notification / presence handlers.
     dormantSessionWatchers.onOSCSequence = { [weak self] surfaceID, sequence in
       self?.handleDormantOSCSequence(surfaceID: surfaceID, sequence: sequence)
@@ -455,12 +469,12 @@ final class WorktreeTerminalState {
       return
     }
     let setupScript = pendingSetupScript ? repositorySettings.setupScript : nil
-    _ = createTab(focusing: focusing, setupScript: setupScript)
+    _ = createTab(activation: focusing ? .focused : .selected, setupScript: setupScript)
   }
 
   @discardableResult
   func createTab(
-    focusing: Bool = true,
+    activation: TabActivation = .focused,
     setupScript: String? = nil,
     initialInput: String? = nil,
     inheritingFromSurfaceId: UUID? = nil,
@@ -498,7 +512,7 @@ final class WorktreeTerminalState {
         customTitle: customTitle,
         command: nil,
         initialInput: resolvedInput,
-        focusing: focusing,
+        activation: activation,
         inheritingFromSurfaceId: resolvedInheritanceSurfaceId,
         context: context,
         tabID: tabID,
@@ -512,11 +526,11 @@ final class WorktreeTerminalState {
 
   /// Stops a single user-defined script identified by its definition ID.
   @discardableResult
-  func stopScript(definitionID: UUID) -> Bool {
+  func stopScript(definitionID: UUID, focusing: Bool = true) -> Bool {
     guard
       let tabId = blockingScripts.first(where: { $0.value.scriptDefinitionID == definitionID })?.key
     else { return false }
-    closeTab(tabId)
+    closeTab(tabId, focusing: focusing)
     return true
   }
 
@@ -526,11 +540,11 @@ final class WorktreeTerminalState {
   /// everything" command. Other kinds are stopped individually
   /// via the script menu or command palette.
   @discardableResult
-  func stopRunScripts() -> Bool {
+  func stopRunScripts(focusing: Bool = true) -> Bool {
     let runTabIds = blockingScripts.filter { $0.value.isRunKind }.map(\.key)
     guard !runTabIds.isEmpty else { return false }
     for tabId in runTabIds {
-      closeTab(tabId)
+      closeTab(tabId, focusing: focusing)
     }
     return true
   }
@@ -546,7 +560,11 @@ final class WorktreeTerminalState {
   }
 
   @discardableResult
-  func runBlockingScript(kind: BlockingScriptKind, _ script: String) -> TerminalTabID? {
+  func runBlockingScript(
+    kind: BlockingScriptKind,
+    _ script: String,
+    focusing: Bool = true
+  ) -> TerminalTabID? {
     // A re-run of an already-tracked user script is a duplicate request, not a
     // restart: keep the running instance (#573). Lifecycle kinds (archive /
     // delete) keep their replace-on-rerun semantics.
@@ -603,9 +621,9 @@ final class WorktreeTerminalState {
     if let active = blockingScripts.first(where: { $0.value == kind })?.key {
       blockingScripts.removeValue(forKey: active)
       lastBlockingScriptTabByKind.removeValue(forKey: kind)
-      closeTab(active)
+      closeTab(active, focusing: focusing)
     } else if let lingering = lastBlockingScriptTabByKind.removeValue(forKey: kind) {
-      closeTab(lingering)
+      closeTab(lingering, focusing: focusing)
     }
     let tabId = createTab(
       TabCreation(
@@ -615,7 +633,7 @@ final class WorktreeTerminalState {
         tintColor: kind.tabColor,
         command: command,
         initialInput: initialInput,
-        focusing: true,
+        activation: focusing ? .focused : .background,
         inheritingFromSurfaceId: currentFocusedSurfaceId(),
         context: GHOSTTY_SURFACE_CONTEXT_TAB,
         tabID: nil,
@@ -657,7 +675,7 @@ final class WorktreeTerminalState {
     var tintColor: RepositoryColor?
     let command: String?
     let initialInput: String?
-    let focusing: Bool
+    let activation: TabActivation
     let inheritingFromSurfaceId: UUID?
     let context: ghostty_surface_context_e
     let tabID: UUID?
@@ -681,6 +699,7 @@ final class WorktreeTerminalState {
       tintColor: creation.tintColor,
       isBlockingScript: creation.isBlockingScript,
       id: creation.tabID,
+      selecting: creation.activation.selects,
     )
     // Record the kind before the surface is built so `surfaceEnvironment`
     // can read it when emitting the blocking-script env markers.
@@ -698,7 +717,7 @@ final class WorktreeTerminalState {
       surfaceID: creation.tabID != nil ? tabId.rawValue : nil,
       bypassZmx: creation.bypassZmx
     )
-    if creation.focusing, let surface = tree.root?.leftmostLeaf() {
+    if creation.activation.focuses, let surface = tree.root?.leftmostLeaf() {
       focusSurface(surface, in: tabId)
     }
     onTabCreated?()
@@ -822,6 +841,11 @@ final class WorktreeTerminalState {
   }
 
   func syncFocus(windowIsKey: Bool, windowIsVisible: Bool) {
+    if lastWindowIsKey != windowIsKey || lastWindowIsVisible != windowIsVisible {
+      terminalStateLogger.debug(
+        "syncFocus(\(worktree.id)): key=\(windowIsKey) visible=\(windowIsVisible)"
+      )
+    }
     lastWindowIsKey = windowIsKey
     lastWindowIsVisible = windowIsVisible
     applySurfaceActivity()
@@ -837,8 +861,9 @@ final class WorktreeTerminalState {
       for surface in tree.leaves() {
         let activity = Self.surfaceActivity(
           isSurfaceVisibleInTree: visibleSurfaceIDs.contains(surface.id),
+          isWorktreeSelected: isWorktreeSelected,
           isSelectedTab: isSelectedTab,
-          windowIsVisible: lastWindowIsVisible == true,
+          windowIsVisible: lastWindowIsVisible,
           windowIsKey: lastWindowIsKey == true,
           focusedSurfaceID: focusedId,
           surfaceID: surface.id
@@ -855,15 +880,20 @@ final class WorktreeTerminalState {
     }
   }
 
+  // swiftlint:disable:next function_parameter_count
   static func surfaceActivity(
-    isSurfaceVisibleInTree: Bool = true,
+    isSurfaceVisibleInTree: Bool,
+    isWorktreeSelected: Bool,
     isSelectedTab: Bool,
-    windowIsVisible: Bool,
+    windowIsVisible: Bool?,
     windowIsKey: Bool,
     focusedSurfaceID: UUID?,
     surfaceID: UUID
   ) -> SurfaceActivity {
-    let isVisible = isSurfaceVisibleInTree && isSelectedTab && windowIsVisible
+    // Unknown window visibility fails open: occluding a visible surface
+    // freezes it (#757), rendering a briefly occluded one only costs frames.
+    let isVisible =
+      isSurfaceVisibleInTree && isWorktreeSelected && isSelectedTab && windowIsVisible != false
     let isFocused = isVisible && windowIsKey && focusedSurfaceID == surfaceID
     return SurfaceActivity(isVisible: isVisible, isFocused: isFocused)
   }
@@ -1074,7 +1104,7 @@ final class WorktreeTerminalState {
     pendingCloseConfirmation = remaining.isEmpty ? nil : .tabs(remaining, reason: reason)
   }
 
-  func closeTab(_ tabId: TerminalTabID) {
+  func closeTab(_ tabId: TerminalTabID, focusing: Bool = true) {
     cancelHibernationTimer(for: tabId)
     removeFromPendingClose(tabId: tabId)
     let closedBlockingKind = blockingScripts.removeValue(forKey: tabId)
@@ -1087,7 +1117,9 @@ final class WorktreeTerminalState {
     removeDormantTab(tabId)
     tabManager.closeTab(tabId)
     if let selected = tabManager.selectedTabId {
-      focusSurface(in: selected)
+      if focusing {
+        focusSurface(in: selected)
+      }
     } else {
       lastEmittedFocusSurfaceId = nil
     }
@@ -1168,11 +1200,55 @@ final class WorktreeTerminalState {
     return tree
   }
 
+  // swiftlint:disable:next function_parameter_count
+  private func insertNewSplit(
+    direction: GhosttySplitAction.NewDirection,
+    tabId: TerminalTabID,
+    tree: SplitTree<GhosttySurfaceView>,
+    targetSurface: GhosttySurfaceView,
+    sourceSurfaceID: UUID,
+    newSurfaceID: UUID?,
+    initialInput: String?,
+    focusing: Bool
+  ) -> Bool {
+    // Splits would leak a zmx-wrapped sibling into a transactional tab.
+    // Refuse before allocating a surface so the tab stays single-pane.
+    if tabManager.isBlockingScript(tabId) {
+      return false
+    }
+    let newSurface = createSurface(
+      tabId: tabId,
+      initialInput: initialInput,
+      inheritingFromSurfaceId: sourceSurfaceID,
+      context: GHOSTTY_SURFACE_CONTEXT_SPLIT,
+      surfaceID: newSurfaceID,
+    )
+    do {
+      let newTree = try tree.inserting(
+        view: newSurface,
+        at: targetSurface,
+        direction: mapSplitDirection(direction)
+      )
+      updateTree(newTree, for: tabId)
+      if focusing {
+        focusSurface(newSurface, in: tabId)
+      }
+      return true
+    } catch {
+      terminalStateLogger.warning(
+        "performSplitAction: failed to insert split for surface \(sourceSurfaceID) in tab \(tabId.rawValue): \(error)")
+      newSurface.closeSurface()
+      discardSurfaceBookkeeping(for: newSurface.id)
+      return false
+    }
+  }
+
   func performSplitAction(
     _ action: GhosttySplitAction,
     for surfaceID: UUID,
     newSurfaceID: UUID? = nil,
-    initialInput: String? = nil
+    initialInput: String? = nil,
+    focusing: Bool = true
   ) -> Bool {
     guard let tabId = tabID(containing: surfaceID), var tree = trees[tabId] else {
       return false
@@ -1182,34 +1258,16 @@ final class WorktreeTerminalState {
 
     switch action {
     case .newSplit(let direction):
-      // Splits would leak a zmx-wrapped sibling into a transactional tab.
-      // Refuse before allocating a surface so the tab stays single-pane.
-      if tabManager.isBlockingScript(tabId) {
-        return false
-      }
-      let newSurface = createSurface(
+      return insertNewSplit(
+        direction: direction,
         tabId: tabId,
+        tree: tree,
+        targetSurface: targetSurface,
+        sourceSurfaceID: surfaceID,
+        newSurfaceID: newSurfaceID,
         initialInput: initialInput,
-        inheritingFromSurfaceId: surfaceID,
-        context: GHOSTTY_SURFACE_CONTEXT_SPLIT,
-        surfaceID: newSurfaceID,
+        focusing: focusing
       )
-      do {
-        let newTree = try tree.inserting(
-          view: newSurface,
-          at: targetSurface,
-          direction: mapSplitDirection(direction)
-        )
-        updateTree(newTree, for: tabId)
-        focusSurface(newSurface, in: tabId)
-        return true
-      } catch {
-        terminalStateLogger.warning(
-          "performSplitAction: failed to insert split for surface \(surfaceID) in tab \(tabId.rawValue): \(error)")
-        newSurface.closeSurface()
-        discardSurfaceBookkeeping(for: newSurface.id)
-        return false
-      }
 
     case .gotoSplit(let direction):
       let focusDirection = mapFocusDirection(direction)
@@ -1226,7 +1284,7 @@ final class WorktreeTerminalState {
         updateTree(tree, for: tabId)
       }
       focusSurface(nextSurface, in: tabId)
-      syncFocusIfNeeded()
+      reassertSurfaceActivity()
       return true
 
     case .resizeSplit(let direction, let amount):
@@ -2038,6 +2096,10 @@ final class WorktreeTerminalState {
       guard let self, let view, self.isLiveSurface(view) else { return false }
       return self.handleGotoTabRequest(target)
     }
+    view.bridge.onMoveTab = { [weak self, weak view] move in
+      guard let self, let view, self.isLiveSurface(view) else { return false }
+      return self.handleMoveTabRequest(tabId, amount: move.amount)
+    }
     view.bridge.onCommandPaletteToggle = { [weak self, weak view] in
       guard let self, let view, self.isLiveSurface(view) else { return false }
       self.onCommandPaletteToggle?()
@@ -2081,6 +2143,22 @@ final class WorktreeTerminalState {
       guard self.isLiveSurface(view) else { return }
       self.recordActiveSurface(view, in: tabId)
       self.emitTaskStatusIfChanged()
+    }
+    view.onOcclusionHeal = { [weak self, weak view] windowIsKey, windowIsVisible in
+      guard let self, let view, self.isLiveSurface(view) else {
+        terminalStateLogger.warning("Occlusion heal dropped: stale surface view.")
+        return
+      }
+      // Stamp only what the window reports; input alone must not mark covered
+      // notifications viewed or keep a covered surface rendering.
+      self.syncFocus(windowIsKey: windowIsKey, windowIsVisible: windowIsVisible)
+      if view.lastOcclusion == false {
+        terminalStateLogger.warning(
+          "Occlusion heal left surface \(view.id) occluded; the window disagrees with the input."
+        )
+      } else {
+        terminalStateLogger.info("Occlusion healed for surface \(view.id) from user input.")
+      }
     }
     view.bridge.onColorChanged = { [weak self, weak view] in
       guard let self, let view, self.isLiveSurface(view) else { return }
@@ -2365,11 +2443,11 @@ final class WorktreeTerminalState {
   /// the remote project dir, then exec a login shell. The `cd` failure is
   /// swallowed so a stale path still drops the user into a usable shell. Nil
   /// for an empty/root path falls back to a bare login shell. The path is
-  /// single-quoted for the login shell that re-parses the session command.
+  /// quoted for whichever login shell re-parses the session command.
   static func remoteDefaultShellCommand(remotePath: String) -> String? {
     let trimmed = remotePath.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty, trimmed != "/" else { return nil }
-    let quoted = "'" + trimmed.replacing("'", with: "'\\''") + "'"
+    let quoted = SSHCommand.loginShellQuote(trimmed)
     return "cd \(quoted) 2>/dev/null; exec \"$SHELL\" -l"
   }
 
@@ -2815,14 +2893,15 @@ final class WorktreeTerminalState {
     onNotificationIndicatorChanged?()
   }
 
-  private func syncFocusIfNeeded() {
-    guard lastWindowIsKey != nil, lastWindowIsVisible != nil else { return }
+  // Runs on cold caches too: `surfaceActivity` fails open on unknown
+  // visibility, so a forced occlusion never outlives a re-selection (#757).
+  private func reassertSurfaceActivity() {
     applySurfaceActivity()
   }
 
   private func updateTree(_ tree: SplitTree<GhosttySurfaceView>, for tabId: TerminalTabID) {
     setTree(tree, for: tabId)
-    syncFocusIfNeeded()
+    reassertSurfaceActivity()
   }
 
   /// Single mutation point for `trees[tabId]`. Recomputes and emits the per-tab
@@ -3245,6 +3324,17 @@ final class WorktreeTerminalState {
     return true
   }
 
+  // Moves the invoking tab left or right, wrapping at the ends per Ghostty's
+  // `move_tab` contract. Reorders only when the invoking tab is the selected
+  // one, so a keybind from a background tab can't shuffle tabs off-screen.
+  private func handleMoveTabRequest(_ tabId: TerminalTabID, amount: Int) -> Bool {
+    guard tabId == tabManager.selectedTabId, tabManager.tabs.count > 1 else { return false }
+    // A same-position wrap (or amount 0) is still a handled keybind: swallow it
+    // rather than let it fall through and beep.
+    tabManager.moveTab(tabId, by: amount)
+    return true
+  }
+
   private func mapDropZone(_ zone: TerminalSplitTreeView.DropZone)
     -> SplitTree<GhosttySurfaceView>.NewDirection
   {
@@ -3277,11 +3367,30 @@ final class WorktreeTerminalState {
   /// Grace window a tab must stay hidden before it hibernates.
   private static let hibernationGraceWindow: Duration = .seconds(5 * 60)
 
-  /// Marks whether this state's worktree is selected and re-diffs visibility.
+  /// Deselection occludes via the manager's `setAllSurfacesOccluded()`; the
+  /// activity re-derivation here is what un-occludes on re-selection, since
+  /// no view-layer sync fires without a remount (#757).
   func setWorktreeSelected(_ selected: Bool) {
     guard isWorktreeSelected != selected else { return }
     isWorktreeSelected = selected
+    reconcileSelection()
+  }
+
+  /// Selection choke point: re-diffs hibernation timers, wakes a dormant
+  /// selection, and re-derives activity, so input works without a view-body run.
+  private func reconcileSelection() {
     refreshTabVisibility()
+    wakeSelectedTabIfDormant()
+    reassertSurfaceActivity()
+  }
+
+  /// Waking waits for the worktree itself: a hidden worktree's dormant tabs
+  /// cannot render, so waking them would only rebuild surfaces and zmx sessions.
+  private func wakeSelectedTabIfDormant() {
+    guard isWorktreeSelected, let selectedTabId = tabManager.selectedTabId,
+      dormantTabLayouts[selectedTabId] != nil
+    else { return }
+    wakeTab(selectedTabId)
   }
 
   /// A tab is hidden unless it is the selected tab of the selected worktree.

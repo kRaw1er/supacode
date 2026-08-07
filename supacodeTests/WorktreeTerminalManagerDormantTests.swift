@@ -121,8 +121,8 @@ struct DormantTerminalTests {
 
   @Test func captureLayoutSnapshotIncludesDormantTab() {
     let state = makeState()
-    let liveTab = state.createTab(focusing: false)!
-    let dormantTab = state.createTab(focusing: false)!
+    let liveTab = state.createTab(activation: .selected)!
+    let dormantTab = state.createTab(activation: .selected)!
     let dormantSurface = firstSurfaceID(state, tab: dormantTab)
 
     state.hibernateTabForTesting(dormantTab)
@@ -139,9 +139,9 @@ struct DormantTerminalTests {
 
   @Test func allSurfaceIDsIncludesDormantLeaves() {
     let state = makeState()
-    let liveTab = state.createTab(focusing: false)!
+    let liveTab = state.createTab(activation: .selected)!
     let liveSurface = firstSurfaceID(state, tab: liveTab)
-    let dormantTab = state.createTab(focusing: false)!
+    let dormantTab = state.createTab(activation: .selected)!
     let dormantSurface = firstSurfaceID(state, tab: dormantTab)
 
     state.hibernateTabForTesting(dormantTab)
@@ -153,7 +153,7 @@ struct DormantTerminalTests {
 
   @Test func tabIDContainingResolvesDormantSurface() {
     let state = makeState()
-    let dormantTab = state.createTab(focusing: false)!
+    let dormantTab = state.createTab(activation: .selected)!
     let dormantSurface = firstSurfaceID(state, tab: dormantTab)
 
     state.hibernateTabForTesting(dormantTab)
@@ -163,7 +163,7 @@ struct DormantTerminalTests {
 
   @Test func hasAnySurfaceTrueWhenOnlyDormantEntriesRemain() {
     let state = makeState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     _ = firstSurfaceID(state, tab: tab)
 
     state.hibernateTabForTesting(tab)
@@ -174,8 +174,8 @@ struct DormantTerminalTests {
 
   @Test func dormantKeysAreSubsetOfTabManagerTabs() {
     let state = makeState()
-    let hibernated = state.createTab(focusing: false)!
-    let live = state.createTab(focusing: false)!
+    let hibernated = state.createTab(activation: .selected)!
+    let live = state.createTab(activation: .selected)!
 
     state.hibernateTabForTesting(hibernated)
 
@@ -187,7 +187,7 @@ struct DormantTerminalTests {
 
   @Test func hasUnseenNotificationForDormantTabRoutesThroughFrozenLeaves() {
     let state = makeState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
 
     state.hibernateTabForTesting(tab)
@@ -208,7 +208,7 @@ struct DormantTerminalTests {
     // The default noop zmx client makes the leaf non-`usesZmx`, so hibernation is
     // refused and the tab stays live.
     let state = makeState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
 
     #expect(!state.canHibernate(tabId: tab))
@@ -222,7 +222,7 @@ struct DormantTerminalTests {
   @Test func fireWithIneligibleLeafReArmsTimer() {
     // A non-zmx leaf can't hibernate; re-arming avoids wedging on a later flip.
     let state = makeState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     _ = firstSurfaceID(state, tab: tab)
     #expect(!state.canHibernate(tabId: tab))
 
@@ -234,7 +234,7 @@ struct DormantTerminalTests {
 
   @Test func hibernationFreezesAgentRecordsIntoLayout() {
     let state = makeState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
     let agentRecord = TerminalLayoutSnapshot.SurfaceAgentRecord(agent: "claude", pids: [42], activity: "busy")
     state.hibernationAgentsBySurface = { [surface: [agentRecord]] }
@@ -254,7 +254,7 @@ struct DormantTerminalTests {
 
   @Test func dormantSnapshotRefreshesAgentRecordsFromLiveMap() {
     let state = makeState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
     let busy = TerminalLayoutSnapshot.SurfaceAgentRecord(agent: "claude", pids: [42], activity: "busy")
     state.hibernationAgentsBySurface = { [surface: [busy]] }
@@ -282,7 +282,7 @@ struct DormantTerminalTests {
 
   @Test func dormantSnapshotClearsAgentRecordsWhenAuthoritativeMapOmitsLeaf() {
     let state = makeState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
     let busy = TerminalLayoutSnapshot.SurfaceAgentRecord(agent: "claude", pids: [42], activity: "busy")
     state.hibernationAgentsBySurface = { [surface: [busy]] }
@@ -302,7 +302,7 @@ struct DormantTerminalTests {
     state.onTabProgressDisplayChanged = { tabId, display in
       captured.withValue { $0[tabId] = display }
     }
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = state.splitTree(for: tab).root!.leftmostLeaf()
 
     // Drive a running stripe through the live pipeline so the tab caches it.
@@ -318,12 +318,43 @@ struct DormantTerminalTests {
     #expect((captured.value[tab] ?? nil) == nil)
   }
 
+  @Test func selectingDormantTabWakesItFromStateLayer() {
+    let state = makeState()
+    state.setWorktreeSelected(true)
+    let live = state.createTab(activation: .selected)!
+    let dormant = state.createTab(activation: .selected)!
+    state.selectTab(live)
+    state.hibernateTabForTesting(dormant)
+    #expect(state.dormantTabLayouts[dormant] != nil)
+
+    // The selection commit alone must wake; no render-driven `splitTree` runs.
+    state.tabManager.selectTab(dormant)
+    #expect(state.dormantTabLayouts[dormant] == nil)
+  }
+
+  @Test func selectingDormantTabInUnselectedWorktreeStaysAsleep() {
+    let state = makeState()
+    let live = state.createTab(activation: .selected)!
+    let dormant = state.createTab(activation: .selected)!
+    state.selectTab(live)
+    state.hibernateTabForTesting(dormant)
+
+    // A hidden worktree's tabs cannot render; waking would only rebuild
+    // surfaces and zmx sessions for nothing.
+    state.tabManager.selectTab(dormant)
+    #expect(state.dormantTabLayouts[dormant] != nil)
+
+    // Selecting the worktree wakes the dormant selection from state.
+    state.setWorktreeSelected(true)
+    #expect(state.dormantTabLayouts[dormant] == nil)
+  }
+
   @Test func wakeReDerivesFirstTabContextAfterEarlierTabCloses() {
     let killed = LockIsolated<[String]>([])
     let state = makeZmxState(killed: killed)
-    let firstTab = state.createTab(focusing: false)!
+    let firstTab = state.createTab(activation: .selected)!
     _ = firstSurfaceID(state, tab: firstTab)
-    let laterTab = state.createTab(focusing: false)!
+    let laterTab = state.createTab(activation: .selected)!
     let laterSurface = firstSurfaceID(state, tab: laterTab)
 
     // Hibernate the later (TAB-context) tab, then close the original first tab so
@@ -357,7 +388,7 @@ struct DormantTerminalTests {
 
   @Test func emitTabProjectionForDormantTabProjectsIsDormantWithoutRemoval() {
     let state = makeState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
 
     var removed: [TerminalTabID] = []
@@ -378,7 +409,7 @@ struct DormantTerminalTests {
 
   @Test func hibernatingAProgressBusyTabClearsTerminalActivity() {
     let state = makeState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = state.splitTree(for: tab).root!.leftmostLeaf()
 
     var projections: [WorktreeTabProjection] = []
@@ -401,8 +432,8 @@ struct DormantTerminalTests {
     let state = makeState()
     #expect(!state.allTabsDormant)
 
-    let liveTab = state.createTab(focusing: false)!
-    let dormantTab = state.createTab(focusing: false)!
+    let liveTab = state.createTab(activation: .selected)!
+    let dormantTab = state.createTab(activation: .selected)!
     _ = firstSurfaceID(state, tab: dormantTab)
 
     // Mixed live + dormant: the row must not read as fully asleep.
@@ -417,7 +448,7 @@ struct DormantTerminalTests {
   @Test func wakeClearsDormantProjectionFlag() {
     let killed = LockIsolated<[String]>([])
     let state = makeZmxState(killed: killed)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     _ = firstSurfaceID(state, tab: tab)
 
     var projections: [WorktreeTabProjection] = []
@@ -436,7 +467,7 @@ struct DormantTerminalTests {
     let harness = makeHarness()
     let worktree = makeWorktree()
     let state = harness.manager.state(for: worktree)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = state.splitTree(for: tab).root!.leftmostLeaf().id
 
     state.hibernateTabForTesting(tab)
@@ -449,7 +480,7 @@ struct DormantTerminalTests {
     let harness = makeHarness()
     let worktree = makeWorktree()
     let state = harness.manager.state(for: worktree)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = state.splitTree(for: tab).root!.leftmostLeaf().id
 
     state.hibernateTabForTesting(tab)
@@ -463,7 +494,7 @@ struct DormantTerminalTests {
     let harness = makeHarness()
     let worktree = makeWorktree()
     let state = harness.manager.state(for: worktree)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = state.splitTree(for: tab).root!.leftmostLeaf().id
 
     state.hibernateTabForTesting(tab)
@@ -479,7 +510,7 @@ struct DormantTerminalTests {
     let harness = makeHarness()
     let worktree = makeWorktree()
     let state = harness.manager.state(for: worktree)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     _ = state.splitTree(for: tab).root!.leftmostLeaf().id
 
     let projections = LockIsolated<[WorktreeRowProjection]>([])
@@ -505,7 +536,7 @@ struct DormantTerminalTests {
     let harness = makeHarness()
     let worktree = makeWorktree()
     let state = harness.manager.state(for: worktree)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = state.splitTree(for: tab).root!.leftmostLeaf().id
     let closed = LockIsolated<Set<UUID>>([])
     state.onSurfacesClosed = { ids in closed.withValue { $0.formUnion(ids) } }
@@ -543,7 +574,7 @@ struct DormantTerminalTests {
     manager.saveLayoutSnapshot = { _, _ in }
     let worktree = makeRemoteWorktree()
     let state = manager.state(for: worktree)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = state.splitTree(for: tab).root!.leftmostLeaf().id
     state.hibernateTabForTesting(tab)
 
@@ -603,7 +634,7 @@ struct DormantTerminalTests {
   @Test func hibernateWakeCycleKeepsSurfaceIDsAndSkipsKill() {
     let killed = LockIsolated<[String]>([])
     let state = makeZmxState(killed: killed)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let originalID = firstSurfaceID(state, tab: tab)
 
     for _ in 0..<3 {
@@ -630,9 +661,9 @@ struct DormantTerminalTests {
   @Test func focusSurfaceWakesDormantTabAndSelectsIt() {
     let killed = LockIsolated<[String]>([])
     let state = makeZmxState(killed: killed)
-    let dormantTab = state.createTab(focusing: false)!
+    let dormantTab = state.createTab(activation: .selected)!
     let dormantID = firstSurfaceID(state, tab: dormantTab)
-    let otherTab = state.createTab(focusing: true)!
+    let otherTab = state.createTab(activation: .focused)!
     _ = firstSurfaceID(state, tab: otherTab)
 
     state.hibernateTab(dormantTab)
@@ -649,11 +680,11 @@ struct DormantTerminalTests {
     HibernationTestSupport.setConfirmCloseSurface(true)
     let killed = LockIsolated<[String]>([])
     let state = makeZmxState(killed: killed)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surfaceID = firstSurfaceID(state, tab: tab)
     // Control: no live leaf reports a running process, so dormancy is the only
     // thing that can raise the prompt below.
-    let idleTab = state.createTab(focusing: true)!
+    let idleTab = state.createTab(activation: .focused)!
     _ = firstSurfaceID(state, tab: idleTab)
     #expect(state.requestCloseTab(idleTab))
     #expect(state.pendingCloseConfirmation == nil)
@@ -677,9 +708,9 @@ struct DormantTerminalTests {
     HibernationTestSupport.setConfirmCloseSurface(true)
     let killed = LockIsolated<[String]>([])
     let state = makeZmxState(killed: killed)
-    let liveTab = state.createTab(focusing: true)!
+    let liveTab = state.createTab(activation: .focused)!
     let liveSurface = firstSurfaceID(state, tab: liveTab)
-    let dormantTab = state.createTab(focusing: false)!
+    let dormantTab = state.createTab(activation: .selected)!
     let dormantSurface = firstSurfaceID(state, tab: dormantTab)
     state.hibernateTab(dormantTab)
 
@@ -699,10 +730,10 @@ struct DormantTerminalTests {
     HibernationTestSupport.setConfirmCloseSurface(true)
     let running = LockIsolated<Set<UUID>>([])
     let state = makeZmxState(surfaceNeedsCloseConfirmation: { view in running.value.contains(view.id) })
-    let liveTab = state.createTab(focusing: true)!
+    let liveTab = state.createTab(activation: .focused)!
     let liveSurface = firstSurfaceID(state, tab: liveTab)
     running.withValue { $0.insert(liveSurface) }
-    let dormantTab = state.createTab(focusing: false)!
+    let dormantTab = state.createTab(activation: .selected)!
     _ = firstSurfaceID(state, tab: dormantTab)
     state.hibernateTab(dormantTab)
 
@@ -720,7 +751,7 @@ struct DormantTerminalTests {
   @Test func wokenTabNoLongerForcesConfirmation() {
     HibernationTestSupport.setConfirmCloseSurface(true)
     let state = makeZmxState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     _ = firstSurfaceID(state, tab: tab)
 
     state.hibernateTab(tab)
@@ -735,7 +766,7 @@ struct DormantTerminalTests {
   @Test func tabWithPendingCloseConfirmationDoesNotHibernate() {
     HibernationTestSupport.setConfirmCloseSurface(true)
     let state = makeZmxState(surfaceNeedsCloseConfirmation: { _ in true })
-    let tab = state.createTab(focusing: true)!
+    let tab = state.createTab(activation: .focused)!
     let surfaceID = firstSurfaceID(state, tab: tab)
 
     #expect(state.requestCloseTab(tab))
@@ -755,7 +786,7 @@ struct DormantTerminalTests {
   @Test func closingDormantTabSkipsConfirmationWhenSettingIsOff() {
     HibernationTestSupport.setConfirmCloseSurface(false)
     let state = makeZmxState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     _ = firstSurfaceID(state, tab: tab)
 
     state.hibernateTab(tab)
@@ -767,7 +798,7 @@ struct DormantTerminalTests {
   @Test func hibernateWakeRestoresSplitShapeAndZoom() {
     let killed = LockIsolated<[String]>([])
     let state = makeZmxState(killed: killed)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let firstID = firstSurfaceID(state, tab: tab)
     #expect(state.performSplitAction(.newSplit(direction: .right), for: firstID))
     let idsBefore = state.surfaceIDs(inTab: tab)
@@ -790,7 +821,7 @@ struct DormantTerminalTests {
   @Test func multiLeafDormantTabRoundTripsThroughSnapshotCodable() throws {
     let killed = LockIsolated<[String]>([])
     let state = makeZmxState(killed: killed)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let firstID = firstSurfaceID(state, tab: tab)
     #expect(state.performSplitAction(.newSplit(direction: .right), for: firstID))
     #expect(state.renameTab(tab, title: "Custom Name"))
@@ -820,7 +851,7 @@ struct DormantTerminalTests {
   @Test func staleRenderOfClosedDormantTabMintsNothing() async {
     let killed = LockIsolated<[String]>([])
     let state = makeZmxState(killed: killed)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
 
     state.hibernateTab(tab)
@@ -836,7 +867,7 @@ struct DormantTerminalTests {
   @Test func midHibernationCloseRequestIsInert() {
     let killed = LockIsolated<[String]>([])
     let state = makeZmxState(killed: killed)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let view = state.splitTree(for: tab).root!.leftmostLeaf()
     let surface = view.id
 
@@ -859,7 +890,7 @@ struct DormantTerminalTests {
   @Test func unseenDotsSurviveHibernateAndWake() {
     let killed = LockIsolated<[String]>([])
     let state = makeZmxState(killed: killed)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
     state.appendHookNotification(title: "Done", body: "body", surfaceID: surface)
     #expect(state.hasUnseenNotification)
@@ -882,7 +913,7 @@ struct DormantTerminalTests {
   @Test func closingDormantTabKillsSessionsAndPurges() async {
     let killed = LockIsolated<[String]>([])
     let state = makeZmxState(killed: killed)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
     var closed: Set<UUID> = []
     var removed: [TerminalTabID] = []
@@ -906,9 +937,9 @@ struct DormantTerminalTests {
   @Test func closeAllSurfacesDrainsDormantAndDropsPresence() {
     let killed = LockIsolated<[String]>([])
     let state = makeZmxState(killed: killed)
-    let liveTab = state.createTab(focusing: false)!
+    let liveTab = state.createTab(activation: .selected)!
     let liveSurface = firstSurfaceID(state, tab: liveTab)
-    let dormantTab = state.createTab(focusing: false)!
+    let dormantTab = state.createTab(activation: .selected)!
     let dormantSurface = firstSurfaceID(state, tab: dormantTab)
     var closed: Set<UUID> = []
     state.onSurfacesClosed = { closed.formUnion($0) }
@@ -927,7 +958,7 @@ struct DormantTerminalTests {
   @Test func canHibernateTrueForZmxTab() {
     let killed = LockIsolated<[String]>([])
     let state = makeZmxState(killed: killed)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     _ = firstSurfaceID(state, tab: tab)
     #expect(state.canHibernate(tabId: tab))
   }
@@ -936,7 +967,7 @@ struct DormantTerminalTests {
     // The default noop zmx client reports no executable, so the surface is not
     // `usesZmx` and tearing it down would kill an unrecoverable shell.
     let state = makeState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     _ = firstSurfaceID(state, tab: tab)
     #expect(!state.canHibernate(tabId: tab))
   }
@@ -1002,7 +1033,7 @@ struct DormantTerminalTests {
     let closed = LockIsolated<Set<UUID>>([])
     captureSurfacesClosed(state, into: closed)
 
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let firstID = firstSurfaceID(state, tab: tab)
     #expect(state.performSplitAction(.newSplit(direction: .right), for: firstID))
     let idsBefore = state.surfaceIDs(inTab: tab)
@@ -1045,7 +1076,7 @@ struct DormantTerminalTests {
     let closed = LockIsolated<Set<UUID>>([])
     captureSurfacesClosed(state, into: closed)
 
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
 
     state.hibernateTabForTesting(tab)
@@ -1164,7 +1195,7 @@ struct HibernationTimerTests {
   @Test func hiddenTabHibernatesAfterGraceWindow() async {
     let harness = makeHarness()
     let state = registerState(harness)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     #expect(state.scheduledHibernationTabsForTesting.contains(tab))
 
     await advance(harness, by: .seconds(5 * 60))
@@ -1177,8 +1208,8 @@ struct HibernationTimerTests {
   @Test func selectingTabCancelsItsTimer() {
     let harness = makeHarness()
     let state = registerState(harness)
-    let tabA = state.createTab(focusing: false)!
-    let tabB = state.createTab(focusing: false)!
+    let tabA = state.createTab(activation: .selected)!
+    let tabB = state.createTab(activation: .selected)!
     state.setWorktreeSelected(true)
     // B is the selected tab, so only A stays scheduled.
     #expect(state.scheduledHibernationTabsForTesting == [tabA])
@@ -1191,8 +1222,8 @@ struct HibernationTimerTests {
   @Test func selectingWorktreeCancelsOnlySelectedTabTimer() {
     let harness = makeHarness()
     let state = registerState(harness)
-    let tabA = state.createTab(focusing: false)!
-    let tabB = state.createTab(focusing: false)!
+    let tabA = state.createTab(activation: .selected)!
+    let tabB = state.createTab(activation: .selected)!
     // Deselected worktree: both scheduled.
     #expect(state.scheduledHibernationTabsForTesting == [tabA, tabB])
 
@@ -1204,8 +1235,8 @@ struct HibernationTimerTests {
   @Test func deselectingWorktreeSchedulesAllTabs() {
     let harness = makeHarness()
     let state = registerState(harness)
-    let tabA = state.createTab(focusing: false)!
-    let tabB = state.createTab(focusing: false)!
+    let tabA = state.createTab(activation: .selected)!
+    let tabB = state.createTab(activation: .selected)!
     state.setWorktreeSelected(true)
     #expect(state.scheduledHibernationTabsForTesting == [tabA])
 
@@ -1216,7 +1247,7 @@ struct HibernationTimerTests {
   @Test func managerSelectionInputDrivesVisibility() {
     let harness = makeHarness()
     let state = registerState(harness)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     #expect(state.scheduledHibernationTabsForTesting.contains(tab))
 
     harness.manager.handleCommand(.setSelectedWorktreeID(harness.worktree.id))
@@ -1231,7 +1262,7 @@ struct HibernationTimerTests {
   @Test func workingAgentTabHibernatesOnScheduleFreezingRecords() async {
     let harness = makeHarness()
     let state = registerState(harness)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
     // An actively-working agent must not block hibernation: the zmx session keeps
     // the process alive and the dormant watcher keeps notifications lossless.
@@ -1258,7 +1289,7 @@ struct HibernationTimerTests {
   @Test func closedTabFireIsInert() async {
     let harness = makeHarness()
     let state = registerState(harness)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
 
     state.closeTab(tab)
@@ -1273,7 +1304,7 @@ struct HibernationTimerTests {
   @Test func visibleTabFireDoesNotHibernate() {
     let harness = makeHarness()
     let state = registerState(harness)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     // The tab is now the selected, visible tab.
     state.setWorktreeSelected(true)
 
@@ -1355,7 +1386,7 @@ struct DormantCLIWakeTests {
   @Test func splitSurfaceOnDormantTabWakesAndReArms() {
     let harness = makeHarness()
     let state = registerState(harness)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
 
     state.hibernateTab(tab)
@@ -1379,7 +1410,7 @@ struct DormantCLIWakeTests {
   @Test func focusSurfaceOnDormantTabWakesToSameSurface() {
     let harness = makeHarness()
     let state = registerState(harness)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
 
     state.hibernateTab(tab)
@@ -1395,7 +1426,7 @@ struct DormantCLIWakeTests {
   @Test func jumpToUnreadReachesDormantTab() {
     let harness = makeHarness()
     let state = registerState(harness)
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
     state.appendHookNotification(title: "Done", body: "body", surfaceID: surface)
 
@@ -1515,7 +1546,7 @@ struct DormantOSCIngestTests {
 
   @Test func osc9ForDormantLeafRecordsNotificationAndFlipsDot() async {
     let state = makeZmxState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
 
     state.hibernateTab(tab)
@@ -1537,7 +1568,7 @@ struct DormantOSCIngestTests {
 
   @Test func osc9DormantLeafIncrementsTabUnseenCount() {
     let state = makeZmxState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
 
     state.hibernateTab(tab)
@@ -1556,7 +1587,7 @@ struct DormantOSCIngestTests {
 
   @Test func closingDormantTabWithUnreadClearsPreservedStateAndIndicator() {
     let state = makeZmxState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
 
     state.hibernateTab(tab)
@@ -1579,7 +1610,7 @@ struct DormantOSCIngestTests {
 
   @Test func closeAllSurfacesWithDormantUnreadClearsPreservedStateAndIndicator() {
     let state = makeZmxState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
 
     state.hibernateTab(tab)
@@ -1603,7 +1634,7 @@ struct DormantOSCIngestTests {
 
   @Test func osc9ForUnknownSurfaceIsDropped() async {
     let state = makeZmxState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     state.hibernateTab(tab)
 
     state.deliverDormantOSCForTesting(surfaceID: UUID(), sequence: osc(9, "Ghost"))
@@ -1615,7 +1646,7 @@ struct DormantOSCIngestTests {
 
   @Test func conEmuShapedOSC9IsDroppedNotNotified() async {
     let state = makeZmxState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
     state.hibernateTab(tab)
 
@@ -1647,7 +1678,7 @@ struct DormantOSCIngestTests {
 
   @Test func osc3008PresenceForDormantLeafReachesHookFunnel() {
     let state = makeZmxState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
     var events: [AgentHookEvent] = []
     state.onAgentHookEvent = { events.append($0) }
@@ -1664,7 +1695,7 @@ struct DormantOSCIngestTests {
 
   @Test func osc3008ForUnknownSurfaceIsDropped() {
     let state = makeZmxState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     var events: [AgentHookEvent] = []
     state.onAgentHookEvent = { events.append($0) }
 
@@ -1678,7 +1709,7 @@ struct DormantOSCIngestTests {
 
   @Test func titleOSCForDormantLeafUpdatesTabRow() {
     let state = makeZmxState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
 
     state.hibernateTab(tab)
@@ -1689,7 +1720,7 @@ struct DormantOSCIngestTests {
 
   @Test func titleOSCForNonFocusedDormantLeafIsIgnored() {
     let state = makeZmxState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let firstID = firstSurfaceID(state, tab: tab)
     #expect(state.performSplitAction(.newSplit(direction: .right), for: firstID))
     #expect(state.surfaceIDs(inTab: tab).count == 2)
@@ -1715,7 +1746,7 @@ struct DormantOSCIngestTests {
 
   @Test func emptyTitleOSCForDormantFocusedLeafIsIgnored() {
     let state = makeZmxState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
 
     state.hibernateTab(tab)
@@ -1731,7 +1762,7 @@ struct DormantOSCIngestTests {
 
   @Test func oscForNowLiveSurfaceProcessesOnceWithoutDuplication() async {
     let state = makeZmxState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
 
     state.hibernateTab(tab)
@@ -1748,7 +1779,7 @@ struct DormantOSCIngestTests {
 
   @Test func oscForJustClosedSurfaceIsCleanlyDropped() async {
     let state = makeZmxState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let surface = firstSurfaceID(state, tab: tab)
 
     state.hibernateTab(tab)
@@ -1785,7 +1816,7 @@ struct DormantOSCIngestTests {
         splitPreserveZoomOnNavigation: { false }
       )
     }
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     let view = state.splitTree(for: tab).root!.leftmostLeaf()
     let surface = view.id
 
@@ -1871,21 +1902,21 @@ struct HibernationBetaGateTests {
   @Test func hiddenTabDoesNotScheduleWhenDisabled() {
     HibernationTestSupport.setHibernation(false)
     let state = makeState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     #expect(!state.scheduledHibernationTabsForTesting.contains(tab))
   }
 
   @Test func hiddenTabSchedulesWhenEnabled() {
     HibernationTestSupport.setHibernation(true)
     let state = makeState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     #expect(state.scheduledHibernationTabsForTesting.contains(tab))
   }
 
   @Test func disablingCancelsPendingTimers() {
     HibernationTestSupport.setHibernation(true)
     let state = makeState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     #expect(state.scheduledHibernationTabsForTesting.contains(tab))
 
     state.applyHibernationEnabled(false)
@@ -1895,7 +1926,7 @@ struct HibernationBetaGateTests {
   @Test func enablingSchedulesHiddenTabs() {
     HibernationTestSupport.setHibernation(false)
     let state = makeState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     #expect(state.scheduledHibernationTabsForTesting.isEmpty)
 
     state.applyHibernationEnabled(true)
@@ -1905,7 +1936,7 @@ struct HibernationBetaGateTests {
   @Test func firingWhileDisabledDoesNotHibernate() {
     HibernationTestSupport.setHibernation(true)
     let state = makeState()
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
 
     // Flip off mid-window: the fire-time re-check must skip hibernation without re-arming.
     state.applyHibernationEnabled(false)
@@ -1933,7 +1964,7 @@ struct HibernationBetaGateTests {
     let state = manager.state(for: worktree)
     // Drive the flag purely through the fan-out command (the production path).
     manager.handleCommand(.setTerminalHibernationEnabled(true))
-    let tab = state.createTab(focusing: false)!
+    let tab = state.createTab(activation: .selected)!
     #expect(state.scheduledHibernationTabsForTesting.contains(tab))
 
     // Flag off fans out a cancel to every state.

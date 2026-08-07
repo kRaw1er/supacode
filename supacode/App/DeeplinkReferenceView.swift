@@ -20,6 +20,11 @@ struct DeeplinkReferenceView: View {
             + " unless \"Allow dangerous actions\" permits them in Developer settings."
         )
         .foregroundStyle(.secondary)
+        Text(
+          // swiftlint:disable:next line_length
+          "Any worktree action, and \(code("repo/<repo_id>/worktree/new")), accepts \(code("background=true")) to leave the sidebar selection and keyboard focus untouched. New tabs and splits then stay in the background instead of becoming active."
+        )
+        .foregroundStyle(.secondary)
       } header: {
         Text("Deeplink Reference").font(.title.bold())
         Text("Use the \(code("supacode://")) URL scheme to control Supacode from the terminal, scripts, or other apps.")
@@ -56,15 +61,21 @@ struct DeeplinkReferenceView: View {
       url: "supacode://worktree/<worktree_id>/script/<script_id>/stop",
       description: "Stop a specific running script by UUID."
     ),
-    .init(url: "supacode://worktree/<worktree_id>/archive", description: "Archive the worktree."),
+    .init(
+      url: "supacode://worktree/<worktree_id>/archive",
+      description: "Archive the worktree. Targeting the current worktree closes its terminals."
+    ),
     .init(url: "supacode://worktree/<worktree_id>/unarchive", description: "Unarchive the worktree."),
-    .init(url: "supacode://worktree/<worktree_id>/delete", description: "Delete the worktree."),
+    .init(
+      url: "supacode://worktree/<worktree_id>/delete",
+      description: "Delete the worktree. Targeting the current worktree closes its terminals."
+    ),
     .init(url: "supacode://worktree/<worktree_id>/pin", description: "Pin the worktree."),
     .init(url: "supacode://worktree/<worktree_id>/unpin", description: "Unpin the worktree."),
     .init(
       url: "supacode://worktree/<worktree_id>/appearance",
       description: "Update title/tint overrides. Omitted fields are preserved; empty title clears; color=none clears.",
-      params: "?title=<title>&color=<red|orange|yellow|green|teal|blue|purple|%23RRGGBB|none>"
+      params: "?title=<title>&color=<red|orange|yellow|green|teal|blue|purple|%23RRGGBB[AA]|none>"
     ),
   ]
 
@@ -106,8 +117,10 @@ struct DeeplinkReferenceView: View {
     .init(url: "supacode://repo/open?path=<absolute-path>", description: "Open a repository."),
     .init(
       url: "supacode://repo/<repo_id>/worktree/new",
-      description: "Create a worktree.",
-      params: "?branch=<name>&base=<ref>&fetch=true&name=<folder>&location=<dir>"
+      description:
+        "Create a worktree. upstream=<ref> sets the new branch's tracking branch, an empty upstream= clears it. "
+        + "pin=true applies to local repositories only.",
+      params: "?branch=<name>&base=<ref>&upstream=<ref>&fetch=true&name=<folder>&location=<dir>&pin=true"
     ),
   ]
 
@@ -133,6 +146,11 @@ private struct DeeplinkEntry: Identifiable {
   let url: String
   let description: String
   var params: String?
+
+  var descriptionText: Text {
+    guard let params else { return Text(description) }
+    return Text("\(description) Optional: \(code(params)).")
+  }
 }
 
 private struct DeeplinkSection: View {
@@ -147,15 +165,9 @@ private struct DeeplinkSection: View {
             Text(row.url)
               .font(.body.monospaced())
               .gridColumnAlignment(.leading)
-            Group {
-              if let params = row.params {
-                Text("\(row.description) Optional: \(code(params)).")
-              } else {
-                Text(row.description)
-              }
-            }
-            .foregroundStyle(.secondary)
-            .gridColumnAlignment(.leading)
+            row.descriptionText
+              .foregroundStyle(.secondary)
+              .gridColumnAlignment(.leading)
           }
         }
       }

@@ -678,7 +678,7 @@ struct WorktreeTerminalManagerTests {
 
     guard
       let tab1 = state.createTab(),
-      let tab2 = state.createTab(focusing: false),
+      let tab2 = state.createTab(activation: .selected),
       let surface1 = state.splitTree(for: tab1).root?.leftmostLeaf(),
       let surface2 = state.splitTree(for: tab2).root?.leftmostLeaf()
     else {
@@ -1010,7 +1010,7 @@ struct WorktreeTerminalManagerTests {
       let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
       let worktree = makeWorktree()
       let state = manager.state(for: worktree)
-      guard let tabId = state.createTab(focusing: false),
+      guard let tabId = state.createTab(activation: .selected),
         let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
       else {
         Issue.record("Expected a tab and surface")
@@ -1033,7 +1033,7 @@ struct WorktreeTerminalManagerTests {
       let state = manager.state(for: worktree)
       state.isSelected = { true }
       state.syncFocus(windowIsKey: true, windowIsVisible: true)
-      guard let tabId = state.createTab(focusing: true),
+      guard let tabId = state.createTab(activation: .focused),
         let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
       else {
         Issue.record("Expected a tab and surface")
@@ -1050,7 +1050,7 @@ struct WorktreeTerminalManagerTests {
     let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
     let worktree = makeWorktree()
     let state = manager.state(for: worktree)
-    guard let tabId = state.createTab(focusing: false),
+    guard let tabId = state.createTab(activation: .selected),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -1118,7 +1118,7 @@ struct WorktreeTerminalManagerTests {
     let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
     let worktree = makeWorktree()
     let state = manager.state(for: worktree)
-    guard let tabId = state.createTab(focusing: false),
+    guard let tabId = state.createTab(activation: .selected),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -1140,7 +1140,7 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceBindingActionPerformer: { _, _ in }
     )
-    guard let tabId = state.createTab(focusing: true),
+    guard let tabId = state.createTab(activation: .focused),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -1174,7 +1174,7 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceBindingActionPerformer: { _, _ in }
     )
-    guard let tabId = state.createTab(focusing: true),
+    guard let tabId = state.createTab(activation: .focused),
       let initialSurface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -1206,7 +1206,7 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceBindingActionPerformer: { _, _ in }
     )
-    guard let tabId = state.createTab(focusing: true),
+    guard let tabId = state.createTab(activation: .focused),
       let initialSurface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -1247,7 +1247,7 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceBindingActionPerformer: { _, _ in }
     )
-    guard let tabId = state.createTab(focusing: true),
+    guard let tabId = state.createTab(activation: .focused),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -1268,7 +1268,7 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceBindingActionPerformer: { _, _ in }
     )
-    guard let tabId = state.createTab(focusing: true),
+    guard let tabId = state.createTab(activation: .focused),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -1289,7 +1289,7 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceNeedsCloseConfirmation: { runningSurfaceIDs.contains($0.id) }
     )
-    guard let tabId = state.createTab(focusing: true),
+    guard let tabId = state.createTab(activation: .focused),
       let initialSurface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -1325,7 +1325,7 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceNeedsCloseConfirmation: { _ in false }
     )
-    guard let tabId = state.createTab(focusing: true) else {
+    guard let tabId = state.createTab(activation: .focused) else {
       Issue.record("Expected a tab")
       return
     }
@@ -1344,7 +1344,7 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceNeedsCloseConfirmation: { _ in true }
     )
-    guard let tabId = state.createTab(focusing: true) else {
+    guard let tabId = state.createTab(activation: .focused) else {
       Issue.record("Expected a tab")
       return
     }
@@ -1367,7 +1367,7 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceBindingActionPerformer: { _, _ in }
     )
-    guard let tabId = state.createTab(focusing: true),
+    guard let tabId = state.createTab(activation: .focused),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -1390,7 +1390,7 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceNeedsCloseConfirmation: { _ in true }
     )
-    guard let tabId = state.createTab(focusing: true) else {
+    guard let tabId = state.createTab(activation: .focused) else {
       Issue.record("Expected a tab")
       return
     }
@@ -1408,7 +1408,7 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceBindingActionPerformer: { _, _ in }
     )
-    guard let tabId = state.createTab(focusing: true),
+    guard let tabId = state.createTab(activation: .focused),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -1429,7 +1429,7 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceBindingActionPerformer: { _, _ in }
     )
-    guard let tabId = state.createTab(focusing: true),
+    guard let tabId = state.createTab(activation: .focused),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -1460,9 +1460,9 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceNeedsCloseConfirmation: { runningSurfaceIDs.contains($0.id) }
     )
-    guard let first = state.createTab(focusing: true),
-      let second = state.createTab(focusing: true),
-      let third = state.createTab(focusing: true),
+    guard let first = state.createTab(activation: .focused),
+      let second = state.createTab(activation: .focused),
+      let third = state.createTab(activation: .focused),
       let secondSurface = state.splitTree(for: second).root?.leftmostLeaf()
     else {
       Issue.record("Expected three tabs")
@@ -1487,9 +1487,9 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceNeedsCloseConfirmation: { runningSurfaceIDs.contains($0.id) }
     )
-    guard let first = state.createTab(focusing: true),
-      let second = state.createTab(focusing: true),
-      let third = state.createTab(focusing: true),
+    guard let first = state.createTab(activation: .focused),
+      let second = state.createTab(activation: .focused),
+      let third = state.createTab(activation: .focused),
       let thirdSurface = state.splitTree(for: third).root?.leftmostLeaf()
     else {
       Issue.record("Expected three tabs")
@@ -1514,9 +1514,9 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceNeedsCloseConfirmation: { runningSurfaceIDs.contains($0.id) }
     )
-    guard let first = state.createTab(focusing: true),
-      let second = state.createTab(focusing: true),
-      let third = state.createTab(focusing: true),
+    guard let first = state.createTab(activation: .focused),
+      let second = state.createTab(activation: .focused),
+      let third = state.createTab(activation: .focused),
       let secondSurface = state.splitTree(for: second).root?.leftmostLeaf()
     else {
       Issue.record("Expected three tabs")
@@ -1541,9 +1541,9 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceNeedsCloseConfirmation: { runningSurfaceIDs.contains($0.id) }
     )
-    guard let first = state.createTab(focusing: true),
-      let second = state.createTab(focusing: true),
-      let third = state.createTab(focusing: true),
+    guard let first = state.createTab(activation: .focused),
+      let second = state.createTab(activation: .focused),
+      let third = state.createTab(activation: .focused),
       let firstSurface = state.splitTree(for: first).root?.leftmostLeaf(),
       let secondSurface = state.splitTree(for: second).root?.leftmostLeaf()
     else {
@@ -1568,6 +1568,38 @@ struct WorktreeTerminalManagerTests {
     #expect(!state.hasTab(first))
   }
 
+  @Test(.dependencies) func ghosttyMoveTabReordersSelectedTab() {
+    let state = WorktreeTerminalState(
+      runtime: GhosttyRuntime(),
+      worktree: makeWorktree()
+    )
+    guard let first = state.createTab(activation: .focused),
+      let second = state.createTab(activation: .focused),
+      let third = state.createTab(activation: .focused),
+      let firstSurface = state.splitTree(for: first).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected three tabs")
+      return
+    }
+
+    // The invoking surface's tab is not the selected one (the last-created tab
+    // is), so the move is ignored rather than reordering a tab off-screen.
+    #expect(state.tabManager.selectedTabId == third)
+    #expect(firstSurface.bridge.onMoveTab?(ghostty_action_move_tab_s(amount: 1)) == false)
+    #expect(state.tabManager.tabs.map(\.id) == [first, second, third])
+
+    // Once its tab is selected, the keybind reorders it and keeps it selected.
+    state.selectTab(first)
+    #expect(firstSurface.bridge.onMoveTab?(ghostty_action_move_tab_s(amount: 1)) == true)
+    #expect(state.tabManager.tabs.map(\.id) == [second, first, third])
+    #expect(state.tabManager.selectedTabId == first)
+
+    // A full-cycle amount lands the tab where it started: still a handled
+    // keybind (true), so it doesn't fall through and beep, and order holds.
+    #expect(firstSurface.bridge.onMoveTab?(ghostty_action_move_tab_s(amount: 3)) == true)
+    #expect(state.tabManager.tabs.map(\.id) == [second, first, third])
+  }
+
   @Test(.dependencies) func closingTabIndependentlyNarrowsPendingTabPayload() {
     @Shared(.settingsFile) var settingsFile
     $settingsFile.withLock { $0.global.confirmCloseSurface = true }
@@ -1577,9 +1609,9 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceNeedsCloseConfirmation: { runningSurfaceIDs.contains($0.id) }
     )
-    guard let first = state.createTab(focusing: true),
-      let second = state.createTab(focusing: true),
-      let third = state.createTab(focusing: true),
+    guard let first = state.createTab(activation: .focused),
+      let second = state.createTab(activation: .focused),
+      let third = state.createTab(activation: .focused),
       let secondSurface = state.splitTree(for: second).root?.leftmostLeaf()
     else {
       Issue.record("Expected three tabs")
@@ -1607,7 +1639,7 @@ struct WorktreeTerminalManagerTests {
       worktree: makeWorktree(),
       surfaceBindingActionPerformer: { _, _ in }
     )
-    guard let tabId = state.createTab(focusing: true),
+    guard let tabId = state.createTab(activation: .focused),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -1631,7 +1663,7 @@ struct WorktreeTerminalManagerTests {
       let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
       let worktree = makeWorktree()
       let state = manager.state(for: worktree)
-      guard let tabId = state.createTab(focusing: false),
+      guard let tabId = state.createTab(activation: .selected),
         let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
       else {
         Issue.record("Expected a tab and surface")
@@ -1721,7 +1753,7 @@ struct WorktreeTerminalManagerTests {
     let worktree = makeRemoteWorktree()
     let manager = makeZmxBackedManager(probe: probe, worktree: worktree)
     let state = manager.state(for: worktree)
-    guard let tabID = state.createTab(focusing: false),
+    guard let tabID = state.createTab(activation: .selected),
       let surfaceID = state.splitTree(for: tabID).root?.leftmostLeaf().id
     else {
       Issue.record("Expected a tab and surface")
@@ -1745,7 +1777,7 @@ struct WorktreeTerminalManagerTests {
     let worktree = makeRemoteWorktree()
     let manager = makeZmxBackedManager(probe: probe, worktree: worktree)
     let state = manager.state(for: worktree)
-    guard let tabID = state.createTab(focusing: true),
+    guard let tabID = state.createTab(activation: .focused),
       let surfaceID = state.splitTree(for: tabID).root?.leftmostLeaf().id
     else {
       Issue.record("Expected a tab and surface")
@@ -1767,7 +1799,7 @@ struct WorktreeTerminalManagerTests {
     let worktree = makeRemoteWorktree()
     let manager = makeZmxBackedManager(probe: probe, worktree: worktree)
     let state = manager.state(for: worktree)
-    guard let tabID = state.createTab(focusing: true),
+    guard let tabID = state.createTab(activation: .focused),
       let surface = state.splitTree(for: tabID).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -1795,7 +1827,7 @@ struct WorktreeTerminalManagerTests {
       surfaceBindingActionPerformer: { _, _ in }
     )
     let state = manager.state(for: worktree)
-    guard let tabID = state.createTab(focusing: true),
+    guard let tabID = state.createTab(activation: .focused),
       let surface = state.splitTree(for: tabID).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -1825,7 +1857,7 @@ struct WorktreeTerminalManagerTests {
       surfaceBindingActionPerformer: { _, _ in }
     )
     let state = manager.state(for: worktree)
-    guard let tabID = state.createTab(focusing: true),
+    guard let tabID = state.createTab(activation: .focused),
       let surface = state.splitTree(for: tabID).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -1849,7 +1881,7 @@ struct WorktreeTerminalManagerTests {
     let worktree = makeRemoteWorktree()
     let manager = makeZmxBackedManager(probe: probe, worktree: worktree)
     let state = manager.state(for: worktree)
-    guard let tabID = state.createTab(focusing: true),
+    guard let tabID = state.createTab(activation: .focused),
       let surfaceID = state.splitTree(for: tabID).root?.leftmostLeaf().id
     else {
       Issue.record("Expected a tab and surface")
@@ -1893,7 +1925,7 @@ struct WorktreeTerminalManagerTests {
       return manager
     }
     let state = manager.state(for: worktree)
-    guard let tabID = state.createTab(focusing: false),
+    guard let tabID = state.createTab(activation: .selected),
       let surfaceID = state.splitTree(for: tabID).root?.leftmostLeaf().id
     else {
       Issue.record("Expected a tab and surface")
@@ -1914,7 +1946,7 @@ struct WorktreeTerminalManagerTests {
     let worktree = makeRemoteWorktree()
     let manager = makeZmxBackedManager(probe: probe, worktree: worktree)
     let state = manager.state(for: worktree)
-    guard let tabID = state.createTab(focusing: false),
+    guard let tabID = state.createTab(activation: .selected),
       let surfaceID = state.splitTree(for: tabID).root?.leftmostLeaf().id
     else {
       Issue.record("Expected a tab and surface")
@@ -1960,7 +1992,7 @@ struct WorktreeTerminalManagerTests {
     let worktree = makeRemoteWorktree()
     let manager = makeZmxBackedManager(probe: probe, worktree: worktree)
     let state = manager.state(for: worktree)
-    guard let tabID = state.createTab(focusing: false),
+    guard let tabID = state.createTab(activation: .selected),
       let surfaceID = state.splitTree(for: tabID).root?.leftmostLeaf().id
     else {
       Issue.record("Expected a tab and surface")
@@ -1987,7 +2019,7 @@ struct WorktreeTerminalManagerTests {
     let worktree = makeRemoteWorktree()
     let manager = makeZmxBackedManager(probe: probe, worktree: worktree)
     let state = manager.state(for: worktree)
-    guard let tabID = state.createTab(focusing: false),
+    guard let tabID = state.createTab(activation: .selected),
       let surfaceID = state.splitTree(for: tabID).root?.leftmostLeaf().id
     else {
       Issue.record("Expected a tab and surface")
@@ -2017,7 +2049,7 @@ struct WorktreeTerminalManagerTests {
     let worktree = makeRemoteWorktree()
     let manager = makeZmxBackedManager(probe: probe, worktree: worktree)
     let state = manager.state(for: worktree)
-    guard let tabID = state.createTab(focusing: false),
+    guard let tabID = state.createTab(activation: .selected),
       let surfaceID = state.splitTree(for: tabID).root?.leftmostLeaf().id
     else {
       Issue.record("Expected a tab and surface")
@@ -2042,7 +2074,7 @@ struct WorktreeTerminalManagerTests {
     let probe = ZmxTestProbe(listing: [])
     let manager = makeZmxBackedManager(probe: probe)
     let state = manager.state(for: makeWorktree())
-    guard let tabId = state.createTab(focusing: true),
+    guard let tabId = state.createTab(activation: .focused),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -2086,7 +2118,7 @@ struct WorktreeTerminalManagerTests {
       surfaceBindingActionPerformer: { _, _ in }
     )
     let state = manager.state(for: makeWorktree())
-    guard let tabId = state.createTab(focusing: true),
+    guard let tabId = state.createTab(activation: .focused),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -2122,7 +2154,7 @@ struct WorktreeTerminalManagerTests {
     let probe = ZmxTestProbe(listing: [])
     let manager = makeZmxBackedManager(probe: probe)
     let state = manager.state(for: makeWorktree())
-    guard let tabId = state.createTab(focusing: true),
+    guard let tabId = state.createTab(activation: .focused),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -2152,7 +2184,7 @@ struct WorktreeTerminalManagerTests {
     let probe = ZmxTestProbe(listing: [])
     let manager = makeZmxBackedManager(probe: probe)
     let state = manager.state(for: makeWorktree())
-    guard let tabId = state.createTab(focusing: true),
+    guard let tabId = state.createTab(activation: .focused),
       let initialSurface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -2193,7 +2225,7 @@ struct WorktreeTerminalManagerTests {
     let probe = ZmxTestProbe(listing: [])
     let manager = makeZmxBackedManager(probe: probe)
     let state = manager.state(for: makeWorktree())
-    guard let tabId = state.createTab(focusing: true),
+    guard let tabId = state.createTab(activation: .focused),
       let initialSurface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -2234,7 +2266,7 @@ struct WorktreeTerminalManagerTests {
     state.onCommandPaletteToggle = {
       toggled.setValue(true)
     }
-    guard let tabId = state.createTab(focusing: true),
+    guard let tabId = state.createTab(activation: .focused),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -2258,7 +2290,7 @@ struct WorktreeTerminalManagerTests {
     let probe = ZmxTestProbe(listing: [])
     let manager = makeZmxBackedManager(probe: probe)
     let state = manager.state(for: makeWorktree())
-    guard let tabId = state.createTab(focusing: false),
+    guard let tabId = state.createTab(activation: .selected),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -2284,7 +2316,7 @@ struct WorktreeTerminalManagerTests {
     let probe = ZmxTestProbe(listing: nil)
     let manager = makeZmxBackedManager(probe: probe)
     let state = manager.state(for: makeWorktree())
-    guard let tabId = state.createTab(focusing: false),
+    guard let tabId = state.createTab(activation: .selected),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -2307,7 +2339,7 @@ struct WorktreeTerminalManagerTests {
     let probe = ZmxTestProbe(listing: [])
     let manager = makeZmxBackedManager(probe: probe)
     let state = manager.state(for: makeWorktree())
-    guard let tabId = state.createTab(focusing: false),
+    guard let tabId = state.createTab(activation: .selected),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -2334,7 +2366,7 @@ struct WorktreeTerminalManagerTests {
       surfaceBindingActionPerformer: { _, _ in }
     )
     let state = manager.state(for: makeWorktree())
-    guard let tabId = state.createTab(focusing: false),
+    guard let tabId = state.createTab(activation: .selected),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -2365,7 +2397,7 @@ struct WorktreeTerminalManagerTests {
       surfaceBindingActionPerformer: { _, _ in }
     )
     let state = manager.state(for: makeWorktree())
-    guard let tabId = state.createTab(focusing: false),
+    guard let tabId = state.createTab(activation: .selected),
       let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
     else {
       Issue.record("Expected a tab and surface")
@@ -2462,7 +2494,7 @@ struct WorktreeTerminalManagerTests {
       let worktree = makeWorktree()
       let state = manager.state(for: worktree)
       state.notificationsEnabled = false
-      guard let tabId = state.createTab(focusing: false),
+      guard let tabId = state.createTab(activation: .selected),
         let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
       else {
         Issue.record("Expected a tab and surface")
@@ -2995,7 +3027,7 @@ struct WorktreeTerminalManagerTests {
     let state = manager.state(for: worktree)
 
     guard let tab1 = state.createTab(),
-      let tab2 = state.createTab(focusing: false)
+      let tab2 = state.createTab(activation: .selected)
     else {
       Issue.record("Expected tabs to be created")
       return
@@ -3415,6 +3447,141 @@ struct WorktreeTerminalManagerTests {
     #expect(statuses == [.running])
   }
 
+  // MARK: - Selection occlusion re-assert (#757)
+
+  @Test func reselectingWorktreeReassertsSurfaceOcclusionAndFocus() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let worktree = makeWorktree()
+    let state = manager.state(for: worktree)
+    manager.handleCommand(.setSelectedWorktreeID(worktree.id))
+    let tab = state.createTab(activation: .selected)!
+    let surface = state.splitTree(for: tab).root!.leftmostLeaf()
+    state.syncFocus(windowIsKey: true, windowIsVisible: true)
+    #expect(surface.lastOcclusion == true)
+    #expect(surface.isFocusedForTesting)
+
+    // A transient selection flap must not leave the re-selected worktree's
+    // surfaces occluded and unfocused; no view-layer syncFocus fires when the
+    // detail view never remounts.
+    manager.handleCommand(.setSelectedWorktreeID(nil))
+    #expect(surface.lastOcclusion == false)
+    #expect(!surface.isFocusedForTesting)
+
+    manager.handleCommand(.setSelectedWorktreeID(worktree.id))
+    #expect(surface.lastOcclusion == true)
+    #expect(surface.isFocusedForTesting)
+  }
+
+  @Test func coldCacheSelectionFlapStillUnoccludesOnReselection() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let worktree = makeWorktree()
+    let state = manager.state(for: worktree)
+    manager.handleCommand(.setSelectedWorktreeID(worktree.id))
+    let tab = state.createTab(activation: .selected)!
+    let surface = state.splitTree(for: tab).root!.leftmostLeaf()
+
+    // No syncFocus ever ran: the window caches are still unseeded. A flap must
+    // not latch; unknown visibility fails open on re-selection.
+    manager.handleCommand(.setSelectedWorktreeID(nil))
+    #expect(surface.lastOcclusion == false)
+
+    manager.handleCommand(.setSelectedWorktreeID(worktree.id))
+    #expect(surface.lastOcclusion == true)
+  }
+
+  @Test func occlusionHealCallbackRestoresActivityAndFocus() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let worktree = makeWorktree()
+    let state = manager.state(for: worktree)
+    manager.handleCommand(.setSelectedWorktreeID(worktree.id))
+    let tab = state.createTab(activation: .selected)!
+    let surface = state.splitTree(for: tab).root!.leftmostLeaf()
+    state.syncFocus(windowIsKey: false, windowIsVisible: false)
+    #expect(surface.lastOcclusion == false)
+
+    // The user-input heal must restore occlusion AND focus, not just repaint.
+    surface.onOcclusionHeal?(true, true)
+    #expect(surface.lastOcclusion == true)
+    #expect(surface.isFocusedForTesting)
+  }
+
+  @Test func occlusionHealDoesNotInventVisibilityForCoveredWindow() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let worktree = makeWorktree()
+    let state = manager.state(for: worktree)
+    manager.handleCommand(.setSelectedWorktreeID(worktree.id))
+    let tab = state.createTab(activation: .selected)!
+    let surface = state.splitTree(for: tab).root!.leftmostLeaf()
+    state.syncFocus(windowIsKey: true, windowIsVisible: false)
+    #expect(surface.lastOcclusion == false)
+
+    // Input on a window the server reports covered must not stamp visibility:
+    // that would mark notifications viewed and render a covered surface.
+    surface.onOcclusionHeal?(true, false)
+    #expect(surface.lastOcclusion == false)
+  }
+
+  @Test func staleSurfaceHealClosureIsInert() {
+    HibernationTestSupport.enableHibernation()
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let worktree = makeWorktree()
+    let state = manager.state(for: worktree)
+    manager.handleCommand(.setSelectedWorktreeID(worktree.id))
+    let liveTab = state.createTab(activation: .selected)!
+    let liveSurface = state.splitTree(for: liveTab).root!.leftmostLeaf()
+    let staleTab = state.createTab(activation: .selected)!
+    let staleSurface = state.splitTree(for: staleTab).root!.leftmostLeaf()
+    let staleHeal = staleSurface.onOcclusionHeal
+    state.selectTab(liveTab)
+    state.hibernateTabForTesting(staleTab)
+    state.syncFocus(windowIsKey: false, windowIsVisible: false)
+    #expect(liveSurface.lastOcclusion == false)
+
+    // A hibernated surface's captured heal closure must not stamp visibility
+    // into the state (the zombie-surface class from PR #648).
+    staleHeal?(true, true)
+    #expect(liveSurface.lastOcclusion == false)
+  }
+
+  @Test func worktreeReselectionHealsForcedOcclusion() {
+    let state = WorktreeTerminalState(
+      runtime: GhosttyRuntime(),
+      worktree: makeWorktree(),
+      splitPreserveZoomOnNavigation: { false }
+    )
+    state.setWorktreeSelected(true)
+    let tab = state.createTab(activation: .selected)!
+    let surface = state.splitTree(for: tab).root!.leftmostLeaf()
+    state.syncFocus(windowIsKey: true, windowIsVisible: true)
+    #expect(surface.lastOcclusion == true)
+
+    state.setAllSurfacesOccluded()
+    state.setWorktreeSelected(false)
+    #expect(surface.lastOcclusion == false)
+
+    state.setWorktreeSelected(true)
+    #expect(surface.lastOcclusion == true)
+  }
+
+  @Test func reselectionDoesNotOverrideCachedWindowInvisibility() {
+    let state = WorktreeTerminalState(
+      runtime: GhosttyRuntime(),
+      worktree: makeWorktree(),
+      splitPreserveZoomOnNavigation: { false }
+    )
+    state.setWorktreeSelected(true)
+    let tab = state.createTab(activation: .selected)!
+    let surface = state.splitTree(for: tab).root!.leftmostLeaf()
+    state.syncFocus(windowIsKey: true, windowIsVisible: false)
+    #expect(surface.lastOcclusion == false)
+
+    // Re-selection re-derives activity from the cached window state; it must
+    // not invent visibility the window never reported.
+    state.setWorktreeSelected(false)
+    state.setWorktreeSelected(true)
+    #expect(surface.lastOcclusion == false)
+  }
+
   private func makeWorktree(id: String = "/tmp/repo/wt-1") -> Worktree {
     let name = URL(fileURLWithPath: id).lastPathComponent
     return Worktree(
@@ -3707,7 +3874,7 @@ struct WorktreeTerminalManagerTests {
     let state = manager.state(for: worktree)
 
     guard let firstTabId = state.createTab(),
-      let secondTabId = state.createTab(focusing: true)
+      let secondTabId = state.createTab(activation: .focused)
     else {
       Issue.record("Expected two tabs to be created")
       return
@@ -4006,7 +4173,7 @@ struct WorktreeTerminalManagerTests {
 
     guard
       let tabA = state.createTab(),
-      let tabB = state.createTab(focusing: false),
+      let tabB = state.createTab(activation: .selected),
       let surfaceA = state.splitTree(for: tabA).root?.leftmostLeaf(),
       let surfaceB = state.splitTree(for: tabB).root?.leftmostLeaf()
     else {
@@ -4035,7 +4202,7 @@ struct WorktreeTerminalManagerTests {
 
     guard
       let tabA = state.createTab(),
-      let tabB = state.createTab(focusing: false),
+      let tabB = state.createTab(activation: .selected),
       let surfaceA = state.splitTree(for: tabA).root?.leftmostLeaf(),
       let surfaceB = state.splitTree(for: tabB).root?.leftmostLeaf()
     else {

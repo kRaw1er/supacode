@@ -15,7 +15,7 @@ func shellScript(_ path: Path) -> String {
 }
 
 let ghosttyFingerprintInputScript = """
-"${SRCROOT}/\(ghosttyBuildScriptPath.pathString)" --print-fingerprint
+"./\(ghosttyBuildScriptPath.pathString)" --print-fingerprint
 """
 
 let appResources: ResourceFileElements = [
@@ -74,6 +74,7 @@ let testDependencies: [TargetDependency] = [
 let sharedTestSupportSources: [Path] = [
   "supacodeTests/AgentPresence+TestHelpers.swift",
   "supacodeTests/BrandedIDTestSupport.swift",
+  "supacodeTests/LoginShellTestSupport.swift",
   "supacodeTests/ProcessTestSupport.swift",
   "supacodeTests/RemoteRepoTestSupport.swift",
   "supacodeTests/RepositoriesSidebarTestHelpers.swift",
@@ -92,6 +93,7 @@ let gitTestSources: [Path] = [
   "supacodeTests/Git*.swift",
   "supacodeTests/RemoteSSHCommandTests.swift",
   "supacodeTests/ShellClient*.swift",
+  "supacodeTests/SocketLivenessCLITests.swift",
   "supacodeTests/WorktreeEnvironmentTests.swift",
   "supacodeTests/WorktreeStatusCLITests.swift",
 ]
@@ -223,6 +225,9 @@ let project = Project(
       bundleId: "app.supabit.supacode.settings-shared",
       deploymentTargets: .macOS("26.0"),
       infoPlist: .default,
+      resources: [
+        .folderReference(path: "Resources/Skills"),
+      ],
       buildableFolders: [
         "SupacodeSettingsShared",
       ],

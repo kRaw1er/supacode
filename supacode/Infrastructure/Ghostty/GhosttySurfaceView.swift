@@ -92,6 +92,11 @@ final class GhosttySurfaceView: NSView, Identifiable {
   private var lastPerformKeyEvent: TimeInterval?
   private var currentCursor: NSCursor = .iBeam
   private var focused = false
+  // True between a left press this view forwarded to the terminal and its release. mouseUp only
+  // reports a release when it is set, so a consumed focus-transfer press (which never sets it,
+  // whether released here or dragged in from another split) can't orphan a release. Cleared at
+  // the top of localEventLeftMouseDown so an interrupted gesture can't leave it stale.
+  private var leftMousePressed = false
   private var markedText = NSMutableAttributedString()
   private var keyboardLayoutChangeKeyUpSuppression: KeyboardLayoutChangeKeyUpSuppression?
   // Agent presence pushed from app state; gates Cmd+V image-paste routing.
@@ -99,7 +104,7 @@ final class GhosttySurfaceView: NSView, Identifiable {
   private var keyTextAccumulator: [String]?
   private var cellSize: CGSize = .zero
   private var lastScrollbar: ScrollbarState?
-  private var lastOcclusion: Bool?
+  private(set) var lastOcclusion: Bool?
   private var lastSurfaceFocus: Bool?
   private var eventMonitor: Any?
   private var notificationObservers: [NSObjectProtocol] = []
@@ -131,6 +136,10 @@ final class GhosttySurfaceView: NSView, Identifiable {
     }
   }
   var onFocusChange: ((Bool) -> Void)?
+  /// Asks the owning state to re-derive activity because user input reached an
+  /// occluded surface, passing the window's fresh key/visibility readings so
+  /// input alone never stamps unproven visibility into the state.
+  var onOcclusionHeal: ((_ windowIsKey: Bool, _ windowIsVisible: Bool) -> Void)?
   /// Asked on re-attachment to a window: should this surface re-claim
   /// firstResponder right now? SwiftUI detaches sibling panes during split
   /// rebuilds (e.g. after closing a surface), and AppKit doesn't auto-promote
@@ -659,6 +668,7 @@ final class GhosttySurfaceView: NSView, Identifiable {
   }
 
   override func keyDown(with event: NSEvent) {
+    healOcclusionFromUserInput(requiresVisibleWindow: false)
     guard let surface else {
       interpretKeyEvents([event])
       return
@@ -764,12 +774,19 @@ final class GhosttySurfaceView: NSView, Identifiable {
   }
 
   override func mouseDown(with event: NSEvent) {
+    healOcclusionFromUserInput(requiresVisibleWindow: true)
+    leftMousePressed = true
     sendMouseButton(event, state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_LEFT)
   }
 
   override func mouseUp(with event: NSEvent) {
+    let didSendPress = leftMousePressed
+    leftMousePressed = false
     prevPressureStage = 0
-    sendMouseButton(event, state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_LEFT)
+    // Only release for a press we actually sent (see leftMousePressed).
+    if didSendPress {
+      sendMouseButton(event, state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_LEFT)
+    }
     if let surface {
       ghostty_surface_mouse_pressure(surface, 0, 0)
     }
@@ -837,6 +854,7 @@ final class GhosttySurfaceView: NSView, Identifiable {
   }
 
   override func scrollWheel(with event: NSEvent) {
+    healOcclusionFromUserInput(requiresVisibleWindow: true)
     guard let surface else { return }
     var scrollX = event.scrollingDeltaX
     var scrollY = event.scrollingDeltaY
@@ -897,11 +915,20 @@ final class GhosttySurfaceView: NSView, Identifiable {
   }
 
   private func localEventLeftMouseDown(_ event: NSEvent) -> NSEvent? {
+    // Clear stale press state up front so an interrupted gesture can't orphan a later release.
+    leftMousePressed = false
     guard let window, event.window != nil, window == event.window else { return event }
-    let location = convert(event.locationInWindow, from: nil)
-    guard hitTest(location) == self else { return event }
-    guard !NSApp.isActive || !window.isKeyWindow else { return event }
-    guard !focused else { return event }
+    // Hit-test in content-view space: the surface's frame origin tracks the scroll
+    // offset, so a self-space hit test double-applies it and misfires in scrollback.
+    guard window.contentView?.hitTest(event.locationInWindow) == self else { return event }
+    guard window.firstResponder !== self else { return event }
+    // App and window already active: this click only transfers split focus, so consume it
+    // instead of forwarding a press the terminal would later pair with an orphaned release.
+    if NSApp.isActive, window.isKeyWindow {
+      // Only consume when focus actually transfers; otherwise forward so the click isn't lost.
+      guard window.makeFirstResponder(self) else { return event }
+      return nil
+    }
     window.makeFirstResponder(self)
     return event
   }
@@ -1061,7 +1088,44 @@ final class GhosttySurfaceView: NSView, Identifiable {
       return
     }
     lastOcclusion = visible
+    surfaceLogger.info("Surface \(self.id) occlusion -> \(visible ? "visible" : "occluded")")
     ghostty_surface_set_occlusion(surface, visible)
+  }
+
+  private func healOcclusionFromUserInput(requiresVisibleWindow: Bool) {
+    guard let window else { return }
+    let shouldHeal = Self.shouldHealOcclusion(
+      lastOcclusion: lastOcclusion,
+      windowIsKey: window.isKeyWindow,
+      windowIsVisible: window.occlusionState.contains(.visible),
+      requiresVisibleWindow: requiresVisibleWindow
+    )
+    guard shouldHeal else {
+      if lastOcclusion == false {
+        surfaceLogger.debug(
+          "Occlusion heal skipped for surface \(self.id): window not key or not reported visible."
+        )
+      }
+      return
+    }
+    let occlusionState = window.occlusionState.rawValue
+    surfaceLogger.debug(
+      "Surface \(self.id) received user input while occluded (occlusionState: \(occlusionState)); requesting heal."
+    )
+    onOcclusionHeal?(window.isKeyWindow, window.occlusionState.contains(.visible))
+  }
+
+  /// A key press requests a heal even when the window server reports covered;
+  /// the request is advisory, the state defers to the window's fresh readings.
+  /// Pointer events also require a visible report up front.
+  static func shouldHealOcclusion(
+    lastOcclusion: Bool?,
+    windowIsKey: Bool,
+    windowIsVisible: Bool,
+    requiresVisibleWindow: Bool
+  ) -> Bool {
+    guard lastOcclusion == false, windowIsKey else { return false }
+    return !requiresVisibleWindow || windowIsVisible
   }
 
   private func setSurfaceFocus(_ focused: Bool) {
@@ -1552,6 +1616,9 @@ final class GhosttySurfaceView: NSView, Identifiable {
     /// Records every `performBindingAction` call so tests can assert the
     /// binding was actually invoked (the C surface is nil under xctest).
     var recordedBindingActions: [String] = []
+
+    /// Read-only responder-focus seam for the #757 activity tests.
+    var isFocusedForTesting: Bool { focused }
   #endif
 
   private func translationState(_ event: NSEvent, surface: ghostty_surface_t) -> (

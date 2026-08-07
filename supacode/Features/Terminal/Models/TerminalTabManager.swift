@@ -28,6 +28,8 @@ final class TerminalTabManager {
 
   private static let logger = SupaLogger("TabManager")
 
+  /// `selecting: false` appends a background tab and leaves the selection alone.
+  /// Keyboard focus is the caller's business; see `TabActivation`.
   func createTab(
     title: String,
     customTitle: String? = nil,
@@ -35,7 +37,8 @@ final class TerminalTabManager {
     isTitleLocked: Bool = false,
     tintColor: RepositoryColor? = nil,
     isBlockingScript: Bool = false,
-    id: UUID? = nil
+    id: UUID? = nil,
+    selecting: Bool = true
   ) -> TerminalTabID {
     let tabID: TerminalTabID
     if let id {
@@ -61,14 +64,20 @@ final class TerminalTabManager {
       tintColor: tintColor,
       isBlockingScript: isBlockingScript
     )
-    if let selectedTabId,
+    // Background tabs append: inserting after the unchanged selection would land a
+    // run of them in reverse order.
+    if selecting, let selectedTabId,
       let selectedIndex = tabs.firstIndex(where: { $0.id == selectedTabId })
     {
       tabs.insert(tab, at: selectedIndex + 1)
     } else {
       tabs.append(tab)
     }
-    selectedTabId = tab.id
+    // Still select when nothing was selected: "don't move the selection" cannot
+    // mean leaving the worktree with no visible tab at all.
+    if selecting || selectedTabId == nil {
+      selectedTabId = tab.id
+    }
     return tab.id
   }
 
@@ -137,6 +146,26 @@ final class TerminalTabManager {
     guard existingIds == incomingIds else { return }
     let map = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, $0) })
     tabs = orderedIds.compactMap { map[$0] }
+  }
+
+  /// Moves the tab by `amount`, wrapping cyclically at the ends per Ghostty's
+  /// `move_tab` contract. Leaves the selection untouched. Returns whether the
+  /// order actually changed.
+  @discardableResult
+  func moveTab(_ id: TerminalTabID, by amount: Int) -> Bool {
+    guard amount != 0, tabs.count > 1,
+      let current = tabs.firstIndex(where: { $0.id == id })
+    else { return false }
+    let count = tabs.count
+    // Reduce first: `amount` is Ghostty's unrestricted `ssize_t`, so adding a
+    // near-`Int.max` offset straight to `current` would overflow and trap.
+    let destination = (current + amount % count + count) % count
+    guard destination != current else { return false }
+    var moved = tabs
+    let item = moved.remove(at: current)
+    moved.insert(item, at: destination)
+    tabs = moved
+    return true
   }
 
   func closeTab(_ id: TerminalTabID) {

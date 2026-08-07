@@ -103,9 +103,13 @@ nonisolated enum DeeplinkURLBuilder {
   struct WorktreeNewOptions {
     var branch: String?
     var base: String?
+    /// Upstream branch for the new branch; empty means "no upstream", `nil`
+    /// leaves tracking to Git.
+    var upstream: String?
     var fetch: Bool
     var name: String?
     var location: String?
+    var pin = false
   }
 
   static func repoWorktreeNew(repoID: String, options: WorktreeNewOptions) -> String {
@@ -113,9 +117,11 @@ nonisolated enum DeeplinkURLBuilder {
     var params: [String] = []
     if let branch = options.branch { params.append("branch=\(percentEncodeQueryValue(branch))") }
     if let base = options.base { params.append("base=\(percentEncodeQueryValue(base))") }
+    if let upstream = options.upstream { params.append("upstream=\(percentEncodeQueryValue(upstream))") }
     if options.fetch { params.append("fetch=true") }
     if let name = options.name { params.append("name=\(percentEncodeQueryValue(name))") }
     if let location = options.location { params.append("location=\(percentEncodeQueryValue(location))") }
+    if options.pin { params.append("pin=true") }
     if !params.isEmpty { url += "?\(params.joined(separator: "&"))" }
     return url
   }

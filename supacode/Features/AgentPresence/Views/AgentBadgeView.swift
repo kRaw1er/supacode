@@ -61,10 +61,12 @@ struct AgentBadgeView: View {
       ? (resolvedScheme == .dark ? .black : .white)
       : (resolvedScheme == .dark ? .white : .black)
 
+    // Force template on the red error badge so a full-color mark still knocks out;
+    // otherwise mirror the asset's own catalog template intent.
+    let isTemplate = (visual == .error) || (NSImage(named: agent.assetName)?.isTemplate ?? false)
+
     Image(agent.assetName)
-      // Force template on the red badge so a full-color mark still knocks out;
-      // `nil` elsewhere keeps each asset's own catalog intent.
-      .renderingMode(visual == .error ? .template : nil)
+      .renderingMode(isTemplate ? .template : .original)
       .resizable()
       .aspectRatio(contentMode: .fit)
       .accessibilityLabel(visual.describing(agent))

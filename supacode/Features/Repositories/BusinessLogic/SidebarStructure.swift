@@ -510,7 +510,7 @@ extension RepositoriesFeature.Action {
     // The pin flips and the create / script paths rewrite `isPinned`, the row
     // roster, or the selection, all of which the selection slice projects.
     case .createRandomWorktreeSucceeded, .createRandomWorktreeFailed,
-      .pendingWorktreeProgressUpdated,
+      .pendingWorktreeProgressUpdated, .cancelPendingWorktree,
       .archiveScriptCompleted, .deleteScriptCompleted, .scriptCompleted,
       .consumeSetupScript,
       .pinWorktree, .unpinWorktree:
@@ -599,6 +599,7 @@ extension RepositoriesFeature.Action {
       .pullRequestAction,
       .showToast, .dismissToast,
       .toggleInspectorPane, .setInspectorPresented,
+      .fileExplorer,
       .delayedPullRequestRefresh,
       .openRepositorySettings, .requestCustomizeRepository,
       .requestCustomizeWorktree,
@@ -647,10 +648,12 @@ extension RepositoriesFeature.State {
   /// Pinned worktree IDs across every repository in the user's repo order.
   /// Git main worktrees are excluded (they belong to the per-repo main slot,
   /// not the user-curated pinned list). Folders seed into `.unpinned` by
-  /// default and only appear here after an explicit pin. Archived rows are
-  /// filtered for parity with the Active candidate filter. The optional
-  /// `archived` parameter lets a caller share an already-computed set with
-  /// the aggregator so the O(R) walk runs once per call body, not twice.
+  /// default and only appear here after an explicit pin. Pinned still-creating
+  /// pending rows are included; their pin intent lives on `PendingWorktree`,
+  /// not the buckets. Archived rows are filtered for parity with the Active
+  /// candidate filter. The optional `archived` parameter lets a caller share
+  /// an already-computed set with the aggregator so the O(R) walk runs once
+  /// per call body, not twice.
   func orderedHighlightPinnedIDs(archived: Set<Worktree.ID>? = nil) -> [SidebarItemID] {
     let archivedSet = archived ?? archivedWorktreeIDSet
     var ids: [SidebarItemID] = []
@@ -663,6 +666,11 @@ extension RepositoriesFeature.State {
         }
         if archivedSet.contains(worktreeID) { continue }
         ids.append(worktreeID)
+      }
+      // Pinned still-creating rows aren't bucketed (their pin intent is
+      // transient on `PendingWorktree`), so surface them here explicitly.
+      for pending in pendingWorktrees where pending.repositoryID == repoID && pending.pinned {
+        ids.append(pending.id)
       }
     }
     return ids
@@ -858,12 +866,7 @@ extension RepositoriesFeature.State {
       guard let repository else { continue }
 
       if !repository.isGitRepository {
-        // Local folder rows key off the path-derived synthetic id; a remote
-        // folder uses its synthetic worktree's own host-keyed id so it never
-        // collides with a local folder at the same path.
-        let folderRowID =
-          isRemote ? repository.worktrees.first?.id : Repository.folderWorktreeID(for: repository.rootURL)
-        guard let folderRowID, !hoisted.contains(folderRowID) else { continue }
+        guard let folderRowID = repository.folderRowID, !hoisted.contains(folderRowID) else { continue }
         sections.append(.folder(repositoryID: repositoryID, rowID: folderRowID))
         continue
       }

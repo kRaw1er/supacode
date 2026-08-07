@@ -4,48 +4,62 @@ import Testing
 @testable import SupacodeSettingsShared
 
 struct AgentIntegrationTests {
-  @Test func stateIsInstalledWhenAllComponentsReportInstalled() {
+  @Test func stateIsInstalledWhenAllComponentsReportInstalled() throws {
     let integration = AgentIntegration(
       agent: .claude,
       components: [
-        component(kind: .unifiedHooks, installed: true),
-        component(kind: .cliSkill, installed: true),
+        component(kind: .hooks, installed: true),
+        component(kind: .skills, installed: true),
       ]
     )
-    #expect(integration.state() == .installed)
+    #expect(try integration.state() == .installed)
   }
 
-  @Test func stateIsNotInstalledWhenAllComponentsAbsent() {
+  @Test func stateIsNotInstalledWhenAllComponentsAbsent() throws {
     let integration = AgentIntegration(
       agent: .claude,
       components: [
-        component(kind: .unifiedHooks, installed: false),
-        component(kind: .cliSkill, installed: false),
+        component(kind: .hooks, installed: false),
+        component(kind: .skills, installed: false),
       ]
     )
-    #expect(integration.state() == .notInstalled)
+    #expect(try integration.state() == .notInstalled)
   }
 
-  @Test func stateIsOutdatedWhenSomeMissing() {
+  @Test func stateIsOutdatedWhenSomeMissing() throws {
     let integration = AgentIntegration(
       agent: .claude,
       components: [
-        component(kind: .unifiedHooks, state: .installed),
-        component(kind: .cliSkill, state: .notInstalled),
+        component(kind: .hooks, state: .installed),
+        component(kind: .skills, state: .notInstalled),
       ]
     )
-    #expect(integration.state() == .outdated)
+    #expect(try integration.state() == .outdated)
   }
 
-  @Test func stateIsOutdatedWhenAnyComponentReportsOutdated() {
+  @Test func stateIsOutdatedWhenAnyComponentReportsOutdated() throws {
     let integration = AgentIntegration(
       agent: .claude,
       components: [
-        component(kind: .unifiedHooks, state: .outdated),
-        component(kind: .cliSkill, state: .installed),
+        component(kind: .hooks, state: .outdated),
+        component(kind: .skills, state: .installed),
       ]
     )
-    #expect(integration.state() == .outdated)
+    #expect(try integration.state() == .outdated)
+  }
+
+  @Test func stateThrowsWhenAnyComponentCannotBeDetermined() {
+    // The central invariant: a partially readable integration must not
+    // aggregate to `.outdated`, which would arm an unattended rewrite of the
+    // very files that could not be read.
+    let integration = AgentIntegration(
+      agent: .claude,
+      components: [
+        undeterminableComponent(kind: .hooks),
+        component(kind: .skills, state: .installed),
+      ]
+    )
+    #expect(throws: AgentFileUnreadableError.self) { try integration.state() }
   }
 
   @Test func installRunsComponentsFrontToBack() async throws {
@@ -84,7 +98,7 @@ struct AgentIntegrationTests {
         recordingComponent(label: "first", recorder: order),
         recordingComponent(label: "second", recorder: order),
         AgentIntegration.Component(
-          kind: .cliSkill,
+          kind: .skills,
           state: { .notInstalled },
           install: { throw TestError.boom },
           // Should never run during rollback — the throwing component
@@ -110,7 +124,7 @@ struct AgentIntegrationTests {
       components: [
         recordingComponent(label: "first", recorder: order),
         AgentIntegration.Component(
-          kind: .cliSkill,
+          kind: .skills,
           state: { .notInstalled },
           install: {},
           uninstall: { throw TestError.boom }
@@ -127,12 +141,78 @@ struct AgentIntegrationTests {
     }
   }
 
+  @Test func installRefusesWhenRequiredDirectoryMissingAndSkipsComponents() async throws {
+    let order = OrderRecorder()
+    let missing = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appending(path: "supacode-missing-\(UUID().uuidString)", directoryHint: .isDirectory)
+    let integration = AgentIntegration(
+      agent: .grok,
+      components: [recordingComponent(label: "hooks", recorder: order)],
+      requiredDirectory: missing
+    )
+
+    await #expect(throws: AgentIntegrationError.notInstalled(.grok)) {
+      try await integration.install()
+    }
+    // The gate short-circuits before any component runs, so nothing is written.
+    #expect(await order.installs == [])
+  }
+
+  @Test func installRefusesWhenRequiredPathIsFileNotDirectory() async throws {
+    let file = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appending(path: "supacode-file-\(UUID().uuidString)")
+    try Data().write(to: file)
+    defer { try? FileManager.default.removeItem(at: file) }
+
+    let order = OrderRecorder()
+    // A regular file at the config path is not a valid harness dir: the gate
+    // must reject it, not treat it as "installed".
+    let integration = AgentIntegration(
+      agent: .grok,
+      components: [recordingComponent(label: "hooks", recorder: order)],
+      requiredDirectory: file
+    )
+
+    await #expect(throws: AgentIntegrationError.notInstalled(.grok)) {
+      try await integration.install()
+    }
+    #expect(await order.installs == [])
+  }
+
+  @Test func installProceedsWhenRequiredDirectoryExists() async throws {
+    let order = OrderRecorder()
+    let present = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appending(path: "supacode-present-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: present, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: present) }
+
+    let integration = AgentIntegration(
+      agent: .grok,
+      components: [recordingComponent(label: "hooks", recorder: order)],
+      requiredDirectory: present
+    )
+
+    try await integration.install()
+    #expect(await order.installs == ["hooks"])
+  }
+
   // MARK: - Helpers.
 
   private func component(
     kind: AgentIntegration.Component.Kind, installed: Bool
   ) -> AgentIntegration.Component {
     component(kind: kind, state: installed ? .installed : .notInstalled)
+  }
+
+  private func undeterminableComponent(
+    kind: AgentIntegration.Component.Kind
+  ) -> AgentIntegration.Component {
+    AgentIntegration.Component(
+      kind: kind,
+      state: { throw AgentFileUnreadableError(displayPath: "~/.claude/settings.json", reason: "nope") },
+      install: {},
+      uninstall: {}
+    )
   }
 
   private func component(
@@ -150,7 +230,7 @@ struct AgentIntegrationTests {
     label: String, recorder: OrderRecorder
   ) -> AgentIntegration.Component {
     AgentIntegration.Component(
-      kind: .unifiedHooks,
+      kind: .hooks,
       state: { .notInstalled },
       install: { await recorder.recordInstall(label) },
       uninstall: { recorder.recordUninstallSync(label) }
