@@ -270,7 +270,7 @@ private struct CommandPaletteRowView: View {
       .ghosttyCommand,
       .openPullRequest, .markPullRequestReady, .mergePullRequest, .closePullRequest, .copyFailingJobURL,
       .copyCiFailureLogs,
-      .rerunFailedJobs, .openFailingCheckDetails, .worktreeSelect,
+      .rerunFailedJobs, .openFailingCheckDetails, .worktreeSelect, .openDiffFile,
       .customizeRepositoryAppearance, .customizeWorktreeAppearance:
       return nil
     case .removeWorktree:
@@ -326,6 +326,8 @@ private struct CommandPaletteRowView: View {
       return "exclamationmark.triangle"
     case .worktreeSelect:
       return nil
+    case .openDiffFile:
+      return "doc.text.magnifyingglass"
     case .removeWorktree:
       return "trash"
     case .archiveWorktree:
@@ -355,7 +357,7 @@ private struct CommandPaletteRowView: View {
       .copyCiFailureLogs,
       .rerunFailedJobs, .openFailingCheckDetails:
       return true
-    case .worktreeSelect, .removeWorktree, .archiveWorktree:
+    case .worktreeSelect, .removeWorktree, .archiveWorktree, .openDiffFile:
       return false
     case .renameBranch, .customizeRepositoryAppearance, .customizeWorktreeAppearance:
       return true
@@ -516,6 +518,8 @@ private struct CommandPaletteRowView: View {
       base = "Run \(definition.name)"
     case .stopScript(_, let name):
       base = "Stop \(name)"
+    case .openDiffFile:
+      base = row.title
     #if DEBUG
       case .debugTestToast:
         base = row.title

@@ -112,24 +112,20 @@ struct WorktreeDetailView: View {
         set: { repositoriesStore.send(.setInspectorPresented($0)) }
       )
     ) {
-      WorktreeStatusInspectorContainer(
+      WorktreeDetailInspector(
+        store: store,
+        terminalManager: terminalManager,
+        repositoriesStore: repositoriesStore,
         pane: inspectorPane,
         isFolder: selectedRow?.isFolder == true,
         isCheckingPullRequest: isCheckingPullRequest,
         pullRequest: inspectorPullRequest,
-        repositoriesStore: repositoriesStore,
-        terminalManager: terminalManager,
         fileOpenActions: state.installedOpenActions.filter(\.canOpenFiles),
         resolvedOpenAction: resolvedSelection,
         onSelectNotification: selectToolbarNotification,
         onSelectSurface: selectToolbarSurface,
-        onPullRequestAction: { sendPullRequestAction($0, worktree: selectedWorktree) },
-        onOpenFile: { store.send(.openFile($0, with: $1)) }
+        onPullRequestAction: { sendPullRequestAction($0, worktree: selectedWorktree) }
       )
-      .inspectorColumnWidth(min: 280, ideal: 320, max: 480)
-      // Match the inspector's accent to the terminal background; the appearance
-      // is forced inside `WorktreeStatusInspectorContainer`.
-      .tint(terminalManager.chromeOverlayTint())
     }
     return applyFocusedActions(
       content: content,
@@ -283,6 +279,7 @@ struct WorktreeDetailView: View {
           worktree: selectedWorktree,
           manager: terminalManager,
           terminalsStore: store.scope(state: \.terminals, action: \.terminals),
+          reviewStore: store.scope(state: \.review, action: \.review),
           shouldRunSetupScript: shouldRunSetupScript,
           isLifecycleBusy: selectedSlice?.lifecycle.isBusy ?? false,
           forceAutoFocus: shouldFocusTerminal,
@@ -548,6 +545,45 @@ struct WorktreeDetailView: View {
       allScripts.hasRunningRunScript(in: runningScriptIDs)
     }
 
+  }
+
+  /// The inspector column's content, split out of `detailBody` so the derived
+  /// locals it needs travel as stored properties rather than growing that body.
+  fileprivate struct WorktreeDetailInspector: View {
+    let store: StoreOf<AppFeature>
+    let terminalManager: WorktreeTerminalManager
+    let repositoriesStore: StoreOf<RepositoriesFeature>
+    let pane: WorktreeInspectorPane
+    let isFolder: Bool
+    let isCheckingPullRequest: Bool
+    let pullRequest: GithubPullRequest?
+    let fileOpenActions: [OpenWorktreeAction]
+    let resolvedOpenAction: OpenWorktreeAction?
+    let onSelectNotification: (Worktree.ID, WorktreeTerminalNotification) -> Void
+    let onSelectSurface: (Worktree.ID, UUID) -> Void
+    let onPullRequestAction: (RepositoriesFeature.PullRequestAction) -> Void
+
+    var body: some View {
+      WorktreeStatusInspectorContainer(
+        pane: pane,
+        isFolder: isFolder,
+        isCheckingPullRequest: isCheckingPullRequest,
+        pullRequest: pullRequest,
+        repositoriesStore: repositoriesStore,
+        reviewStore: store.scope(state: \.review, action: \.review),
+        terminalManager: terminalManager,
+        fileOpenActions: fileOpenActions,
+        resolvedOpenAction: resolvedOpenAction,
+        onSelectNotification: onSelectNotification,
+        onSelectSurface: onSelectSurface,
+        onPullRequestAction: onPullRequestAction,
+        onOpenFile: { store.send(.openFile($0, with: $1)) }
+      )
+      .inspectorColumnWidth(min: 280, ideal: 320, max: 480)
+      // Match the inspector's accent to the terminal background; the appearance
+      // is forced inside `WorktreeStatusInspectorContainer`.
+      .tint(terminalManager.chromeOverlayTint())
+    }
   }
 
   fileprivate struct WorktreeDetailToolbar: ToolbarContent {

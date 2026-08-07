@@ -37,6 +37,7 @@ final class TerminalTabManager {
     isTitleLocked: Bool = false,
     tintColor: RepositoryColor? = nil,
     isBlockingScript: Bool = false,
+    kind: TerminalTabItem.Kind = .terminal,
     id: UUID? = nil,
     selecting: Bool = true
   ) -> TerminalTabID {
@@ -62,7 +63,8 @@ final class TerminalTabManager {
       icon: icon,
       isTitleLocked: isTitleLocked,
       tintColor: tintColor,
-      isBlockingScript: isBlockingScript
+      isBlockingScript: isBlockingScript,
+      kind: kind,
     )
     // Background tabs append: inserting after the unchanged selection would land a
     // run of them in reverse order.

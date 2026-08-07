@@ -1,0 +1,541 @@
+import AppKit
+import ComposableArchitecture
+import SwiftUI
+
+/// SwiftUI bridge to the AppKit `DiffViewportController` — the Phase-13 seam swap
+/// that retires the flat `DiffTableController` / `[DiffRow]` viewer. The coordinator
+/// owns the controller AND the single-file interaction controllers (`DiffKeyboardNav`,
+/// `GutterRibbonController`, `DiffAXProvider`); the representable re-enters through
+/// `updateNSView`, rebuilds the dual-mode `ChunkTree` from the document's `hunks` +
+/// `comments` (via `ChunkTreeBuilder`) whenever its content signature changes, and
+/// drives the controller — `apply(tree:)` on a content change, `toggleMode` on a
+/// unified↔split flip (O(log #hunks), no reproject).
+///
+/// Interaction is wired through the coordinator: the gutter overlay opens the INLINE
+/// comment composer (pierre/GitHub-style — the modal `.sheet` is gone), keyboard nav
+/// (`j`/`k`/`n`/`p`/`o`/`e`/`E`/`?`) routes single-letter keys to the reducer, VoiceOver
+/// reaches the synthesized `DiffAXProvider` element set, and an expander reveal splices
+/// the reducer's blob slice into the live tree O(log n) (`applyExpansion`) instead of a
+/// full `buildTree` rebuild.
+struct DiffViewerRepresentable: NSViewRepresentable {
+  let file: FileChange
+  let hunks: [DiffHunk]
+  let comments: [ReviewComment]
+  /// Bumped by the reducer when a comment's anchored RANGE changes — the only comment
+  /// change that alters the document's structure. Compared instead of the comment array
+  /// so the per-update check is O(1).
+  var commentAnchorRevision: Int = 0
+  /// Bumped on any comment change at all (a body edit included) — drives a re-render,
+  /// never a re-projection.
+  var commentContentRevision: Int = 0
+  let mode: DiffViewMode
+  /// `DiffDocument.contentVersion` — bumped only when a load delivers DIFFERENT hunks.
+  /// A change re-projects the tree scroll-preserving. Deliberately NOT the document's
+  /// request `generation`: that token bumps when a re-diff is issued, a pass before the
+  /// new hunks exist, so re-projecting on it rebuilt from stale hunks and dropped the
+  /// open inline composer on every git tick.
+  let contentVersion: Int
+  /// The tab identity (path + source) — the scope for `openCommentComposer` /
+  /// `expandGap` actions the interaction controllers send back to the reducer.
+  var filePath: String
+  var source: DiffSource
+  /// Declarative, document-level collapse/expand (Phase 7 source of truth). Threaded
+  /// so an expander reveal splices incrementally instead of rebuilding.
+  var expansion: ExpansionState = .collapsed
+  /// Per-gap blob-sliced context lines the reducer read for the current `expansion`.
+  var revealed: [Int: [DiffLine]] = [:]
+  /// The presented inline-composer store, scoped to THIS tab (`nil` when no composer
+  /// belongs here). Injected into the comment-thread widget so it renders `.editing`.
+  var composerStore: StoreOf<CommentComposer>?
+  /// The open composer's draft (this tab only) — carries the anchor's `(side, range)`
+  /// so a NEW comment seeds a transient inline editor at that line.
+  var composerDraft: ReviewComment?
+  /// `WordDiffPolicy` gate (`DiffDocument.wordDiffDisabled`): off ⇒ `WordDiff` is
+  /// never invoked on the render path (only the row-level `+`/`-` tint).
+  var wordDiffEnabled: Bool = true
+
+  /// The per-side blobs + size gate the controller warms the span cache from (pull
+  /// model, `DiffDocument.old/newBlob` + `highlightingDisabled`). The view pulls each
+  /// drawn row's syntax runs from the filled cache — no reducer push.
+  var oldBlob: HighlightBlobInput?
+  var newBlob: HighlightBlobInput?
+  var highlightingDisabled: Bool = false
+
+  /// A one-shot menu-driven nav intent (the "Diff" `CommandMenu` → viewport). Drained
+  /// here into `DiffKeyboardNav.perform` and cleared via `onNavCommandConsumed`, so a
+  /// menu pick reaches the SAME nav the single-letter keys drive even when the viewport
+  /// doesn't hold first responder. `nil` when nothing is pending.
+  var pendingNavCommand: DiffReviewFeature.MenuNavCommand?
+
+  /// The reducer action sink for the interaction controllers (gutter comment,
+  /// keyboard nav, a11y add-comment / expand).
+  var send: (DiffReviewFeature.Action) -> Void = { _ in }
+  /// Fired once the pending menu nav intent has been forwarded to `DiffKeyboardNav`,
+  /// so the reducer clears `pendingNavCommand` (consume-once).
+  var onNavCommandConsumed: () -> Void = {}
+  /// Viewport scrolled/resized → records the visible window + lazily slices unrevealed
+  /// expanded-gap ranges into view (`.visibleRangeChanged`). The payload is the per-side
+  /// 1-based visible SOURCE-line window, not rendered-row indices.
+  var onVisibleRangeChanged: (VisibleLineWindow) -> Void = { _ in }
+  /// An expander widget's reveal button → the reducer's incremental `expandGap`.
+  var onExpandGap: (_ gap: Int, _ step: ExpansionState.Step, _ direction: ExpansionState.Direction) -> Void = {
+    _, _, _ in
+  }
+  /// A comment-thread widget row's edit tap → open it in the composer.
+  var onEditComment: (UUID) -> Void = { _ in }
+  /// Anchors (head comment ids) whose thread is collapsed in this tab. Threaded into the
+  /// resolver so the widget renders its collapsed summary; part of the content signature
+  /// so a toggle re-projects the tree and the collapse takes visible effect.
+  var collapsedThreads: Set<UUID> = []
+  /// A comment-thread chevron tap → toggle that thread's collapsed state.
+  var onToggleCommentThreadCollapsed: (UUID) -> Void = { _ in }
+
+  func makeCoordinator() -> Coordinator { Coordinator() }
+
+  func makeNSView(context: Context) -> NSScrollView {
+    let coordinator = context.coordinator
+    let controller = coordinator.controller
+    controller.onVisibleRangeChanged = { [weak coordinator] window in
+      coordinator?.onVisibleRangeChanged(window)
+    }
+    syncCallbacks(coordinator)
+    controller.wordDiffEnabled = wordDiffEnabled
+    controller.widgetResolver = makeResolver(coordinator)
+    // Construct the interaction controllers ONCE (gutter overlay + a11y provider),
+    // BEFORE the first `apply` so the provider's `reload()` fires from it.
+    coordinator.installInteraction()
+    let tree = buildTree()
+    // Blobs + tree ATOMICALLY: `apply` paints from the current blobs, so setting them AFTER
+    // would flash the new content in the OLD file's colors (see `applyDocument`).
+    controller.applyDocument(
+      tree: tree, mode: mode, fileID: file.id,
+      blobs: .init(old: oldBlob, new: newBlob, disabled: highlightingDisabled), scrollPreserving: false)
+    coordinator.rebuildKeyboardNav()
+    coordinator.keyboardNav?.revealFirstChange()
+    coordinator.lastSignature = signature
+    coordinator.lastRenderSignature = renderSignature
+    coordinator.lastMode = mode
+    coordinator.lastContentVersion = contentVersion
+    coordinator.lastExpansion = expansion
+    coordinator.lastRevealedCounts = revealed.mapValues(\.count)
+    coordinator.lastHighlightBlobKey = highlightBlobKey
+    return controller.scrollView
+  }
+
+  func updateNSView(_ nsView: NSScrollView, context: Context) {
+    let coordinator = context.coordinator
+    let controller = coordinator.controller
+    syncCallbacks(coordinator)
+    controller.wordDiffEnabled = wordDiffEnabled
+    controller.widgetResolver = makeResolver(coordinator)
+    coordinator.gutter?.frame = controller.scrollView.contentView.frame
+
+    // Change classification. `contentVersion` moves ONLY when a load delivered different
+    // hunks, so it is the re-diff signal on its own; an expand never touches it and
+    // splices incrementally through the expansion delta instead (F7).
+    let sigChanged = coordinator.lastSignature != signature
+    let renderChanged = coordinator.lastRenderSignature != renderSignature
+    let contentVersionChanged = coordinator.lastContentVersion != contentVersion
+    let expansionChanged = coordinator.lastExpansion != expansion
+    let revealedCounts = revealed.mapValues(\.count)
+    let revealedChanged = coordinator.lastRevealedCounts != revealedCounts
+    // A mode flip is normally a no-rebuild re-seek, but a comment thread's insertion
+    // point is mode-specific (a change block renders del-then-add in unified and
+    // paired in split), so a file that carries comments re-projects instead — else the
+    // threads stay cut at the previous mode's row and drift off their line.
+    let modeChanged = coordinator.lastMode != mode
+    let contentChanged = sigChanged || contentVersionChanged || (modeChanged && !comments.isEmpty)
+
+    if contentChanged {
+      // Content changed (re-diff / comment insert-remove / composer open-close): the
+      // projection is built from the LIVE reveal, so it comes out already expanded —
+      // the same document the user is looking at, in one pass. There is no
+      // collapsed intermediate to re-land the anchor against and no catch-up splice
+      // afterwards, which is what used to throw the viewport to the top of an
+      // expanded hunk and leave the tail clipped behind a too-short document.
+      //
+      // Blobs + tree ATOMICALLY (see `applyDocument`): applying the tree first and the blobs
+      // second paints one frame of the new content in the PREVIOUS file's colors.
+      controller.applyDocument(
+        tree: buildTree(), mode: mode, fileID: file.id,
+        blobs: .init(old: oldBlob, new: newBlob, disabled: highlightingDisabled), scrollPreserving: true)
+      coordinator.lastHighlightBlobKey = highlightBlobKey
+      coordinator.rebuildKeyboardNav()
+    } else {
+      if modeChanged {
+        // Only the unified↔split preference flipped: O(log #hunks) re-seek, no rebuild.
+        controller.toggleMode(to: mode)
+        coordinator.rebuildKeyboardNav()
+      }
+      if expansionChanged || revealedChanged {
+        // An expand / collapse without a re-diff: splice ONLY the changed gaps.
+        coordinator.syncExpansion(expansion: expansion, revealed: revealed, hunks: hunks, file: file)
+      }
+      // A render-only change (a comment's body, a collapsed thread, the composer
+      // opening or closing, the word-diff gate) — one layout pass re-resolves the
+      // widget models and re-projects the visible rows. This used to go through a full
+      // re-projection, which threw away the expansions, the measured heights and the
+      // scroll position to change what one widget draws.
+      if renderChanged { controller.layoutVisibleChunks() }
+      // Pull-model: re-warm the span cache when the blobs / size gate change without a
+      // full re-project (e.g. the size gate resolving after the first batch).
+      if coordinator.lastHighlightBlobKey != highlightBlobKey {
+        controller.setHighlightBlobs(fileID: file.id, old: oldBlob, new: newBlob, disabled: highlightingDisabled)
+        coordinator.lastHighlightBlobKey = highlightBlobKey
+      }
+    }
+
+    // Drain a menu-driven nav intent into the SAME `DiffKeyboardNav` the letter keys
+    // drive (the "Diff" menu path). Runs AFTER the tree/mode reconcile above so the nav
+    // is rebuilt over the current tree, then clears the one-shot in the reducer.
+    if let command = pendingNavCommand {
+      coordinator.performMenuNav(command)
+      onNavCommandConsumed()
+    }
+
+    // Reconcile the transient INLINE editor for a not-yet-committed (new) comment.
+    coordinator.reconcileTransientComposer(draft: composerDraft, comments: comments)
+    coordinator.focusViewportIfNeeded(editing: composerDraft != nil)
+
+    coordinator.lastSignature = signature
+    coordinator.lastRenderSignature = renderSignature
+    coordinator.lastMode = mode
+    coordinator.lastContentVersion = contentVersion
+    coordinator.lastExpansion = expansion
+    coordinator.lastRevealedCounts = revealedCounts
+  }
+
+  static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+    coordinator.tearDown()
+  }
+
+  // MARK: - Projection
+
+  private func buildTree() -> ChunkTree {
+    // The projection takes the live reveal as an INPUT, so a rebuild lands already
+    // expanded. A gap whose slice hasn't arrived yet stays an expander and is spliced
+    // in by `syncExpansion` when `.gapSliceLoaded` brings it — the incremental path is
+    // still O(log n) and still the only one used for an expand that isn't a rebuild.
+    ChunkTreeBuilder.build(
+      file: file, hunks: hunks, mode: mode, reveal: GapReveal(state: expansion, lines: revealed),
+      comments: comments)
+  }
+
+  private func makeResolver(_ coordinator: Coordinator) -> DiffWidgetResolver {
+    DiffWidgetResolver(
+      file: file,
+      hunks: hunks,
+      comments: comments,
+      onExpand: { [weak coordinator] gap, step, direction in
+        coordinator?.onExpandGap(gap.hunkIndex, step, direction)
+      },
+      onEditComment: { [weak coordinator] id in coordinator?.onEditComment(id) },
+      collapsedThreads: collapsedThreads,
+      onToggleCommentThreadCollapsed: { [weak coordinator] id in coordinator?.onToggleCommentThreadCollapsed(id) },
+      composerStore: { [weak coordinator] anchorID in
+        guard let coordinator, let store = coordinator.composerStore, coordinator.composerAnchorID == anchorID
+        else { return nil }
+        return store
+      }
+    )
+  }
+
+  private func syncCallbacks(_ coordinator: Coordinator) {
+    // Refresh so the latest SwiftUI closures (fresh store) are used on each pass.
+    coordinator.send = send
+    coordinator.onVisibleRangeChanged = onVisibleRangeChanged
+    coordinator.onExpandGap = onExpandGap
+    coordinator.onEditComment = onEditComment
+    coordinator.onToggleCommentThreadCollapsed = onToggleCommentThreadCollapsed
+    coordinator.file = file
+    coordinator.filePath = filePath
+    coordinator.source = source
+    coordinator.comments = comments
+    coordinator.composerStore = composerStore
+    coordinator.composerAnchorID = composerDraft?.id
+  }
+
+  /// The content signature that triggers a full tree re-projection. `comments` covers
+  /// a thread insert / remove / edit; `wordDiffEnabled` re-renders on a gate flip;
+  /// `composerAnchorID` flips an existing thread's display↔editing (its widget refuses
+  /// recycle, so the re-project mounts a fresh editing host). `contentVersion` (a real
+  /// re-diff) and `expansion` are classified separately in `updateNSView`.
+  private var signature: Coordinator.Signature {
+    Coordinator.Signature(commentAnchorRevision: commentAnchorRevision)
+  }
+
+  private var renderSignature: Coordinator.RenderSignature {
+    Coordinator.RenderSignature(
+      commentContentRevision: commentContentRevision, wordDiffEnabled: wordDiffEnabled,
+      composerAnchorID: composerDraft?.id, collapsedThreads: collapsedThreads)
+  }
+
+  /// Identity of the warm inputs (per-side blob OID + the size gate) — the controller
+  /// re-warms only when this changes, so a plain SwiftUI update pass doesn't re-kick a
+  /// warm the missing-line check would no-op anyway.
+  private var highlightBlobKey: String {
+    "\(oldBlob?.blobOID ?? "-")|\(newBlob?.blobOID ?? "-")|\(highlightingDisabled)"
+  }
+
+  @MainActor
+  final class Coordinator {
+    let controller = DiffViewportController()
+
+    /// Single-file interaction controllers, constructed once by `installInteraction`
+    /// and re-fed live via the coordinator's refreshed closures.
+    private(set) var keyboardNav: DiffKeyboardNav?
+    private(set) var gutter: GutterRibbonController?
+
+    // Live inputs, refreshed each SwiftUI pass (read by the long-lived callbacks).
+    var send: (DiffReviewFeature.Action) -> Void = { _ in }
+    var onVisibleRangeChanged: (VisibleLineWindow) -> Void = { _ in }
+    var onExpandGap: (Int, ExpansionState.Step, ExpansionState.Direction) -> Void = { _, _, _ in }
+    var onEditComment: (UUID) -> Void = { _ in }
+    var onToggleCommentThreadCollapsed: (UUID) -> Void = { _ in }
+    var file: FileChange?
+    var filePath: String = ""
+    var source: DiffSource = .workingTree
+    var comments: [ReviewComment] = []
+    var composerStore: StoreOf<CommentComposer>?
+    var composerAnchorID: UUID?
+
+    // Change-detection baselines.
+    var lastSignature: Signature?
+    var lastRenderSignature: RenderSignature?
+    var lastMode: DiffViewMode = .unified
+    var lastHighlightBlobKey: String = ""
+    var lastContentVersion: Int = .min
+    var lastExpansion: ExpansionState = .collapsed
+    var lastRevealedCounts: [Int: Int] = [:]
+
+    /// The anchor of the transient inline editor currently inserted for a NEW,
+    /// not-yet-committed comment (removed on cancel; replaced by the tree swap on
+    /// commit). `nil` when no such editor is live.
+    private var transientCommentAnchorID: UUID?
+    private var installed = false
+    private var didFocusViewport = false
+
+    /// What the tree's STRUCTURE depends on — the only thing that may force a
+    /// re-projection. Everything else about a comment (its body, whether its thread is
+    /// collapsed, whether it is being edited) changes what a widget RENDERS, which the
+    /// widget's own `modelToken` already picks up on the next layout pass.
+    ///
+    /// Scalars only, so the per-update comparison is O(1). Comparing the comment array
+    /// meant every SwiftUI pass walked every comment — and re-projected the whole
+    /// document when a body changed by one character.
+    struct Signature: Equatable {
+      var commentAnchorRevision: Int
+    }
+
+    /// What the visible widgets / rows RENDER from. A change here needs one layout
+    /// pass, not a rebuild.
+    struct RenderSignature: Equatable {
+      var commentContentRevision: Int
+      var wordDiffEnabled: Bool
+      var composerAnchorID: UUID?
+      var collapsedThreads: Set<UUID>
+    }
+
+    // MARK: - Install (once)
+
+    /// Build + mount the gutter overlay and the accessibility provider. Idempotent —
+    /// the interaction controllers persist for the coordinator's lifetime and are fed
+    /// live by the refreshed closures.
+    func installInteraction() {
+      guard !installed else { return }
+      installed = true
+
+      let gutter = GutterRibbonController()
+      gutter.controller = controller
+      gutter.onOpenComposer = { [weak self] side, startLine, endLine, snippet, context in
+        guard let self else { return }
+        self.send(
+          .openCommentComposer(
+            filePath: self.filePath, source: self.source, side: side, startLine: startLine, endLine: endLine,
+            anchorSnippet: snippet, contextBefore: context))
+      }
+      // The scroll view is still unsized here (SwiftUI sizes it after `makeNSView`), and the
+      // floating-subview container does NOT autoresize its children, so this frame is only a
+      // seed — `GutterRibbonController` re-fits itself off the container's `frameDidChange`.
+      gutter.frame = controller.scrollView.contentView.frame
+      gutter.autoresizingMask = [.width, .height]
+      controller.scrollView.addFloatingSubview(gutter, for: .vertical)
+      // Repaint + re-resolve the hover on scroll: the floating overlay does not scroll
+      // with the content, so a stale highlight would otherwise stick to the old screen row.
+      controller.onViewportMoved = { [weak gutter] in gutter?.viewportDidScroll() }
+      self.gutter = gutter
+
+      let provider = DiffAXProvider(
+        documentView: controller.documentView,
+        snapshot: { [weak self] in
+          self?.accessibilitySnapshot() ?? DiffAXSnapshot(tree: ChunkTree(), mode: .unified)
+        },
+        reveal: { [weak self] row in self?.controller.reveal(row: row, align: .center) },
+        setKeyboardFocus: { [weak self] row in
+          self?.keyboardNav?.syncFocusedRow(row)
+          self?.controller.axProvider?.keyboardDidFocus(row)
+        },
+        addComment: { [weak self] side, line in
+          guard let self else { return }
+          let payload = self.controller.anchorPayload(side: side, startLine: line, endLine: line)
+          self.send(
+            .openCommentComposer(
+              filePath: self.filePath, source: self.source, side: side, startLine: line, endLine: line,
+              anchorSnippet: payload.snippet, contextBefore: payload.contextBefore))
+        },
+        expand: { [weak self] gap in
+          guard let self else { return }
+          self.send(
+            .expandGap(
+              key: DiffDocumentKey(path: self.filePath, source: self.source), gap: gap.hunkIndex, step: .fine,
+              direction: .both))
+        },
+        liveWidgetView: { [weak self] chunkID in
+          guard let self, let node = self.controller.tree.nodesByID[chunkID] else { return nil }
+          return self.controller.pools[node.chunk.reuseKind]?.getView(forKey: chunkID)
+        })
+      controller.axProvider = provider
+    }
+
+    /// The a11y snapshot read fresh on every VoiceOver query — reuses the SAME
+    /// comments-by-anchor + `FileHeaderWidget.Model` mapping the widget resolver does,
+    /// over the controller's live tree / mode.
+    private func accessibilitySnapshot() -> DiffAXSnapshot {
+      DiffAXSnapshot(
+        tree: controller.tree,
+        mode: controller.currentMode,
+        comments: { [weak self] anchorID in (self?.comments ?? []).filter { $0.id == anchorID } },
+        fileHeader: { [weak self] fileID in
+          guard let self, let file = self.file, file.id == fileID else { return nil }
+          return FileHeaderWidget.Model.make(from: file, canCommentOnFile: false)
+        })
+    }
+
+    // MARK: - Keyboard nav (rebuilt on each tree swap)
+
+    /// (Re)build the keyboard nav over the controller's CURRENT tree and route it into
+    /// the document view. `DiffKeyboardNav` snapshots the tree instance, so a full
+    /// `apply` (new instance) needs a fresh nav; an in-place splice keeps the instance.
+    func rebuildKeyboardNav() {
+      let nav = DiffKeyboardNav(
+        controller: controller, tree: controller.tree, send: { [weak self] action in self?.send(action) })
+      nav.onFocusRow = { [weak self] row in self?.controller.axProvider?.keyboardDidFocus(row) }
+      keyboardNav = nav
+      controller.documentView.keyboardNav = nav
+    }
+
+    /// Forward a menu-driven nav intent to the live `DiffKeyboardNav` — the SAME path
+    /// the single-letter `n`/`p`/`]`/`[` keys drive, so the "Diff" menu items and the
+    /// keys stay in lockstep. A no-op when no nav is built yet (no diff on screen).
+    func performMenuNav(_ command: DiffReviewFeature.MenuNavCommand) {
+      switch command {
+      case .nextChange: keyboardNav?.perform(.nextChange)
+      case .prevChange: keyboardNav?.perform(.prevChange)
+      case .nextFile: keyboardNav?.perform(.nextFile)
+      case .prevFile: keyboardNav?.perform(.prevFile)
+      }
+    }
+
+    /// Take first responder once the viewport is on-screen so single-letter nav works
+    /// without a click — but never while the inline editor is up (it owns first
+    /// responder for typing).
+    func focusViewportIfNeeded(editing: Bool) {
+      guard !didFocusViewport, !editing, let window = controller.documentView.window else { return }
+      didFocusViewport = true
+      window.makeFirstResponder(controller.documentView)
+    }
+
+    // MARK: - Incremental expansion (F7 — O(log n) splice, NOT a rebuild)
+
+    /// Splice the gaps whose reveal changed WITHOUT a re-projection — an expander tap,
+    /// or the slice arriving for one. A re-projection needs no counterpart: the builder
+    /// takes the reveal as an input, so a fresh tree is already in its revealed shape.
+    func syncExpansion(
+      expansion: ExpansionState, revealed: [Int: [DiffLine]], hunks: [DiffHunk], file: FileChange
+    ) {
+      let from = lastExpansion
+      let baseCounts = lastRevealedCounts
+      // Reuse the reducer's exact gap geometry (pure over `hunks`).
+      let geometry = DiffDocument(file: file, hunks: hunks)
+      for gap in 0...hunks.count {
+        let size = geometry.gapRangeSize(gap)
+        let isTrailing = geometry.isTrailingGap(gap)
+        let before = from.resolve(gap: gap, rangeSize: size, isTrailing: isTrailing)
+        let after = expansion.resolve(gap: gap, rangeSize: size, isTrailing: isTrailing)
+        let revealedLines = revealed[gap] ?? []
+        let revealedCountChanged = (baseCounts[gap] ?? 0) != revealedLines.count
+        guard before != after || revealedCountChanged else { continue }
+        let gapKey = GapKey(fileID: file.id, hunkIndex: gap)
+        // The gap's separator carries the header of the hunk it introduces (the
+        // trailing gap introduces none) — same rule the builder uses, so a spliced
+        // separator and a projected one can never disagree.
+        let header = gap < hunks.count ? hunks[gap].header : nil
+        let wantsReveal = after.renderAll || after.fromStart > 0 || after.fromEnd > 0
+        let wasRevealed = before.renderAll || before.fromStart > 0 || before.fromEnd > 0
+        if wantsReveal {
+          // The slice arrives after the expand tick; splice once it is present. An
+          // empty slice (not yet loaded) leaves the collapsed expander for now — the
+          // populating `.gapSliceLoaded` re-enters here and splices it.
+          if !revealedLines.isEmpty {
+            controller.applyExpansion(gap: gapKey, region: after, revealedLines: revealedLines, header: header)
+          }
+        } else if wasRevealed {
+          // The full expander is rebuilt from the gap's geometry, so hand over what
+          // the builder itself would use: where it starts and how much it hides.
+          let start = geometry.gapNewLineStart(gap)
+          let hidden = size == .max ? 0 : size
+          controller.collapseExpansion(
+            gap: gapKey, hiddenLines: hidden, anchor: start, range: start..<(start + max(hidden, 1)),
+            header: header)
+        }
+      }
+    }
+
+    // MARK: - Inline comment composer (F1+F5 — NO modal sheet)
+
+    /// Keep a transient INLINE editing widget in step with the open composer for a
+    /// NEW (not-yet-committed) comment. Opening the composer on an anchor absent from
+    /// `comments` inserts an editing widget at its line; cancelling (composer closes
+    /// with the anchor still uncommitted) removes it. A commit lands the anchor in
+    /// `comments`, so the content re-project renders the display thread and the guard
+    /// below keeps us from removing that committed widget.
+    ///
+    /// Runs AFTER the re-projection in `updateNSView` and re-seeds off the LIVE tree
+    /// rather than off `transientCommentAnchorID` alone: the transient widget exists only
+    /// in the tree (the builder projects `comments`, which a not-yet-committed draft is by
+    /// definition absent from), so every rebuild drops it. Bookkeeping alone would then
+    /// believe the editor is still mounted and the user's half-typed comment would just
+    /// disappear on the next re-diff.
+    func reconcileTransientComposer(draft: ReviewComment?, comments: [ReviewComment]) {
+      let openAnchor = draft?.id
+      // Drop a stale transient editor whose composer moved on / closed and that never
+      // committed (a committed anchor is left to the tree swap).
+      if let transient = transientCommentAnchorID, transient != openAnchor,
+        !comments.contains(where: { $0.id == transient })
+      {
+        controller.removeCommentWidget(anchorID: transient)
+        transientCommentAnchorID = nil
+      }
+      // Seed (or re-seed after a rebuild) the transient editor for a brand-new anchor.
+      if let draft, !comments.contains(where: { $0.id == draft.id }),
+        !controller.hasCommentWidget(anchorID: draft.id)
+      {
+        controller.insertCommentWidget(
+          side: draft.side, startLine: draft.startLine, endLine: draft.endLine, anchorID: draft.id,
+          estimatedHeight: ChunkLayoutMetrics.production.commentThreadHeight)
+        transientCommentAnchorID = draft.id
+      }
+      if openAnchor == nil { transientCommentAnchorID = nil }
+    }
+
+    func tearDown() {
+      controller.onVisibleRangeChanged = nil
+      controller.onHit = nil
+      controller.axProvider = nil
+      controller.documentView.keyboardNav = nil
+      keyboardNav = nil
+      gutter?.removeFromSuperview()
+      gutter = nil
+    }
+  }
+}

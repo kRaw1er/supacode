@@ -95,6 +95,8 @@ struct CommandPaletteItem: Identifiable, Equatable {
     case openFailingCheckDetails(Worktree.ID)
     case runScript(ScriptDefinition)
     case stopScript(UUID, name: String)
+    /// Open the center diff tab for a changed file in the selected worktree (9.2).
+    case openDiffFile(Worktree.ID, filePath: String)
     #if DEBUG
       case debugTestToast(RepositoriesFeature.StatusToast)
     #endif
@@ -116,7 +118,7 @@ struct CommandPaletteItem: Identifiable, Equatable {
       .rerunFailedJobs,
       .openFailingCheckDetails:
       true
-    case .worktreeSelect, .removeWorktree, .archiveWorktree:
+    case .worktreeSelect, .removeWorktree, .archiveWorktree, .openDiffFile:
       false
     case .renameBranch, .customizeRepositoryAppearance, .customizeWorktreeAppearance:
       true
@@ -149,7 +151,8 @@ struct CommandPaletteItem: Identifiable, Equatable {
       .archiveWorktree,
       .renameBranch,
       .customizeRepositoryAppearance,
-      .customizeWorktreeAppearance:
+      .customizeWorktreeAppearance,
+      .openDiffFile:
       false
     case .runScript, .stopScript:
       false
@@ -184,7 +187,8 @@ struct CommandPaletteItem: Identifiable, Equatable {
       .renameBranch,
       .customizeRepositoryAppearance,
       .customizeWorktreeAppearance,
-      .stopScript:
+      .stopScript,
+      .openDiffFile:
       nil
     case .runScript(let definition):
       definition.kind == .run ? AppShortcuts.runScript : nil

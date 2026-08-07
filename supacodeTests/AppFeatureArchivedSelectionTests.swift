@@ -41,6 +41,9 @@ struct AppFeatureArchivedSelectionTests {
       $0.terminalClient.send = { _ in }
       $0.worktreeInfoWatcher.send = { _ in }
     }
+    // Deselection also fans out `.review(.worktreeSelected(nil))`; this test is
+    // scoped to sidebar focus retention, so ignore the review clear action.
+    store.exhaustivity = .off
 
     await store.send(.repositories(.selectArchivedWorktrees)) {
       $0.repositories.selection = .archivedWorktrees

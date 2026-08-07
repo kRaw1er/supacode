@@ -75,6 +75,7 @@ struct CommandPaletteFeature {
     case openFailingCheckDetails(Worktree.ID)
     case runScript(ScriptDefinition)
     case stopScript(UUID, name: String)
+    case openDiffFile(Worktree.ID, filePath: String)
     /// Palette closed without the user activating an item (Esc, outside
     /// tap, programmatic dismiss). AppFeature uses this to refocus the
     /// current worktree's terminal, the "terminal is the default
@@ -273,12 +274,19 @@ struct CommandPaletteFeature {
     from repositories: RepositoriesFeature.State,
     ghosttyCommands: [GhosttyCommand] = [],
     scripts: [ScriptDefinition] = [],
-    runningScriptIDs: Set<UUID> = []
+    runningScriptIDs: Set<UUID> = [],
+    diffFiles: [FileChange] = []
   ) -> [CommandPaletteItem] {
     var items = globalActionItems()
-    if repositories.selectedWorktreeID != nil {
+    if let selectedWorktreeID = repositories.selectedWorktreeID {
       items.append(contentsOf: ghosttyCommandItems(ghosttyCommands))
       items.append(contentsOf: scriptItems(scripts: scripts, runningScriptIDs: runningScriptIDs))
+      items.append(
+        contentsOf: openDiffFileItems(
+          diffFiles,
+          worktreeID: selectedWorktreeID,
+          subtitle: diffFileSubtitle(from: repositories, worktreeID: selectedWorktreeID)
+        ))
     }
     if let selectedWorktreeID = repositories.selectedWorktreeID,
       let repositoryID = repositories.repositoryID(containing: selectedWorktreeID),
@@ -435,7 +443,8 @@ struct CommandPaletteFeature {
     from repositories: RepositoriesFeature.State,
     ghosttyCommands: [GhosttyCommand] = [],
     scripts: [ScriptDefinition] = [],
-    runningScriptIDs: Set<UUID> = []
+    runningScriptIDs: Set<UUID> = [],
+    diffFiles: [FileChange] = []
   ) -> [CommandPaletteItem] {
     switch mode {
     case .commands:
@@ -443,7 +452,8 @@ struct CommandPaletteFeature {
         from: repositories,
         ghosttyCommands: ghosttyCommands,
         scripts: scripts,
-        runningScriptIDs: runningScriptIDs
+        runningScriptIDs: runningScriptIDs,
+        diffFiles: diffFiles
       )
     case .worktreeSwitcher:
       return worktreeSwitcherItems(from: repositories)
@@ -801,6 +811,10 @@ private enum CommandPaletteItemID {
   static func stopScript(_ scriptID: UUID) -> CommandPaletteItem.ID {
     "script.\(scriptID).stop"
   }
+
+  static func openDiffFile(_ worktreeID: Worktree.ID, filePath: String) -> CommandPaletteItem.ID {
+    "diff.\(worktreeID).\(filePath)"
+  }
 }
 
 private func prioritizeItems(
@@ -870,8 +884,8 @@ private func delegateAction(for kind: CommandPaletteItem.Kind) -> CommandPalette
     .rerunFailedJobs,
     .openFailingCheckDetails:
     return pullRequestDelegateAction(for: kind)!
-  case .runScript, .stopScript:
-    return scriptDelegateAction(for: kind)!
+  case .runScript, .stopScript, .openDiffFile:
+    return worktreeScopedDelegateAction(for: kind)!
   #if DEBUG
     case .debugTestToast(let toast):
       return .debugTestToast(toast)
@@ -897,7 +911,10 @@ private func selectedEntryDelegateAction(
   }
 }
 
-private func scriptDelegateAction(
+/// Delegate mapping for the per-worktree run targets (scripts + open-diff-file),
+/// peeled out of `delegateAction` so the top-level switch stays under the
+/// cyclomatic-complexity budget.
+private func worktreeScopedDelegateAction(
   for kind: CommandPaletteItem.Kind
 ) -> CommandPaletteFeature.Delegate? {
   switch kind {
@@ -905,6 +922,8 @@ private func scriptDelegateAction(
     return .runScript(definition)
   case .stopScript(let scriptID, let name):
     return .stopScript(scriptID, name: name)
+  case .openDiffFile(let worktreeID, let filePath):
+    return .openDiffFile(worktreeID, filePath: filePath)
   default:
     return nil
   }
@@ -945,7 +964,8 @@ private func pullRequestDelegateAction(
     .refreshWorktrees,
     .ghosttyCommand,
     .runScript,
-    .stopScript:
+    .stopScript,
+    .openDiffFile:
     return nil
   #if DEBUG
     case .debugTestToast:
@@ -995,6 +1015,40 @@ private func scriptItems(
     }
   }
   return items
+}
+
+/// One "Open diff — <file>" item per changed file in the selected worktree (9.2).
+/// Gated by the caller under `selectedWorktreeID != nil`; empty `files` yields none.
+private func openDiffFileItems(
+  _ files: [FileChange],
+  worktreeID: Worktree.ID,
+  subtitle: String?
+) -> [CommandPaletteItem] {
+  files.map { file in
+    let fileName = file.id.split(separator: "/").last.map(String.init) ?? file.id
+    return CommandPaletteItem(
+      id: CommandPaletteItemID.openDiffFile(worktreeID, filePath: file.id),
+      title: "Open diff — \(fileName)",
+      subtitle: subtitle,
+      kind: .openDiffFile(worktreeID, filePath: file.id)
+    )
+  }
+}
+
+/// `repo · worktree` subtitle for the "Open diff" items, matching the rename-branch
+/// item's subtitle format. Folder rows collapse to the repository name alone.
+private func diffFileSubtitle(
+  from repositories: RepositoriesFeature.State,
+  worktreeID: Worktree.ID
+) -> String? {
+  guard let repositoryID = repositories.repositoryID(containing: worktreeID) else { return nil }
+  let repositoryName = Repository.sidebarDisplayName(
+    custom: repositories.sidebar.sections[repositoryID]?.title,
+    fallback: repositories.repositoryName(for: repositoryID) ?? "Repository"
+  )
+  guard let row = repositories.sidebarItems[id: worktreeID], !row.isFolder else { return repositoryName }
+  let worktreeDisplayName = SidebarDisplayName.resolved(custom: row.customTitle, fallback: row.name) ?? row.name
+  return "\(repositoryName) · \(worktreeDisplayName)"
 }
 
 private func ghosttyCommandItems(_ commands: [GhosttyCommand]) -> [CommandPaletteItem] {

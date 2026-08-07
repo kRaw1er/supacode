@@ -94,6 +94,77 @@ struct CommandPaletteFeatureTests {
     #expect(ghosttyItem?.subtitle == "Focus the split to the right.")
   }
 
+  // MARK: - Open diff file (9.2)
+
+  private func makeFileChange(_ path: String) -> FileChange {
+    FileChange(
+      oldPath: nil,
+      newPath: path,
+      status: .modified,
+      addedLines: 1,
+      removedLines: 0,
+      isBinary: false,
+      isLargeFileCapped: false,
+      hasLongLines: false,
+      similarity: 0
+    )
+  }
+
+  @Test func commandPaletteItems_includesOpenDiffFileItemsWhenWorktreeSelected() {
+    let rootPath = "/tmp/repo"
+    let worktree = makeWorktree(id: rootPath, name: "repo", repoRoot: rootPath)
+    let repository = makeRepository(rootPath: rootPath, name: "Repo", worktrees: [worktree])
+    var state = RepositoriesFeature.State(reconciledRepositories: [repository])
+    state.selection = .worktree(worktree.id)
+
+    let items = CommandPaletteFeature.commandPaletteItems(
+      from: state,
+      diffFiles: [makeFileChange("Sources/App/Main.swift"), makeFileChange("README.md")]
+    )
+    let diffItems = items.filter {
+      if case .openDiffFile = $0.kind { return true }
+      return false
+    }
+    #expect(diffItems.count == 2)
+    #expect(diffItems.map(\.title) == ["Open diff — Main.swift", "Open diff — README.md"])
+    #expect(diffItems.allSatisfy { !$0.isGlobal })
+    if case .openDiffFile(let worktreeID, let filePath) = diffItems.first?.kind {
+      #expect(worktreeID == worktree.id)
+      #expect(filePath == "Sources/App/Main.swift")
+    } else {
+      Issue.record("expected .openDiffFile kind")
+    }
+  }
+
+  @Test func commandPaletteItems_omitsOpenDiffFileItemsWithoutSelectedWorktree() {
+    let items = CommandPaletteFeature.commandPaletteItems(
+      from: RepositoriesFeature.State(),
+      diffFiles: [makeFileChange("a.swift")]
+    )
+    #expect(
+      items.contains {
+        if case .openDiffFile = $0.kind { return true }
+        return false
+      } == false
+    )
+  }
+
+  @Test func commandPaletteItems_omitsOpenDiffFileItemsWhenNoDiffFiles() {
+    let rootPath = "/tmp/repo"
+    let worktree = makeWorktree(id: rootPath, name: "repo", repoRoot: rootPath)
+    let repository = makeRepository(rootPath: rootPath, name: "Repo", worktrees: [worktree])
+    var state = RepositoriesFeature.State(reconciledRepositories: [repository])
+    state.selection = .worktree(worktree.id)
+
+    let items = CommandPaletteFeature.commandPaletteItems(from: state, diffFiles: [])
+    #expect(
+      items.contains {
+        if case .openDiffFile = $0.kind { return true }
+        return false
+      } == false
+    )
+  }
+
   @Test func commandPaletteItems_includesRenameBranchOnlyForSelectedWorktree() {
     let rootPath = "/tmp/repo-rename"
     let main = makeWorktree(id: "\(rootPath)/main", name: "main", repoRoot: rootPath)

@@ -1,0 +1,10 @@
+0 fileHeader old=- new=- class=widget y=0.0 h=44.0
+1 expander old=- new=- class=widget y=44.0 h=32.0
+2 line old=10 new=10 class=context y=76.0 h=20.0
+3 line old=11 new=11 class=change y=96.0 h=20.0
+4 line old=- new=12 class=change y=116.0 h=20.0
+5 line old=12 new=13 class=context y=136.0 h=20.0
+6 expander old=- new=- class=widget y=156.0 h=32.0
+7 line old=60 new=62 class=context y=188.0 h=20.0
+8 line old=61 new=- class=change y=208.0 h=20.0
+9 marker old=61 new=- class=change y=228.0 h=20.0

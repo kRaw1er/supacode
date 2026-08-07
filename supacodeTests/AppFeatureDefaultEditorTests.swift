@@ -33,6 +33,9 @@ struct AppFeatureDefaultEditorTests {
         AppFeature()
       }
     }
+    // Selection also fans out to `.review` (diff panel); this test is scoped to
+    // editor resolution, so ignore the review load actions.
+    store.exhaustivity = .off
 
     await store.send(.repositories(.delegate(.selectedWorktreeChanged(worktree)))) {
       $0.repositories.$sidebar.withLock { sidebar in
@@ -110,6 +113,9 @@ struct AppFeatureDefaultEditorTests {
       $0.settingsFileURL = settingsFileURL
       $0.repositoryLocalSettingsStorage = localStorage.storage
     }
+    // Selection also fans out to `.review` (diff panel); this test is scoped to
+    // settings resolution, so ignore the review load actions.
+    store.exhaustivity = .off
 
     await store.send(.repositories(.delegate(.selectedWorktreeChanged(worktree)))) {
       $0.repositories.$sidebar.withLock { sidebar in
@@ -384,6 +390,9 @@ struct AppFeatureDefaultEditorTests {
       $0.settingsFileStorage = storage.storage
       $0.settingsFileURL = settingsFileURL
     }
+    // Selection also fans out to `.review` (diff panel); this test asserts only
+    // the watcher command, so ignore the review load actions.
+    store.exhaustivity = .off
 
     await store.send(.repositories(.delegate(.selectedWorktreeChanged(worktree)))) {
       $0.repositories.$sidebar.withLock { sidebar in

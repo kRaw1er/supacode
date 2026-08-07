@@ -247,6 +247,9 @@ struct SupacodeApp: App {
         tabExists: { worktreeID, tabID in
           terminalManager.tabExists(worktreeID: worktreeID, tabID: tabID)
         },
+        isDiffTab: { worktreeID, tabID in
+          terminalManager.isDiffTab(worktreeID: worktreeID, tabID: tabID)
+        },
         tabCanRename: { worktreeID, tabID in
           terminalManager.tabCanRename(worktreeID: worktreeID, tabID: tabID)
         },
@@ -267,6 +270,9 @@ struct SupacodeApp: App {
             let tabID = state.tabManager.selectedTabId
           else { return nil }
           return state.activeSurfaceID(for: tabID)
+        },
+        hasAgentTerminalSurface: { worktreeID in
+          terminalManager.stateIfExists(for: worktreeID)?.hasAgentTerminalSurface ?? false
         },
         latestUnreadNotification: {
           terminalManager.latestUnreadNotificationLocation()
@@ -321,6 +327,13 @@ struct SupacodeApp: App {
       // reads the Keychain or hits the network), so the app-shell boot's
       // `.appLaunched` → `.usage(.task)` loop is inert during tests.
       values.continuousClock = ContinuousClock()
+      // Same reason, for the same reducer: `@Dependency(\.date)` is `unimplemented`
+      // under a test context, and the app shell's own store reduces real actions
+      // (lifecycle telemetry, agent presence) while the unit-test bundle — which is
+      // HOSTED INSIDE this app — runs. Without this the shell's reducer reports
+      // "@Dependency(\.date) has no test implementation" as an issue with no owning
+      // test, which fails the whole run at a place no test can be blamed for.
+      values.date = DateGenerator { Date() }
     }
   }
 
@@ -416,6 +429,16 @@ struct SupacodeApp: App {
       handleWorktreeAppearanceQuery(params: params, repos: repos, clientFD: clientFD, store: store)
     case "scripts":
       handleScriptsQuery(params: params, repos: repos, clientFD: clientFD, store: store)
+    #if DEBUG
+      case "ui":
+        // Generic in-process UI automation surface (DEBUG only). Primitive,
+        // feature-agnostic ops keyed off accessibilityIdentifier — all logic in
+        // UIAutomationDriver, nothing to wire per screen. Runs on the main thread
+        // (NSAccessibility object-graph walk via dynamic dispatch — no AXUIElement
+        // IPC, no deadlock, and it sees the SwiftUI subtree).
+        AgentHookSocketServer.sendQueryResponse(
+          clientFD: clientFD, data: UIAutomationDriver.handle(params: params))
+    #endif
     default:
       AgentHookSocketServer.sendCommandResponse(
         clientFD: clientFD, ok: false, error: "Unknown resource: \(resource)")
@@ -558,6 +581,7 @@ struct SupacodeApp: App {
       Group {
         TerminalCommands(ghosttyShortcuts: ghosttyShortcuts)
         TerminalTabSelectionCommands(store: store)
+        DiffNavigationCommands()
       }
       WindowCommands(ghosttyShortcuts: ghosttyShortcuts)
       CommandGroup(after: .textEditing) {
