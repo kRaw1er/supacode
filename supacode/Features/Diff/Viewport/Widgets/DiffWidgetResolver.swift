@@ -55,7 +55,9 @@ struct DiffWidgetResolver {
         onCommentOnFile: { onCommentOnFile(fileID) })
 
     case .expander(_, _, let hidden, let header):
-      guard case .expander(let gap) = widget.key else { return nil }
+      // A blob-backed gap resolves its `GapKey` (⇒ expand buttons); an in-hunk
+      // collapsed run has none, and renders as the static bar.
+      let gap: GapKey? = if case .expander(let key) = widget.key { key } else { nil }
       return ExpanderWidget(
         key: widget.key, model: .init(gap: gap, hiddenCount: hidden, header: header), coalescer: coalescer,
         onExpand: onExpand)

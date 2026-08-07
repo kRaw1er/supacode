@@ -220,10 +220,16 @@ struct ExpansionStateTests {
     #expect(renderedNewNumbers.contains(9))
   }
 
+  /// Either separator kind hides lines — the gap's (`.expander`) or an in-hunk
+  /// collapsed run's (`.inHunkExpander`), which is what a long context run inside one
+  /// hunk folds into.
   private static func hasExpander(_ chunks: [Chunk]) -> Bool {
     chunks.contains { chunk in
-      guard case .widget(let widget) = chunk, case .expander = widget.key else { return false }
-      return true
+      guard case .widget(let widget) = chunk else { return false }
+      switch widget.key {
+      case .expander, .inHunkExpander: return true
+      default: return false
+      }
     }
   }
 }

@@ -41,9 +41,27 @@ extension ChunkTreeBuilder {
     .widget(
       Widget(
         key: .expander(separator.gap),
-        estimatedHeight: options.metrics.expanderHeight,
+        estimatedHeight: options.metrics.separatorHeight,
         payload: .expander(
           anchor: separator.anchor, range: separator.range, hidden: separator.hidden, header: separator.header)
+      )
+    )
+  }
+
+  /// The separator for a collapsed context run INSIDE a hunk. Its own `WidgetKey`
+  /// (never the neighbouring gap's), no header — it introduces no hunk — and no
+  /// blob-backed gap behind it: these lines came in with the hunk, so the Phase-7
+  /// expand path does not apply to it. pierre renders exactly this shape when a
+  /// separator is not expandable (`createSeparator` with `expandIndex == nil`: the
+  /// line count, no buttons).
+  static func inHunkExpanderWidget(
+    hunkID: HunkID, anchor: Int, range: Range<Int>, hidden: Int, _ options: Options
+  ) -> Chunk {
+    .widget(
+      Widget(
+        key: .inHunkExpander(hunkID: hunkID, anchor: anchor),
+        estimatedHeight: options.metrics.separatorHeight,
+        payload: .expander(anchor: anchor, range: range, hidden: hidden, header: nil)
       )
     )
   }
@@ -274,18 +292,17 @@ extension ChunkTreeBuilder {
   }
 
   /// Hunk-separator estimate height by position + style (the **reduced** 2-style
-  /// set; GAP §4.3). `lineInfo` reserves spacing + a rule body; `simple` reserves
-  /// only a thin middle rule.
+  /// set; GAP §4.3). `lineInfo` reserves exactly the separator bar the tree builds —
+  /// position-independent, because our bar is a flush row with no margins. (pierre
+  /// adds `spacing` above / below by DOM margin; reserving those here would make the
+  /// estimate describe a row we never render, which is the drift this replaces.)
+  /// `simple` reserves only a thin middle rule.
   static func separatorHeight(_ position: SeparatorPosition, style: HunkSeparatorStyle, metrics: ChunkLayoutMetrics)
     -> CGFloat
   {
     switch style {
     case .lineInfo:
-      switch position {
-      case .first: return metrics.separatorHeight + metrics.spacing
-      case .middle: return metrics.spacing + metrics.separatorHeight + metrics.spacing
-      case .trailing: return metrics.spacing + metrics.separatorHeight
-      }
+      return metrics.separatorHeight
     case .simple:
       switch position {
       case .first, .trailing: return 0

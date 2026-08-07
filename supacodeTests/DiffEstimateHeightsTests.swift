@@ -12,12 +12,11 @@ import Testing
 /// pierre's `computeEstimatedDiffHeights` up-front estimate maps to our
 /// `ChunkTreeBuilder.estimatedHeights(file:hunks:options:)`; pierre's laid-out
 /// `getLinePosition(...).top` / `getVirtualizedHeight()` maps to the REAL tree
-/// geometry (`ChunkTree.seek` yOrigin / `totalHeight`). The two are deliberately
-/// different in our stack: the estimate reserves line-info separator heights
-/// (`separatorHeight ± spacing`) while the materialized tree carries explicit
-/// expander (`expanderHeight`) + hunk-header (`separatorHeight`) widget rows — so
-/// each assertion below is composed from the metric constants it actually depends
-/// on rather than a single opaque literal.
+/// geometry (`ChunkTree.seek` yOrigin / `totalHeight`). In our stack the two must
+/// AGREE: one collapsed gap reserves one `separatorHeight` row and builds exactly
+/// that row (`estimateMatchesTheTreeItBuilds` pins it). Each assertion below is
+/// composed from the metric constants it actually depends on rather than a single
+/// opaque literal.
 @MainActor
 struct DiffEstimateHeightsTests {
   private var metrics: ChunkLayoutMetrics { .production }
@@ -96,11 +95,30 @@ struct DiffEstimateHeightsTests {
     #expect(heights.split == expectedSplit)
     #expect(heights.unified == expectedUnified)
 
-    // Concrete values for the production metric set (44/20/32/8) — a change to the
+    // Concrete values for the production metric set (44/20/32) — a change to the
     // arithmetic that still balances the composition above would not survive here.
-    #expect(separators == 128)  // 40 + 48 + 40
-    #expect(heights.split == 380)  // 44 + 40 + 10*20 + 48 + 40 + 8
-    #expect(heights.unified == 420)  // 44 + 40 + 12*20 + 48 + 40 + 8
+    // One separator per collapsed gap, at exactly the height its bar renders: we
+    // drop pierre's DOM margins because our separator is a flush row.
+    #expect(separators == 96)  // 3 × 32
+    #expect(heights.split == 348)  // 44 + 32 + 10*20 + 32 + 32 + 8
+    #expect(heights.unified == 388)  // 44 + 32 + 12*20 + 32 + 32 + 8
+  }
+
+  /// The invariant the two heights above only sample: the up-front estimate and the
+  /// tree the builder actually goes on to build describe the SAME document, up to the
+  /// bottom padding (which is layout slack, not a leaf). Before the separator and the
+  /// `@@` header were one row this was off by a hunk header per hunk in one direction
+  /// and a spacing margin per gap in the other — a drift no single-number golden
+  /// caught, because both sides were asserted against their own literals.
+  @Test func estimateMatchesTheTreeItBuilds() {
+    let fixture = twoHunkFile()
+    let options = ChunkTreeBuilder.Options(totalNewLines: twoHunkTotalNewLines)
+    let heights = ChunkTreeBuilder.estimatedHeights(file: fixture.file, hunks: fixture.hunks, options: options)
+    for mode in [DiffViewMode.unified, .split] {
+      let tree = ChunkTreeBuilder.build(file: fixture.file, hunks: fixture.hunks, mode: mode, options: options)
+      let estimate = mode == .unified ? heights.unified : heights.split
+      #expect(estimate == tree.totalHeight(mode) + metrics.paddingBottom)
+    }
   }
 
   /// Mirrors virtualFileMetricsPadding.test.ts
@@ -137,11 +155,11 @@ struct DiffEstimateHeightsTests {
     let counts1 = ChunkTreeBuilder.hunkCounts(fixture.hunks[0])
     let expectedTop =
       metrics.diffHeaderHeight  // file header widget
-      + metrics.expanderHeight  // leading collapsed-gap separator (= hunk 1's header)
+      + metrics.separatorHeight  // leading collapsed-gap separator (= hunk 1's header)
       + CGFloat(counts1.unified) * metrics.lineHeight  // all of hunk 1's rows
-      + metrics.expanderHeight  // middle collapsed-gap separator (= hunk 2's header)
+      + metrics.separatorHeight  // middle collapsed-gap separator (= hunk 2's header)
     #expect(hit?.yOrigin == expectedTop)
-    #expect(expectedTop == 220)  // 44 + 28 + 120 + 28
+    #expect(expectedTop == 228)  // 44 + 32 + 120 + 32
   }
 
   // MARK: - Item 2: unknown-tail diffs reserve no trailing separator
@@ -183,7 +201,7 @@ struct DiffEstimateHeightsTests {
     // The only difference between unknown and known tail is one trailing separator.
     #expect(knownTail.split - unknownTail.split == trailingSep)
     #expect(knownTail.unified - unknownTail.unified == trailingSep)
-    #expect(trailingSep == 40)  // 8 (spacing) + 32 (separator body)
+    #expect(trailingSep == 32)  // the separator bar, flush (no pierre DOM margin)
   }
 
   // MARK: - Item 3: estimate grows on hunk expansion for BOTH modes

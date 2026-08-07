@@ -160,11 +160,14 @@ final class DiffAXProvider: NSObject {
 
   // MARK: - Tree-backed projections (lazy getters for `DiffLineAXElement`)
 
-  /// A collapsed run is a single expander widget row → a press-button; every other
-  /// row reads as static text.
+  /// A collapsed GAP is a single separator row that expands → a press-button. Every
+  /// other row — including the in-hunk collapsed run, which no expand action
+  /// addresses — reads as static text, so VoiceOver never offers a press that does
+  /// nothing. Keyed on the `WidgetKey`, not the payload: both separators share a
+  /// payload case and only the key says which one can act.
   func role(_ row: Int) -> NSAccessibility.Role {
     guard let hit = snapshot().tree.seek(index: row, mode: snapshot().mode) else { return .staticText }
-    if case .widget(let widget) = hit.chunk, case .expander = widget.payload { return .button }
+    if case .widget(let widget) = hit.chunk, case .expander = widget.key { return .button }
     return .staticText
   }
 
@@ -250,6 +253,9 @@ final class DiffAXProvider: NSObject {
       guard let model = snap.fileHeader(fileID) else { return "File" }
       return DiffAXText.fileHeaderLabel(model)
     case .expander(let anchor, let range, let hidden, let header):
+      // An in-hunk collapsed run cannot be expanded, so it STATES what it hides
+      // instead of offering to show it — the same string its bar draws.
+      guard case .expander = widget.key else { return DiffAXText.collapsedRunLabel(hiddenCount: hidden) }
       return DiffAXText.label(
         for: .expander(anchor: anchor, collapsedRange: range, hiddenCount: hidden, header: header), mode: snap.mode)
     case .placeholder(let placeholder):

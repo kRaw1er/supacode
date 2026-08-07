@@ -143,10 +143,14 @@ nonisolated struct LayoutCheckpoint: Equatable, Sendable {
 nonisolated struct ChunkLayoutMetrics: Equatable, Sendable {
   var lineHeight: CGFloat
   var diffHeaderHeight: CGFloat
-  var separatorHeight: CGFloat  // line-info hunk separator body (pierre 32)
+  /// The hunk separator row — ONE constant, because there is ONE such row: the
+  /// collapsed-gap bar that also carries the `@@ … @@` header. It is both what the
+  /// estimate reserves per collapsed gap and what the widget renders, so the two
+  /// cannot drift. (It used to be two: `separatorHeight` for a standalone header
+  /// leaf and `expanderHeight` for the bar, which is precisely how the estimate came
+  /// to reserve a row the tree never built.)
+  var separatorHeight: CGFloat  // pierre line-info separator body, 32
   var simpleSeparatorHeight: CGFloat  // simple-style middle rule (pierre 4)
-  var spacing: CGFloat
-  var expanderHeight: CGFloat
   var placeholderHeight: CGFloat
   var commentThreadHeight: CGFloat
   var paddingTop: CGFloat
@@ -157,8 +161,6 @@ nonisolated struct ChunkLayoutMetrics: Equatable, Sendable {
     diffHeaderHeight: CGFloat = 44,
     separatorHeight: CGFloat = 32,
     simpleSeparatorHeight: CGFloat = 4,
-    spacing: CGFloat = 8,
-    expanderHeight: CGFloat = 28,
     placeholderHeight: CGFloat = 60,
     commentThreadHeight: CGFloat = 120,
     paddingTop: CGFloat = 0,
@@ -168,8 +170,6 @@ nonisolated struct ChunkLayoutMetrics: Equatable, Sendable {
     self.diffHeaderHeight = diffHeaderHeight
     self.separatorHeight = separatorHeight
     self.simpleSeparatorHeight = simpleSeparatorHeight
-    self.spacing = spacing
-    self.expanderHeight = expanderHeight
     self.placeholderHeight = placeholderHeight
     self.commentThreadHeight = commentThreadHeight
     self.paddingTop = paddingTop
@@ -177,7 +177,7 @@ nonisolated struct ChunkLayoutMetrics: Equatable, Sendable {
   }
 
   /// The verified pierre production metrics (`lineHeight 20`, `diffHeaderHeight 44`,
-  /// `spacing 8`, hunk separator `32` / simple `4`).
+  /// hunk separator `32` / simple `4`).
   static let production = ChunkLayoutMetrics()
 
   /// Max rendered rows a single dense leaf may span before the builder splits it

@@ -78,11 +78,19 @@ nonisolated enum Chunk: Equatable, Sendable {
   }
 
   /// The document region this leaf belongs to, when it belongs to one. A gap's
-  /// expander is part of its gap, so removing the region takes the expander with it.
+  /// separator is part of its gap, so removing the region takes the separator with
+  /// it; an in-hunk collapsed run belongs to the hunk whose lines it hides, NOT to
+  /// the gap in front of that hunk — putting both in `.gap` is what let a gap splice
+  /// delete the in-hunk run's leaf.
   var region: RegionKey? {
     switch self {
     case .lineSegment(let segment): segment.region
-    case .widget(let widget): if case .expander(let gap) = widget.key { .gap(gap) } else { nil }
+    case .widget(let widget):
+      switch widget.key {
+      case .expander(let gap): .gap(gap)
+      case .inHunkExpander(let hunkID, _): .hunk(hunkID)
+      default: nil
+      }
     }
   }
 }
@@ -200,6 +208,14 @@ nonisolated enum WidgetKey: Hashable, Sendable {
   /// `DiffHunksRenderer.pushSeparator`), so a gap with nothing left to hide has no
   /// leaf at all rather than an orphan header stranded in contiguous code.
   case expander(GapKey)  // gap identity (survives re-diff)
+  /// A collapsed context run INSIDE a hunk — lines git already put in the hunk, so
+  /// it is a different animal from a blob-backed gap and must not share its
+  /// identity. It used to reuse `.expander(GapKey(fileID, hunkIndex))`, which is the
+  /// SAME key the gap before that hunk carries: the two would overwrite each other
+  /// in `widgetNodes` and land in one `regionNodes` bucket, so a gap splice would
+  /// remove the in-hunk run's leaf (and vice versa). Keyed by its anchor line, which
+  /// is unique within the hunk.
+  case inHunkExpander(hunkID: HunkID, anchor: Int)
   case commentThread(anchorID: UUID)
   case placeholder(fileID: FileID)
   case noNewlineMarker(hunkID: HunkID, side: DiffSide)
@@ -208,7 +224,8 @@ nonisolated enum WidgetKey: Hashable, Sendable {
   var reuseKind: WidgetReuseKind {
     switch self {
     case .fileHeader: .fileHeader
-    case .expander: .expander
+    // Both separators are hosted by `ExpanderWidget`, so they share a recycling pool.
+    case .expander, .inHunkExpander: .expander
     case .commentThread: .commentThread
     case .placeholder: .placeholder
     case .noNewlineMarker: .noNewlineMarker

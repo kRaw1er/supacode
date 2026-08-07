@@ -434,6 +434,46 @@ struct ChunkTreeBuilderTests {
     }
   }
 
+  /// An in-hunk collapsed run and the gap in front of the SAME hunk are two different
+  /// leaves and must keep two different identities. They used to share
+  /// `.expander(GapKey(fileID, hunkIndex))`: the second registration overwrote the
+  /// first in `widgetNodes`, both landed in one `regionNodes` bucket, and
+  /// `applyExpansion` for the gap would then delete the in-hunk run's leaf as if it
+  /// were part of the gap. (Latent today — with git context 3 an in-hunk run is at
+  /// most 6 lines, under the collapse threshold — so the guard is the point.)
+  @Test func inHunkRunAndLeadingGapKeepDistinctIdentities() {
+    // Hunk 1 starts at line 40 (⇒ a leading gap) and carries a 20-line context run
+    // between two changes (⇒ an in-hunk collapsed run), both belonging to hunk index 1.
+    var lines = [DiffFixture.line(.addition, new: 40, "first")]
+    lines += (41...60).map { DiffFixture.line(.context, old: $0 - 1, new: $0, "ctx\($0)") }
+    lines.append(DiffFixture.line(.addition, new: 61, "second"))
+    let hunks = [
+      DiffFixture.hunk([DiffFixture.line(.addition, new: 1, "a")], oldStart: 1, newStart: 1),
+      DiffFixture.hunk(lines, oldStart: 39, newStart: 40, header: "@@ -39,20 +40,22 @@"),
+    ]
+    let file = DiffFixture.file()
+    let tree = ChunkTreeBuilder.build(file: file, hunks: hunks, mode: .unified, options: headerless)
+
+    let gapKey = WidgetKey.expander(GapKey(fileID: file.id, hunkIndex: 1))
+    let hunkID = HunkID(fileID: file.id, index: 1)
+    let gapNode = tree.widgetNode(for: gapKey)
+    #expect(gapNode != nil)  // the gap's separator survived the in-hunk run's registration
+    let inHunkNode = tree.inorderNodes().first {
+      if case .inHunkExpander(let id, _)? = $0.chunk.widget?.key { return id == hunkID }
+      return false
+    }
+    #expect(inHunkNode != nil)
+    #expect(gapNode?.id != inHunkNode?.id)
+
+    // …and they sit in different regions, so a gap splice cannot reach the in-hunk one.
+    #expect(tree.nodes(in: .gap(GapKey(fileID: file.id, hunkIndex: 1))).map(\.id) == [gapNode!.id])
+    #expect(tree.nodes(in: .hunk(hunkID)).contains { $0.id == inHunkNode!.id })
+
+    // The in-hunk bar carries no header (it introduces no hunk); the gap's does.
+    if case .expander(_, _, _, let header)? = inHunkNode?.chunk.widget?.payload { #expect(header == nil) }
+    if case .expander(_, _, _, let header)? = gapNode?.chunk.widget?.payload { #expect(header == hunks[1].header) }
+  }
+
   /// ...and a comment on a revealed gap line therefore anchors to that line, instead
   /// of falling through to the "anchor not found" tail of the document.
   @Test func commentOnARevealedGapLineAnchorsToIt() {
@@ -570,17 +610,20 @@ struct ChunkTreeBuilderTests {
     let expectedNoSeparators: CGFloat = 44 + 3 * 20 + 8
     #expect(expanded.unified == expectedNoSeparators)
     #expect(expanded.split == expectedNoSeparators)
-    // Collapsed (leading gap) adds exactly the first line-info separator (32 + 8).
+    // Collapsed (leading gap) adds exactly the first line-info separator (32).
     let collapsed = ChunkTreeBuilder.estimatedHeights(file: DiffFixture.file(), hunks: [hunk])
-    let firstSeparator: CGFloat = 40
+    let firstSeparator: CGFloat = 32
     #expect(collapsed.unified == expanded.unified + firstSeparator)
   }
 
   @Test func hunkSeparatorHeightReducedSet() {
-    let metrics = ChunkLayoutMetrics(separatorHeight: 12, simpleSeparatorHeight: 4, spacing: 4)
-    #expect(ChunkTreeBuilder.separatorHeight(.first, style: .lineInfo, metrics: metrics) == 16)  // 12 + 4
-    #expect(ChunkTreeBuilder.separatorHeight(.middle, style: .lineInfo, metrics: metrics) == 20)  // 4 + 12 + 4
-    #expect(ChunkTreeBuilder.separatorHeight(.trailing, style: .lineInfo, metrics: metrics) == 16)  // 4 + 12
+    let metrics = ChunkLayoutMetrics(separatorHeight: 12, simpleSeparatorHeight: 4)
+    // `lineInfo` is position-independent: our separator is a flush row, so it reserves
+    // exactly the bar it builds. (pierre adds a `spacing` DOM margin above / below;
+    // reserving those here would describe a row we never render.)
+    #expect(ChunkTreeBuilder.separatorHeight(.first, style: .lineInfo, metrics: metrics) == 12)
+    #expect(ChunkTreeBuilder.separatorHeight(.middle, style: .lineInfo, metrics: metrics) == 12)
+    #expect(ChunkTreeBuilder.separatorHeight(.trailing, style: .lineInfo, metrics: metrics) == 12)
     #expect(ChunkTreeBuilder.separatorHeight(.first, style: .simple, metrics: metrics) == 0)
     #expect(ChunkTreeBuilder.separatorHeight(.middle, style: .simple, metrics: metrics) == 4)
     #expect(ChunkTreeBuilder.separatorHeight(.trailing, style: .simple, metrics: metrics) == 0)

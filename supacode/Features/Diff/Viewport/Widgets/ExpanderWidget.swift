@@ -17,7 +17,11 @@ import SwiftUI
 @MainActor
 final class ExpanderWidget: DiffWidget {
   struct Model: Hashable {
-    var gap: GapKey
+    /// The blob-backed gap this bar reveals, or `nil` for an in-hunk collapsed run —
+    /// those lines came in with the hunk, so the Phase-7 gap expand does not address
+    /// them and the bar renders without buttons (pierre's non-expandable separator,
+    /// `createSeparator` with `expandIndex == nil`).
+    var gap: GapKey?
     var hiddenCount: Int
     /// The introduced hunk's raw `"@@ … @@"` header, or `nil` for the trailing gap
     /// / an in-hunk collapsed run (neither introduces a hunk).
@@ -33,9 +37,10 @@ final class ExpanderWidget: DiffWidget {
   private unowned let coalescer: LayoutCoalescer
   private let onExpand: (GapKey, ExpansionState.Step, ExpansionState.Direction) -> Void
 
-  /// Matches the tree's reserved gap height (`ChunkLayoutMetrics.expanderHeight`)
-  /// so the estimate the builder reserves and the widget's self-estimate agree.
-  var estimatedHeight: CGFloat { ChunkLayoutMetrics.production.expanderHeight }
+  /// The SAME constant the builder reserves per collapsed gap
+  /// (`ChunkLayoutMetrics.separatorHeight`), so the up-front estimate and the row the
+  /// widget actually renders cannot disagree.
+  var estimatedHeight: CGFloat { ChunkLayoutMetrics.production.separatorHeight }
 
   init(
     key: WidgetKey,
@@ -62,16 +67,18 @@ final class ExpanderWidget: DiffWidget {
   }
 
   private func content(reporter: HeightReporter) -> some View {
-    let gap = model.gap
-    let expand = onExpand
-    return ExpanderView(hiddenCount: model.hiddenCount, header: model.header) { step, direction in
-      expand(gap, step, direction)
+    let onExpand = self.onExpand
+    let expand = model.gap.map { gap in
+      { (step: ExpansionState.Step, direction: ExpansionState.Direction) in
+        onExpand(gap, step, direction)
+      }
     }
-    .onGeometryChange(for: CGSize.self) {
-      $0.size
-    } action: { size in
-      reporter.report(width: size.width, height: size.height)
-    }
+    return ExpanderView(hiddenCount: model.hiddenCount, header: model.header, onExpand: expand)
+      .onGeometryChange(for: CGSize.self) {
+        $0.size
+      } action: { size in
+        reporter.report(width: size.width, height: size.height)
+      }
   }
 }
 
@@ -81,41 +88,51 @@ final class ExpanderWidget: DiffWidget {
 /// action reveals the whole gap. The coarse (±100) rung exists in
 /// `ExpansionState.Step` for a future affordance; the tests cover all three rungs at
 /// the model level.
+///
+/// `onExpand == nil` ⇒ the non-expandable bar (pierre `createSeparator` with
+/// `expandIndex == nil`): the hidden-line count with no buttons. That is the in-hunk
+/// collapsed run, whose lines arrived with the hunk and which the gap expand cannot
+/// address — a button there would reveal the neighbouring gap's lines instead.
 private struct ExpanderView: View {
   let hiddenCount: Int
   let header: String?
-  let onExpand: (ExpansionState.Step, ExpansionState.Direction) -> Void
+  let onExpand: ((ExpansionState.Step, ExpansionState.Direction) -> Void)?
 
   private var fineCount: Int { ExpansionState.Step.fine.lineCount ?? 20 }
 
   var body: some View {
     HStack(spacing: 4) {
-      Button {
-        onExpand(.fine, .up)
-      } label: {
-        Image(systemName: "chevron.up")
-          .font(.caption)
-      }
-      .help("Reveal \(fineCount) more lines above (e)")
-      .accessibilityLabel("Reveal \(fineCount) lines above")
+      if let onExpand {
+        Button {
+          onExpand(.fine, .up)
+        } label: {
+          Image(systemName: "chevron.up")
+            .font(.caption)
+        }
+        .help("Reveal \(fineCount) more lines above (e)")
+        .accessibilityLabel("Reveal \(fineCount) lines above")
 
-      Button {
-        onExpand(.whole, .both)
-      } label: {
-        Label(label, systemImage: "arrow.up.and.down.text.horizontal")
-          .font(.caption)
-      }
-      .help("Reveal all \(hiddenCount) hidden line\(hiddenCount == 1 ? "" : "s") (⇧E)")
-      .accessibilityLabel("Reveal all \(hiddenCount) hidden lines")
+        Button {
+          onExpand(.whole, .both)
+        } label: {
+          Label(label, systemImage: "arrow.up.and.down.text.horizontal")
+            .font(.caption)
+        }
+        .help("Reveal all \(hiddenCount) hidden line\(hiddenCount == 1 ? "" : "s") (⇧E)")
+        .accessibilityLabel("Reveal all \(hiddenCount) hidden lines")
 
-      Button {
-        onExpand(.fine, .down)
-      } label: {
-        Image(systemName: "chevron.down")
+        Button {
+          onExpand(.fine, .down)
+        } label: {
+          Image(systemName: "chevron.down")
+            .font(.caption)
+        }
+        .help("Reveal \(fineCount) more lines below")
+        .accessibilityLabel("Reveal \(fineCount) lines below")
+      } else {
+        Label(DiffAXText.collapsedRunLabel(hiddenCount: hiddenCount), systemImage: "text.alignleft")
           .font(.caption)
       }
-      .help("Reveal \(fineCount) more lines below")
-      .accessibilityLabel("Reveal \(fineCount) lines below")
 
       if let header, !header.isEmpty {
         Text(header)
@@ -130,7 +147,7 @@ private struct ExpanderView: View {
     .buttonStyle(.borderless)
     .foregroundStyle(.secondary)
     .padding(.horizontal, 8)
-    .frame(maxWidth: .infinity, minHeight: ChunkLayoutMetrics.production.expanderHeight)
+    .frame(maxWidth: .infinity, minHeight: ChunkLayoutMetrics.production.separatorHeight)
     .background(.quaternary.opacity(0.4))
   }
 

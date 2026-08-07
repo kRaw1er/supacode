@@ -299,13 +299,11 @@ enum ChunkTreeBuilder {
     let hiddenSlice = buffer[edge..<(buffer.count - edge)]
     let firstHidden = hiddenSlice.first?.newLineNumber ?? anchor
     let lastHidden = hiddenSlice.last?.newLineNumber ?? anchor
-    // An in-hunk collapsed run introduces no hunk, so its separator carries no header.
+    // These lines came in WITH the hunk, so this is not a blob-backed gap: its own
+    // key, no header (it introduces no hunk), no Phase-7 expand behind it.
     chunks.append(
-      expanderWidget(
-        GapSeparator(
-          gap: GapKey(fileID: hunkID.fileID, hunkIndex: hunkID.index), anchor: anchor,
-          range: firstHidden..<(lastHidden + 1), hidden: hidden, header: nil),
-        context.options)
+      inHunkExpanderWidget(
+        hunkID: hunkID, anchor: anchor, range: firstHidden..<(lastHidden + 1), hidden: hidden, context.options)
     )
     if !tail.isEmpty { appendSegments(&chunks, lines: tail, hunkID: hunkID, classification: .context) }
   }

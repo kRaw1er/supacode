@@ -43,6 +43,15 @@ enum DiffAXText {
     }
   }
 
+  /// The label for a NON-expandable collapsed run — the in-hunk one, whose lines came
+  /// in with the hunk and which no expand action addresses. States what is hidden
+  /// instead of offering to show it (pierre's `getModifiedLinesString` on a separator
+  /// with no expand buttons). Doubles as the bar's on-screen text so the spoken and
+  /// the drawn label are one string.
+  static func collapsedRunLabel(hiddenCount: Int) -> String {
+    "\(hiddenCount) unchanged line\(hiddenCount == 1 ? "" : "s")"
+  }
+
   /// One line's spoken label. (Ported from `DiffCellView.lineLabel`.)
   private static func lineLabel(_ line: DiffLine) -> String {
     let origin: String

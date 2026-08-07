@@ -48,7 +48,7 @@ final class ConflictWidget: DiffWidget {
     ConflictWidgetContent.make(region: region, acceptWriteEnabled: acceptWriteEnabled)
   }
 
-  var estimatedHeight: CGFloat { ChunkLayoutMetrics.production.expanderHeight }
+  var estimatedHeight: CGFloat { ChunkLayoutMetrics.production.separatorHeight }
 
   func makeHostView(reporter: HeightReporter) -> NSView {
     let host = NSHostingView(rootView: AnyView(content(reporter: reporter)))

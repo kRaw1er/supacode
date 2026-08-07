@@ -119,7 +119,7 @@ struct DiffDeepScrollFidelityTests {
     let expectedTop = metrics.diffHeaderHeight + (metrics.lineHeight * 4)
     let expanderFrame = controller.frame(forChunk: expander.id)
     #expect(expanderFrame?.minY == expectedTop)  // 124
-    #expect(expanderFrame?.height == metrics.expanderHeight)  // 28, not 36 * lineHeight
+    #expect(expanderFrame?.height == metrics.separatorHeight)  // 32, not 36 * lineHeight
 
     // The hidden lines do NOT resolve to any rendered line row (no phantom rows):
     // 20 (mid-gap) and 38 (pierre's `additionStart - 2`, just above hunk 1).
