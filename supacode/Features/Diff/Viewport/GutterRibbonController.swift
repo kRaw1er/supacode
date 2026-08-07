@@ -62,6 +62,7 @@ final class GutterRibbonController: NSView {
   private(set) var session: PointerSession = .idle
   private var hover: SelectionPoint?
   private var trackingArea: NSTrackingArea?
+  private var containerObserver: NSObjectProtocol?
 
   // Geometry cached straight off the forward `hitTest` so drawing seeks the row by
   // its global rendered-row INDEX (O(log n)) instead of reverse-resolving a
@@ -219,6 +220,7 @@ final class GutterRibbonController: NSView {
   /// active drag the band follows its pinned rows via that live mapping, so only a repaint
   /// is needed.
   func viewportDidScroll() {
+    syncFrameToContainer()
     guard case .idle = session, let window else {
       setNeedsDisplay(bounds)  // a drag band follows its pinned rows; just repaint
       return
@@ -323,13 +325,51 @@ final class GutterRibbonController: NSView {
 
   // MARK: - NSResponder event routing
 
-  /// AppKit runs its tracking-area update pass off geometry / hierarchy changes, and this
-  /// overlay is mounted (`addFloatingSubview`) from `makeNSView` — before the scroll view
-  /// is in a window — then never resized again on its own. So arm the area explicitly the
-  /// moment it lands in a window; otherwise nothing tracks until some LATER event forces a
-  /// pass, which is why hover used to stay dead until the first click anywhere.
+  /// Re-fit to the floating-subview container. MEASURED: `addFloatingSubview` parents us to
+  /// an `_NSScrollViewFloatingSubviewsContainerView` whose `autoresizesSubviews` is **false**,
+  /// so our `autoresizingMask` is dead — the frame we were installed with is the frame we
+  /// keep. We are installed from `makeNSView`, where the scroll view is still unsized, so
+  /// that frame is `(0,0,0,0)`: `setNeedsDisplay(bounds)` then dirties an EMPTY rect, and a
+  /// hover repainted only when something else (the first click's relayout) happened to
+  /// redraw the region — the "hover does nothing until you click" bug. `bounds.contains`
+  /// tests (the scroll-hover re-resolve) were false for the same reason.
+  func syncFrameToContainer() {
+    guard let container = superview, frame != container.bounds else { return }
+    frame = container.bounds
+    updateTrackingAreas()
+    setNeedsDisplay(bounds)
+  }
+
+  /// Fit + arm as soon as we are parented, and keep fitting: with autoresizing dead the
+  /// container's own `frameDidChange` is the only signal that the viewport changed size, so
+  /// own that subscription here rather than leaning on the controller's callbacks — the
+  /// overlay's geometry should not depend on who else remembered to poke it.
+  override func viewDidMoveToSuperview() {
+    super.viewDidMoveToSuperview()
+    // Also the teardown path: AppKit calls this with a nil superview on removal, so the
+    // observer never outlives the parenting that justified it (no `deinit` — a nonisolated
+    // `deinit` cannot touch main-actor state under Swift 6).
+    if let containerObserver {
+      NotificationCenter.default.removeObserver(containerObserver)
+      self.containerObserver = nil
+    }
+    if let container = superview {
+      container.postsFrameChangedNotifications = true
+      // `queue: nil` — delivered synchronously on the posting thread (the main thread, where
+      // AppKit lays out), so the re-fit lands in the SAME pass as the resize, not a runloop
+      // turn later with a stale frame in between.
+      containerObserver = NotificationCenter.default.addObserver(
+        forName: NSView.frameDidChangeNotification, object: container, queue: nil
+      ) { [weak self] _ in
+        MainActor.assumeIsolated { self?.syncFrameToContainer() }
+      }
+    }
+    syncFrameToContainer()
+  }
+
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
+    syncFrameToContainer()
     updateTrackingAreas()
   }
 

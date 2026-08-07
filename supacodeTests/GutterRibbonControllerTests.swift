@@ -428,4 +428,66 @@ struct GutterRibbonControllerTests {
     #expect(area.options.contains(.mouseEnteredAndExited))
     #expect(gutter.acceptsFirstMouse(for: nil))  // the first click ACTS, not just focuses
   }
+
+  /// The coordinator's REAL mount sequence (`DiffViewerRepresentable.installInteraction`):
+  /// the overlay is sized from the clip view and floated on the scroll view from
+  /// `makeNSView`, where SwiftUI has not sized anything yet — so it is installed at
+  /// `.zero`.
+  private struct MountedViewport {
+    let controller: DiffViewportController
+    let gutter: GutterRibbonController
+    /// Held so the window (and therefore the mounted hierarchy) outlives the test body.
+    let window: NSWindow
+  }
+
+  private func mountLikeCoordinator() -> MountedViewport {
+    let controller = DiffViewportController()
+    let gutter = GutterRibbonController()
+    gutter.controller = controller
+    gutter.frame = controller.scrollView.contentView.frame
+    gutter.autoresizingMask = [.width, .height]
+    controller.scrollView.addFloatingSubview(gutter, for: .vertical)
+
+    let window = NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 900, height: 700), styleMask: [.titled, .resizable],
+      backing: .buffered, defer: false)
+    window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
+    controller.scrollView.frame = NSRect(x: 0, y: 0, width: 900, height: 700)
+    window.contentView?.addSubview(controller.scrollView)
+    controller.apply(tree: ViewportTestSupport.contextLeaves(Array(1...50)), mode: .unified, scrollPreserving: false)
+    return MountedViewport(controller: controller, gutter: gutter, window: window)
+  }
+
+  /// The overlay must end up covering the viewport. MEASURED ROOT CAUSE: `addFloatingSubview`
+  /// parents it to an `_NSScrollViewFloatingSubviewsContainerView` with
+  /// `autoresizesSubviews == false`, so the `autoresizingMask` it was given is DEAD and it
+  /// kept its install-time `.zero` frame forever. Everything the gutter does off its own
+  /// geometry then silently no-ops: `setNeedsDisplay(bounds)` dirties an EMPTY rect (so a
+  /// resolved hover painted nothing until an unrelated redraw — the "hover does nothing
+  /// until you click somewhere" bug) and `bounds.contains(mouse)` is always false.
+  @Test func overlayRefitsToTheViewportDespiteADeadAutoresizingMask() throws {
+    let mounted = mountLikeCoordinator()
+    let gutter = mounted.gutter
+    let container = try #require(gutter.superview)
+    #expect(container.autoresizesSubviews == false, "if AppKit ever starts autoresizing these, revisit the re-fit")
+
+    #expect(!gutter.frame.isEmpty, "the overlay never grew past its install-time zero frame")
+    #expect(gutter.frame.size == container.bounds.size)
+    let area = try #require(gutter.trackingAreas.first)
+    #expect(!area.rect.isEmpty)  // an empty tracking rect tracks nothing
+  }
+
+  /// A later viewport resize (window drag, inspector toggle) must re-fit it too — the dead
+  /// autoresizing mask means nothing else will.
+  @Test func overlayRefitsOnViewportResize() throws {
+    let mounted = mountLikeCoordinator()
+    let gutter = mounted.gutter
+    let wide = gutter.frame.width
+    mounted.controller.scrollView.frame = NSRect(x: 0, y: 0, width: 640, height: 480)
+    mounted.controller.scrollView.tile()  // re-lays the floating container
+
+    let container = try #require(gutter.superview)
+    #expect(gutter.frame.size == container.bounds.size)
+    #expect(gutter.frame.width < wide)  // followed the shrink, did not keep the old width
+  }
 }

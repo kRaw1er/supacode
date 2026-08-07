@@ -352,6 +352,9 @@ struct DiffViewerRepresentable: NSViewRepresentable {
             filePath: self.filePath, source: self.source, side: side, startLine: startLine, endLine: endLine,
             anchorSnippet: snippet, contextBefore: context))
       }
+      // The scroll view is still unsized here (SwiftUI sizes it after `makeNSView`), and the
+      // floating-subview container does NOT autoresize its children, so this frame is only a
+      // seed — `GutterRibbonController` re-fits itself off the container's `frameDidChange`.
       gutter.frame = controller.scrollView.contentView.frame
       gutter.autoresizingMask = [.width, .height]
       controller.scrollView.addFloatingSubview(gutter, for: .vertical)
