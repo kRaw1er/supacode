@@ -93,10 +93,23 @@ final class GutterRibbonController: NSView {
   // MARK: - Testable session core (document-space points)
 
   /// Begin a selection at a document-space point. `requireNumberColumn: true` on
-  /// down (pierre `:748-751`) — a down off the number column starts NO session.
+  /// down (pierre `:748-751`) — a down off the number column starts NO session —
+  /// EXCEPT on the revealed "+" itself, which seeds the session on its own line
+  /// (pierre `handlePointerDown` → `startGutterSelectionFromPointerDown` for a
+  /// `isGutterUtilityPath` hit, `:729-734`). Without that branch the button is inert:
+  /// it hangs outside the number band, so a click on it resolves to no line.
   /// Returns whether a session began.
   @discardableResult
   func beginSelection(atDocument point: CGPoint) -> Bool {
+    if let onButton = hoveredLineIfOnPlusButton(document: point) {
+      session = .gutterSelecting(anchor: onButton, current: onButton)
+      anchorRowIndex = hoverRowIndex
+      currentRowIndex = hoverRowIndex
+      hover = nil
+      hoverRowIndex = nil
+      setNeedsDisplay(bounds)
+      return true
+    }
     guard let hit = controller?.hitTest(point), hit.column.isNumberColumn,
       let line = hit.lineNumber, let side = hit.side
     else { return false }
@@ -163,6 +176,14 @@ final class GutterRibbonController: NSView {
   // MARK: - Hover
 
   func updateHover(atDocument point: CGPoint) {
+    // The revealed "+" overhangs its number column, so a pointer moving ONTO the button
+    // has left the number band — resolving the hover from the band alone would clear the
+    // very affordance the user is reaching for (it vanishes under the cursor). In pierre
+    // this cannot happen: the button is a DOM CHILD of the number cell
+    // (`showUtilityOnLine` → `numberElement.appendChild`, `:1136-1142`), so it is part of
+    // the hovered element. We have no view per line, so the button's rect joins the
+    // hovered line's region explicitly — the geometric equivalent of that containment.
+    if hoveredLineIfOnPlusButton(document: point) != nil { return }
     let resolved: SelectionPoint?
     let resolvedRow: Int?
     if let hit = controller?.hitTest(point), hit.column.isNumberColumn, let line = hit.lineNumber, let side = hit.side {
@@ -176,6 +197,16 @@ final class GutterRibbonController: NSView {
     hover = resolved
     hoverRowIndex = resolvedRow
     setNeedsDisplay(bounds)
+  }
+
+  /// The currently hovered line when `point` (document space) lands on ITS revealed "+"
+  /// button, else `nil`. The button only exists while a line is hovered, so this is both
+  /// the "keep the hover alive" test and the "the click hit the button" test.
+  func hoveredLineIfOnPlusButton(document point: CGPoint) -> SelectionPoint? {
+    guard let hover, let highlight = hoverHighlight, let controller else { return nil }
+    let button = Self.plusButtonRect(
+      for: hover, row: highlight.contentRow, mode: controller.mode, metrics: controller.lineMetrics)
+    return button.contains(point) ? hover : nil
   }
 
   /// The clip view scrolled (wheel / trackpad) under a possibly-stationary cursor. This
@@ -292,18 +323,40 @@ final class GutterRibbonController: NSView {
 
   // MARK: - NSResponder event routing
 
+  /// AppKit runs its tracking-area update pass off geometry / hierarchy changes, and this
+  /// overlay is mounted (`addFloatingSubview`) from `makeNSView` — before the scroll view
+  /// is in a window — then never resized again on its own. So arm the area explicitly the
+  /// moment it lands in a window; otherwise nothing tracks until some LATER event forces a
+  /// pass, which is why hover used to stay dead until the first click anywhere.
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+    updateTrackingAreas()
+  }
+
   override func updateTrackingAreas() {
     super.updateTrackingAreas()
     if let trackingArea { removeTrackingArea(trackingArea) }
-    let area = NSTrackingArea(
-      rect: bounds,
-      options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
-      owner: self,
-      userInfo: nil
-    )
+    let area = Self.makeTrackingArea(bounds: bounds, owner: self)
     addTrackingArea(area)
     trackingArea = area
   }
+
+  /// `.activeAlways`, NOT `.activeInKeyWindow`: the diff viewport is a passive reading
+  /// surface the pointer wanders into while focus sits elsewhere (the terminal, another
+  /// window). Key-window-scoped tracking made the gutter dead until a click moved focus
+  /// here — hover on a review gutter should never require a focus click first.
+  static func makeTrackingArea(bounds: NSRect, owner: AnyObject) -> NSTrackingArea {
+    NSTrackingArea(
+      rect: bounds,
+      options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+      owner: owner,
+      userInfo: nil
+    )
+  }
+
+  /// The first click must ACT, not just focus the window — the "+" is a one-shot
+  /// affordance, so swallowing its click to activate the window would make it need two.
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
   /// Only intercept events on a line's number gutter (or during an active drag);
   /// everything else falls through to the viewport (expander clicks, comment taps).
@@ -311,11 +364,21 @@ final class GutterRibbonController: NSView {
     if case .gutterSelecting = session { return self }
     guard let controller, let superview else { return nil }
     let doc = documentPoint(from: convert(point, from: superview))
+    // The revealed "+" hangs OUTSIDE the number band, so it needs its own claim or the
+    // click falls through to the viewport and the button is decorative-only.
+    if hoveredLineIfOnPlusButton(document: doc) != nil { return self }
     guard let hit = controller.hitTest(doc), hit.column.isNumberColumn, hit.lineNumber != nil else { return nil }
     return self
   }
 
   override func mouseMoved(with event: NSEvent) {
+    updateHover(atDocument: documentPoint(from: convert(event.locationInWindow, from: nil)))
+  }
+
+  /// The pointer can already be inside when the area arms (the overlay mounts under a
+  /// stationary cursor — open a file from the sidebar and never move the mouse), and then
+  /// the crossing IS the first hover event; waiting for a `mouseMoved` would show nothing.
+  override func mouseEntered(with event: NSEvent) {
     updateHover(atDocument: documentPoint(from: convert(event.locationInWindow, from: nil)))
   }
 

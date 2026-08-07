@@ -351,4 +351,81 @@ struct GutterRibbonControllerTests {
         == mid + DiffHitTest.changeBarWidth + metrics.gutterWidth
         + (metrics.lineHeight - GutterRenderer.numberTrailingPad))
   }
+
+  /// The "+" overhangs its column, so moving onto it leaves the number band. Resolving
+  /// the hover from the band alone made the button vanish under the cursor — unreachable.
+  /// pierre never hits this: its button is a DOM child of the number cell, so it IS the
+  /// hovered element. Geometric equivalent: the button's rect belongs to its line.
+  @Test func hoverSurvivesMovingOntoTheButton() throws {
+    let (controller, gutter) = makeSetup()
+    gutter.updateHover(atDocument: CGPoint(x: newNumX(controller), y: rowY(4)))
+    let highlight = try #require(gutter.hoverHighlight)
+    #expect(highlight.line == SelectionPoint(lineNumber: 4, side: .new))
+
+    let button = GutterRibbonController.plusButtonRect(
+      for: highlight.line, row: highlight.contentRow, mode: .unified, metrics: controller.lineMetrics)
+    let onButton = CGPoint(x: button.midX, y: button.midY)
+    // Precondition that gives the test its teeth: the button's own center hangs over the
+    // CONTENT column, so band-only hover resolution WOULD drop the hover right here.
+    #expect(controller.hitTest(onButton)?.column.isNumberColumn == false)
+
+    gutter.updateHover(atDocument: onButton)
+    #expect(gutter.hoverHighlight?.line == SelectionPoint(lineNumber: 4, side: .new))  // still revealed
+
+    // Past the button it clears normally — the exemption is the button's rect, not
+    // "anything to the right of the gutter".
+    gutter.updateHover(atDocument: CGPoint(x: contentX(controller), y: rowY(4)))
+    #expect(gutter.hoverHighlight == nil)
+  }
+
+  /// A click ON the "+" must open the composer for that line. The button hangs outside
+  /// the number band, so the `requireNumberColumn` down-rule alone left it decorative:
+  /// pressing the affordance did nothing (pierre routes an `isGutterUtilityPath` down
+  /// into `startGutterSelectionFromPointerDown`).
+  @Test func clickOnTheButtonCommitsItsOwnLine() throws {
+    let (controller, gutter) = makeSetup()
+    gutter.updateHover(atDocument: CGPoint(x: newNumX(controller), y: rowY(6)))
+    let highlight = try #require(gutter.hoverHighlight)
+    let button = GutterRibbonController.plusButtonRect(
+      for: highlight.line, row: highlight.contentRow, mode: .unified, metrics: controller.lineMetrics)
+
+    #expect(gutter.beginSelection(atDocument: CGPoint(x: button.midX, y: button.midY)))
+    let commit = gutter.commitSelection()
+    #expect(commit?.side == .new)
+    #expect(commit?.startLine == 6)  // the hovered line the button was revealed on
+    #expect(commit?.endLine == 6)  // a plain click is a single-line range
+  }
+
+  /// With no hover there is no button, so the same down starts nothing — the exemption is
+  /// scoped to a REVEALED button, not to a region of the viewport.
+  @Test func noButtonWithoutHoverKeepsTheDownInert() throws {
+    let (controller, gutter) = makeSetup()
+    let row = try #require(controller.lineRect(line: 6, side: .new))
+    let button = GutterRibbonController.plusButtonRect(
+      for: SelectionPoint(lineNumber: 6, side: .new), row: row, mode: .unified, metrics: controller.lineMetrics)
+    #expect(gutter.beginSelection(atDocument: CGPoint(x: button.midX, y: button.midY)) == false)
+    #expect(gutter.session == .idle)
+  }
+
+  // MARK: - The gutter must track hover WITHOUT a focus click first
+
+  /// The overlay is mounted from `makeNSView`, before the scroll view is in a window, and
+  /// never resizes on its own — so nothing triggered AppKit's tracking-area pass and the
+  /// gutter stayed dead until the first click. Landing in a window must arm it, and the
+  /// area must be `.activeAlways`: the pointer reads a diff while focus sits in the
+  /// terminal, and `.activeInKeyWindow` tracking is inert in a non-key window.
+  @Test func mountingInAWindowArmsAlwaysActiveTracking() throws {
+    let (_, gutter) = makeSetup()
+    let window = NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.borderless], backing: .buffered,
+      defer: true)
+    window.contentView?.addSubview(gutter)  // -> viewDidMoveToWindow
+
+    let area = try #require(gutter.trackingAreas.first, "no tracking area armed on mount — hover cannot fire")
+    #expect(area.options.contains(.activeAlways))
+    #expect(!area.options.contains(.activeInKeyWindow))
+    #expect(area.options.contains(.mouseMoved))
+    #expect(area.options.contains(.mouseEnteredAndExited))
+    #expect(gutter.acceptsFirstMouse(for: nil))  // the first click ACTS, not just focuses
+  }
 }
