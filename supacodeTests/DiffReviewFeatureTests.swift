@@ -569,6 +569,9 @@ struct DiffReviewFeatureTests {
       document.hunks = hunks
       document.loadState = .loaded
       document.isStale = false
+      // Hunks arriving where there were none is a content change: the viewport's
+      // re-projection trigger moves (the request `generation` alone never does).
+      document.contentVersion = 1
       // The load feeds the highlighter (production path): it captures the per-side blobs
       // and evaluates the size gate. Syntax runs are now a pure render-layer pull off the
       // span cache — no runs / delivery revision live on the document any more.
@@ -1100,6 +1103,95 @@ struct DiffReviewFeatureTests {
     await store.send(.diffLoaded(key: key, hunks: [hunk], old: nil, new: nil, token: 5))
     #expect(store.state.comments[id: comment.id]?.startLine == 5)
     #expect(store.state.comments[id: comment.id]?.orphaned == false)
+  }
+
+  /// The OPEN composer's draft re-anchors too. It isn't in `comments` until it commits,
+  /// so relocation used to skip it: an agent edit landing mid-typing left the half-written
+  /// note pinned to a line that had moved — its inline editor vanished from the row it was
+  /// attached to, and a later save recorded the stale range.
+  @Test(.dependencies) func diffLoadedRelocatesOpenComposerDraft() async {
+    let worktree = gitLocalWorktree()
+    let file = makeFile("a.swift")
+    let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = worktree
+    initialState.files = [file]
+    initialState.openDiffs = [key: DiffDocument(file: file, loadState: .loaded, generation: 5)]
+    initialState.diffLoadToken = 5
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+      $0.date = .constant(Date(timeIntervalSince1970: 1000))  // the new draft's `createdAt`
+    }
+    store.exhaustivity = .off
+
+    // Composing a brand-new comment on line 3, already half typed.
+    await store.send(
+      .openCommentComposer(
+        filePath: "a.swift", source: .workingTree, side: .new, startLine: 3, endLine: 3,
+        anchorSnippet: "target", contextBefore: ""))
+    await store.send(.composer(.presented(.binding(.set(\.draft.body, "half typed")))))
+
+    // The agent inserts two lines above: "target" is now line 5.
+    let line = { (number: Int, content: String) in
+      DiffLine(origin: .context, oldLineNumber: nil, newLineNumber: number, content: content, noNewlineAtEof: false)
+    }
+    let hunk = DiffHunk(
+      oldStart: 1, oldCount: 3, newStart: 1, newCount: 5, header: "@@ -1,3 +1,5 @@",
+      lines: [line(1, "a"), line(2, "b"), line(3, "c"), line(4, "d"), line(5, "target")]
+    )
+    await store.send(.diffLoaded(key: key, hunks: [hunk], old: nil, new: nil, token: 5))
+
+    // The composer stays open, follows its code, and keeps what was typed.
+    let draft = store.state.composer?.draft
+    #expect(draft?.startLine == 5)
+    #expect(draft?.endLine == 5)
+    #expect(draft?.orphaned == false)
+    #expect(draft?.body == "half typed")
+  }
+
+  /// A re-diff that returns the SAME hunks — an agent editing some other file, the
+  /// refresh tick every git change fires — must not bump `contentVersion`: that is the
+  /// viewport's re-projection trigger, and a re-projection throws away the open inline
+  /// composer along with the materialized slices.
+  @Test(.dependencies) func rediffWithIdenticalHunksLeavesContentVersionAndSlicesAlone() async {
+    let file = makeFile("a.swift")
+    let key = DiffDocumentKey(path: "a.swift", source: .workingTree)
+    let line = { (number: Int, content: String) in
+      DiffLine(origin: .context, oldLineNumber: nil, newLineNumber: number, content: content, noNewlineAtEof: false)
+    }
+    let hunk = DiffHunk(
+      oldStart: 1, oldCount: 2, newStart: 1, newCount: 2, header: "@@ -1,2 +1,2 @@",
+      lines: [line(1, "a"), line(2, "b")]
+    )
+    var document = DiffDocument(file: file, loadState: .loaded, generation: 7)
+    document.hunks = [hunk]
+    document.revealed = [0: [line(1, "a")]]
+    var initialState = DiffReviewFeature.State()
+    initialState.selectedWorktree = gitLocalWorktree()
+    initialState.files = [file]
+    initialState.openDiffs = [key: document]
+    initialState.diffLoadToken = 7
+    let store = TestStore(initialState: initialState) {
+      DiffReviewFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+    }
+    store.exhaustivity = .off
+
+    await store.send(.diffLoaded(key: key, hunks: [hunk], old: nil, new: nil, token: 7))
+    #expect(store.state.openDiffs[key]?.contentVersion == 0)
+    #expect(store.state.openDiffs[key]?.revealed[0]?.count == 1)  // still valid geometry
+
+    // Hunks that really changed DO bump it (and drop the now-stale slices).
+    let grown = DiffHunk(
+      oldStart: 1, oldCount: 2, newStart: 1, newCount: 3, header: "@@ -1,2 +1,3 @@",
+      lines: [line(1, "a"), line(2, "b"), line(3, "c")]
+    )
+    await store.send(.diffLoaded(key: key, hunks: [grown], old: nil, new: nil, token: 7))
+    #expect(store.state.openDiffs[key]?.contentVersion == 1)
+    #expect(store.state.openDiffs[key]?.revealed.isEmpty == true)
   }
 
   // MARK: - comments are isolated by source

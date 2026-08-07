@@ -125,6 +125,7 @@ struct DiffStreamReducerTests {
       document.hunks = hunks
       document.loadState = .loaded
       document.isStale = false
+      document.contentVersion = 1  // hunks really changed ⇒ the viewport re-projects
       // Post-P13 seam swap: the tree-backed viewport projects `hunks` directly —
       // no flat `rows`, no `revision` bump. Syntax runs are a render-layer pull off the
       // span cache now, so nothing highlight-related lands on the document.

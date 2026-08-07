@@ -6,6 +6,11 @@ import SwiftUI
 /// plus Delete when editing an existing thread.
 struct CommentComposerView: View {
   @Bindable var store: StoreOf<CommentComposer>
+  /// The editor takes focus as soon as it appears. Opening a composer should land the
+  /// caret in it (pierre / GitHub), and the inline editor is re-mounted whenever the
+  /// viewport re-projects — after a re-diff, say — so without this the user keeps typing
+  /// into a box that quietly stopped listening.
+  @FocusState private var bodyFocused: Bool
 
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
@@ -27,6 +32,8 @@ struct CommentComposerView: View {
 
       TextEditor(text: $store.draft.body)
         .font(.body)
+        .focused($bodyFocused)
+        .onAppear { bodyFocused = true }
         .frame(minWidth: 320, minHeight: 120)
         .overlay(alignment: .topLeading) {
           if store.draft.body.isEmpty {

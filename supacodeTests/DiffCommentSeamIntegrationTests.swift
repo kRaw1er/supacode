@@ -364,4 +364,72 @@ struct DiffCommentSeamIntegrationTests {
     #expect(thread.isEditing == true)
     #expect(thread.occupiesHostExclusively == true)
   }
+
+  // MARK: - RE-DIFF — an open composer survives the re-projection a git change triggers
+
+  /// Agent edits land while a comment is being written. The re-diff re-projects the tree
+  /// from the COMMITTED comments, and an uncommitted draft is by definition not among
+  /// them — so the transient editor is dropped by the rebuild. The reconcile has to
+  /// re-seed it off the live tree; trusting its own "already inserted" bookkeeping is
+  /// exactly how the composer used to disappear mid-sentence.
+  @Test func rediffReprojectionReSeedsTheOpenTransientComposer() async throws {
+    let coord = sizedCoordinator()
+    let (file, hunks) = commentFixture()
+    coord.filePath = "a.swift"
+    coord.source = .workingTree
+    coord.installInteraction()
+    coord.controller.apply(
+      tree: ChunkTreeBuilder.build(file: file, hunks: hunks, mode: .unified), mode: .unified, scrollPreserving: false)
+
+    let store = makeStore()
+    await store.send(
+      .openCommentComposer(
+        filePath: "a.swift", source: .workingTree, side: .new, startLine: 5, endLine: 5,
+        anchorSnippet: "l5", contextBefore: "l4"))
+    await store.send(.composer(.presented(.binding(.set(\.draft.body, "half typed")))))
+    let draft = try #require(store.state.composer).draft
+    let anchor = draft.id
+    syncComposer(coord, state: store.state)
+    coord.reconcileTransientComposer(draft: draft, comments: coord.comments)
+    #expect(coord.controller.tree.widgetNode(for: .commentThread(anchorID: anchor)) != nil)
+
+    // A re-diff arrives: `updateNSView` re-projects (the builder sees no comments, so the
+    // transient widget is gone from the fresh tree) and THEN reconciles, as it does live.
+    coord.controller.apply(
+      tree: ChunkTreeBuilder.build(file: file, hunks: hunks, mode: .unified, comments: coord.comments),
+      mode: .unified, scrollPreserving: true)
+    #expect(coord.controller.tree.widgetNode(for: .commentThread(anchorID: anchor)) == nil)
+    coord.reconcileTransientComposer(draft: draft, comments: coord.comments)
+
+    // The editor is back, on its own line, still bound to the typed-in draft — one copy.
+    #expect(threadWidgetCount(coord, anchor: anchor) == 1)
+    #expect(store.state.composer?.draft.body == "half typed")
+    let thread = try #require(resolveThread(coord, anchor: anchor))
+    #expect(thread.isEditing == true)
+  }
+
+  /// A draft whose line the re-diff swallowed keeps its editor too — appended at the end
+  /// of the document, the same fallback `ChunkTreeBuilder` uses for a committed comment
+  /// that lost its anchor. Losing the line must not silently eat what the user typed.
+  @Test func composerWhoseAnchorLineVanishedStillRendersItsEditor() {
+    let coord = sizedCoordinator()
+    let (file, hunks) = commentFixture()
+    coord.filePath = "a.swift"
+    coord.source = .workingTree
+    coord.installInteraction()
+    coord.controller.apply(
+      tree: ChunkTreeBuilder.build(file: file, hunks: hunks, mode: .unified), mode: .unified, scrollPreserving: false)
+
+    let anchor = UUID()
+    // Line 900 is nowhere in the 8-line fixture — the orphaned case.
+    coord.reconcileTransientComposer(draft: newComment(anchor, start: 900, end: 900), comments: [])
+
+    #expect(threadWidgetCount(coord, anchor: anchor) == 1)
+    let nodes = coord.controller.tree.inorderNodes()
+    let isLast = { () -> Bool in
+      guard case .widget(let widget) = nodes.last?.chunk else { return false }
+      return widget.key == .commentThread(anchorID: anchor)
+    }()
+    #expect(isLast)
+  }
 }

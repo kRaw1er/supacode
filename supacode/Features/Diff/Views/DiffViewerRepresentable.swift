@@ -29,8 +29,12 @@ struct DiffViewerRepresentable: NSViewRepresentable {
   /// never a re-projection.
   var commentContentRevision: Int = 0
   let mode: DiffViewMode
-  /// Monotonic load/expand token — a change re-projects the tree scroll-preserving.
-  let generation: Int
+  /// `DiffDocument.contentVersion` — bumped only when a load delivers DIFFERENT hunks.
+  /// A change re-projects the tree scroll-preserving. Deliberately NOT the document's
+  /// request `generation`: that token bumps when a re-diff is issued, a pass before the
+  /// new hunks exist, so re-projecting on it rebuilt from stale hunks and dropped the
+  /// open inline composer on every git tick.
+  let contentVersion: Int
   /// The tab identity (path + source) — the scope for `openCommentComposer` /
   /// `expandGap` actions the interaction controllers send back to the reducer.
   var filePath: String
@@ -111,7 +115,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     coordinator.lastSignature = signature
     coordinator.lastRenderSignature = renderSignature
     coordinator.lastMode = mode
-    coordinator.lastGeneration = generation
+    coordinator.lastContentVersion = contentVersion
     coordinator.lastExpansion = expansion
     coordinator.lastRevealedCounts = revealed.mapValues(\.count)
     coordinator.lastHighlightBlobKey = highlightBlobKey
@@ -126,13 +130,12 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     controller.widgetResolver = makeResolver(coordinator)
     coordinator.gutter?.frame = controller.scrollView.contentView.frame
 
-    // Change classification. `generation` bumps on BOTH a re-diff and an incremental
-    // expand — the two are told apart by the expansion delta: a generation bump WITHOUT
-    // an expansion change is a real re-diff (rebuild); a bump WITH one is an expand
-    // (incremental splice, no rebuild — F7).
+    // Change classification. `contentVersion` moves ONLY when a load delivered different
+    // hunks, so it is the re-diff signal on its own; an expand never touches it and
+    // splices incrementally through the expansion delta instead (F7).
     let sigChanged = coordinator.lastSignature != signature
     let renderChanged = coordinator.lastRenderSignature != renderSignature
-    let generationChanged = coordinator.lastGeneration != generation
+    let contentVersionChanged = coordinator.lastContentVersion != contentVersion
     let expansionChanged = coordinator.lastExpansion != expansion
     let revealedCounts = revealed.mapValues(\.count)
     let revealedChanged = coordinator.lastRevealedCounts != revealedCounts
@@ -141,8 +144,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     // paired in split), so a file that carries comments re-projects instead — else the
     // threads stay cut at the previous mode's row and drift off their line.
     let modeChanged = coordinator.lastMode != mode
-    let contentChanged =
-      sigChanged || (generationChanged && !expansionChanged) || (modeChanged && !comments.isEmpty)
+    let contentChanged = sigChanged || contentVersionChanged || (modeChanged && !comments.isEmpty)
 
     if contentChanged {
       // Content changed (re-diff / comment insert-remove / composer open-close): the
@@ -198,7 +200,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     coordinator.lastSignature = signature
     coordinator.lastRenderSignature = renderSignature
     coordinator.lastMode = mode
-    coordinator.lastGeneration = generation
+    coordinator.lastContentVersion = contentVersion
     coordinator.lastExpansion = expansion
     coordinator.lastRevealedCounts = revealedCounts
   }
@@ -256,8 +258,8 @@ struct DiffViewerRepresentable: NSViewRepresentable {
   /// The content signature that triggers a full tree re-projection. `comments` covers
   /// a thread insert / remove / edit; `wordDiffEnabled` re-renders on a gate flip;
   /// `composerAnchorID` flips an existing thread's display↔editing (its widget refuses
-  /// recycle, so the re-project mounts a fresh editing host). `generation` (a re-diff
-  /// vs expand token) and `expansion` are classified separately in `updateNSView`.
+  /// recycle, so the re-project mounts a fresh editing host). `contentVersion` (a real
+  /// re-diff) and `expansion` are classified separately in `updateNSView`.
   private var signature: Coordinator.Signature {
     Coordinator.Signature(commentAnchorRevision: commentAnchorRevision)
   }
@@ -302,7 +304,7 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     var lastRenderSignature: RenderSignature?
     var lastMode: DiffViewMode = .unified
     var lastHighlightBlobKey: String = ""
-    var lastGeneration: Int = .min
+    var lastContentVersion: Int = .min
     var lastExpansion: ExpansionState = .collapsed
     var lastRevealedCounts: [Int: Int] = [:]
 
@@ -497,6 +499,13 @@ struct DiffViewerRepresentable: NSViewRepresentable {
     /// with the anchor still uncommitted) removes it. A commit lands the anchor in
     /// `comments`, so the content re-project renders the display thread and the guard
     /// below keeps us from removing that committed widget.
+    ///
+    /// Runs AFTER the re-projection in `updateNSView` and re-seeds off the LIVE tree
+    /// rather than off `transientCommentAnchorID` alone: the transient widget exists only
+    /// in the tree (the builder projects `comments`, which a not-yet-committed draft is by
+    /// definition absent from), so every rebuild drops it. Bookkeeping alone would then
+    /// believe the editor is still mounted and the user's half-typed comment would just
+    /// disappear on the next re-diff.
     func reconcileTransientComposer(draft: ReviewComment?, comments: [ReviewComment]) {
       let openAnchor = draft?.id
       // Drop a stale transient editor whose composer moved on / closed and that never
@@ -507,8 +516,10 @@ struct DiffViewerRepresentable: NSViewRepresentable {
         controller.removeCommentWidget(anchorID: transient)
         transientCommentAnchorID = nil
       }
-      // Seed a fresh transient editor when the composer opens on a brand-new anchor.
-      if let draft, transientCommentAnchorID != draft.id, !comments.contains(where: { $0.id == draft.id }) {
+      // Seed (or re-seed after a rebuild) the transient editor for a brand-new anchor.
+      if let draft, !comments.contains(where: { $0.id == draft.id }),
+        !controller.hasCommentWidget(anchorID: draft.id)
+      {
         controller.insertCommentWidget(
           side: draft.side, startLine: draft.startLine, endLine: draft.endLine, anchorID: draft.id,
           estimatedHeight: ChunkLayoutMetrics.production.commentThreadHeight)

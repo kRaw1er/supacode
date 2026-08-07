@@ -38,6 +38,13 @@ struct DiffDocument: Equatable, Sendable {
   /// Generation guard for this document's in-flight `diff` request (8.1). A
   /// returning `.diffLoaded/.diffFailed` whose token no longer matches is dropped.
   var generation: Int = 0
+  /// Bumped ONLY when `hunks` actually arrive DIFFERENT — the viewport's re-projection
+  /// trigger. `generation` is a request token: it bumps when a re-diff is *issued*, one
+  /// SwiftUI pass BEFORE the new hunks exist, so re-projecting on it rebuilt the tree
+  /// from the OLD hunks (throwing away an open inline composer) and then never rebuilt
+  /// again when the new ones landed. A git tick that leaves this file's diff unchanged
+  /// — the common case while an agent edits elsewhere — bumps nothing at all.
+  var contentVersion: Int = 0
 
   // MARK: Phase 4 — neon syntax highlighting
 
@@ -756,9 +763,14 @@ struct DiffReviewFeature {
 
       case .diffLoaded(let key, let hunks, let old, let new, let token):
         guard var document = state.openDiffs[key], document.generation == token else { return .none }
+        // Only a REAL content change re-projects the viewport (and only then are the
+        // materialized slices stale). A refresh tick that re-diffs this file to the
+        // same hunks leaves the tree — and any open inline composer inside it — alone.
+        let hunksChanged = document.hunks != hunks
         document.hunks = hunks
         document.loadState = .loaded
         document.isStale = false
+        if hunksChanged { document.contentVersion &+= 1 }
         // Feed the highlighter on the PRODUCTION path (streaming is gated off) — the
         // same blob + gate setup the streaming `.streamFileReady` path runs. Without
         // this the viewer renders every file plain (the "all text white" bug).
@@ -773,8 +785,9 @@ struct DiffReviewFeature {
         // comment as orphaned.
         Self.relocateComments(&state, key: key, lines: Self.anchorableLines(document))
         // A re-diff re-materializes revealed slices against the fresh geometry; the
-        // declarative `expansion` (gap-index keyed) persists across the re-diff.
-        document.revealed.removeAll()
+        // declarative `expansion` (gap-index keyed) persists across the re-diff. Unchanged
+        // hunks ⇒ unchanged geometry, so the slices are still valid and are kept.
+        if hunksChanged { document.revealed.removeAll() }
         state.openDiffs[key] = document
         return .none
 
@@ -803,9 +816,13 @@ struct DiffReviewFeature {
         // tree-backed viewport re-projects progressively as files stream in.
         guard batch.file.id == key.path else { return feed }
         document.file = batch.file
+        // Same content-vs-request-token split as `.diffLoaded`: the viewport re-projects
+        // off `contentVersion`, which moves only when the hunks really differ.
+        let hunksChanged = document.hunks != batch.hunks
         document.hunks = batch.hunks
         document.loadState = .loaded
         document.isStale = false
+        if hunksChanged { document.contentVersion &+= 1 }
         // Capture the correct blob per side + evaluate the size / render gates. The
         // SAME helper runs on the on-demand `.diffLoaded` path (the production loader —
         // streaming is gated off), so both load paths feed the highlighter identically.
@@ -818,8 +835,9 @@ struct DiffReviewFeature {
         // being outside the diff.
         Self.relocateComments(&state, key: key, lines: Self.anchorableLines(document))
         // A re-diff re-materializes revealed slices; the declarative `expansion`
-        // (gap-index keyed) survives the line shift (Phase 7).
-        document.revealed.removeAll()
+        // (gap-index keyed) survives the line shift (Phase 7). Unchanged hunks keep
+        // their slices — the geometry they were sliced against didn't move.
+        if hunksChanged { document.revealed.removeAll() }
         state.openDiffs[key] = document
         return feed
 
@@ -1276,8 +1294,23 @@ struct DiffReviewFeature {
       relocated[id: comment.id] = next
       changed = true
     }
-    guard changed else { return }
-    state.comments = relocated
+    if changed { state.comments = relocated }
+    Self.relocateComposerDraft(&state, key: key, lines: lines)
+  }
+
+  /// Re-anchor the OPEN composer's draft on the same re-diffed lines. The draft is not
+  /// in `state.comments` until it commits, so relocation would otherwise skip it: a
+  /// half-typed note would stay pinned to its pre-edit line numbers, land its inline
+  /// editor on the wrong row (or on no row at all, which reads as "my comment box just
+  /// vanished"), and finally commit that stale range. The body is untouched — only the
+  /// anchored range and the `orphaned` flag move, exactly as for a committed comment.
+  private static func relocateComposerDraft(_ state: inout State, key: DiffDocumentKey, lines: [DiffLine]) {
+    guard let draft = state.composer?.draft,
+      draft.filePath == key.path, draft.source == key.source
+    else { return }
+    let next = CommentAnchor.relocate(draft, in: lines, side: draft.side)
+    guard next != draft else { return }
+    state.composer?.draft = next
   }
 
   /// Single dismiss-only alert for the missing-terminal case (5.7).

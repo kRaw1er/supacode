@@ -1204,24 +1204,41 @@ final class DiffViewportController: NSObject {
   /// segment after the commented row when needed, then `insert(after:)` the
   /// `.widget(.commentThread)` — O(log n). The widget's height reserves via its
   /// `estimatedHeight`, pushing the lines below it down while lines above are
-  /// unaffected. Returns the inserted node id, or `nil` when the line isn't found.
+  /// unaffected. A line the tree doesn't render falls back to an append at the end
+  /// (see below); the return is the inserted node id.
   @discardableResult
   func insertCommentWidget(
     side: DiffSide, startLine: Int, endLine: Int, anchorID: UUID, estimatedHeight: CGFloat
   ) -> ChunkID? {
-    guard let location = lineLocation(line: endLine, side: side), let node = tree.nodesByID[location.chunkID]
-    else { return nil }
     let widget = Widget(
       key: .commentThread(anchorID: anchorID),
       estimatedHeight: estimatedHeight,
       payload: .commentThread(anchorID: anchorID)
     )
-    let anchorChunk = tree.splitAnchor(node.id, afterRenderedRow: location.localRow, mode: mode)
-    let inserted = tree.insert(.widget(widget), after: anchorChunk)
+    let inserted: ChunkID?
+    if let location = lineLocation(line: endLine, side: side), let node = tree.nodesByID[location.chunkID] {
+      let anchorChunk = tree.splitAnchor(node.id, afterRenderedRow: location.localRow, mode: mode)
+      inserted = tree.insert(.widget(widget), after: anchorChunk)
+    } else {
+      // The anchored line isn't rendered (an edit swallowed it, or it sits in a gap that
+      // hasn't been revealed): append at the end rather than dropping the widget, exactly
+      // as `ChunkTreeBuilder.insertComment` does for a committed comment. A thread — or a
+      // composer still holding typed text — is never silently discarded for having lost
+      // its line; it surfaces at the foot of the file, flagged orphaned.
+      inserted = tree.insert(.widget(widget), after: tree.lastNodeID)
+    }
     let scrollAnchor = captureAnchor()
     restoreScrollAnchor(scrollAnchor)
     axProvider?.reload()  // a new comment thread widget grows the materialized-row count
     return inserted
+  }
+
+  /// Whether a comment-thread widget for `anchorID` is currently in the tree. The
+  /// transient-composer reconcile asks the LIVE tree instead of trusting its own
+  /// bookkeeping: a re-projection rebuilds the tree from the committed comments alone,
+  /// which silently drops the widget an uncommitted draft is being typed into.
+  func hasCommentWidget(anchorID: UUID) -> Bool {
+    tree.widgetNode(for: .commentThread(anchorID: anchorID)) != nil
   }
 
   /// Remove the comment-thread widget for `anchorID` (cancel path): the lines

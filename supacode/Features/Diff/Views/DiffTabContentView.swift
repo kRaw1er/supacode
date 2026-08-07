@@ -275,7 +275,7 @@ struct DiffTabContentView: View {
           // (`SplitColumnLayout.effectiveMode`); the stored flag stays put so widening
           // restores split. Unified is never coerced.
           mode: SplitColumnLayout.effectiveMode(stored: store.diffViewMode, availableWidth: availableWidth),
-          generation: document.generation,
+          contentVersion: document.contentVersion,
           filePath: filePath,
           source: source,
           expansion: document.expansion,
